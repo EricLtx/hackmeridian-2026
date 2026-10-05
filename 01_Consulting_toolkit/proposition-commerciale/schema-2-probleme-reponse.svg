@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 532" font-family="'Segoe UI', Arial, sans-serif">
+  <title>Schéma 2 — Le problème et la réponse du contrat</title>
+  <style>
+    .day { font-size: 13px; font-weight: 700; fill: #475569; text-anchor: middle; }
+    .row { font-size: 12.5px; font-weight: 700; fill: #1E293B; }
+    .sep { stroke: #E2E8F0; stroke-width: 1; }
+    .guide { stroke: #94A3B8; stroke-width: 1; stroke-dasharray: 3 4; }
+    .note { font-size: 12px; fill: #1F2937; }
+  </style>
+
+  <!-- Jours -->
+  <text class="day" x="236" y="24">Vendredi</text>
+  <text class="day" x="449" y="24">Samedi</text>
+  <text class="day" x="661" y="24">Dimanche</text>
+  <text class="day" x="874" y="24">Lundi</text>
+  <line class="sep" x1="342.5" y1="34" x2="342.5" y2="444"/>
+  <line class="sep" x1="555" y1="34" x2="555" y2="444"/>
+  <line class="sep" x1="767.5" y1="34" x2="767.5" y2="444"/>
+
+  <!-- Paiements -->
+  <text class="row" x="14" y="56">Paiements</text>
+  <text class="row" x="14" y="72">sur Stellar</text>
+  <rect x="130" y="44" width="850" height="30" rx="6" fill="#0F766E"/>
+  <text x="555" y="64" text-anchor="middle" font-size="13" font-weight="700" fill="#FFFFFF">Ouverts 24 h / 24, 7 jours sur 7</text>
+
+  <!-- Guichet -->
+  <text class="row" x="14" y="104">Guichet</text>
+  <text class="row" x="14" y="120">du fonds</text>
+  <rect x="130" y="92" width="850" height="30" rx="6" fill="#F1F5F9" stroke="#CBD5E1"/>
+  <text x="541" y="112" text-anchor="middle" font-size="13" font-weight="700" fill="#64748B">Fermé pendant 72 heures</text>
+  <rect x="211" y="87" width="24" height="40" rx="4" fill="#6D28D9"/>
+  <rect x="848.5" y="87" width="24" height="40" rx="4" fill="#6D28D9"/>
+  <text x="223" y="143" text-anchor="middle" font-size="11.5" font-weight="600" fill="#6D28D9">guichet du vendredi</text>
+  <text x="860.5" y="143" text-anchor="middle" font-size="11.5" font-weight="600" fill="#6D28D9">guichet du lundi</text>
+
+  <!-- Repères du scénario -->
+  <line class="guide" x1="289.4" y1="150" x2="289.4" y2="388"/>
+  <line class="guide" x1="856" y1="150" x2="856" y2="388"/>
+
+  <line x1="14" y1="160" x2="986" y2="160" stroke="#CBD5E1" stroke-width="1"/>
+
+  <!-- Sans le contrat -->
+  <text x="14" y="190" font-size="14" font-weight="700" fill="#9F1239">Sans</text>
+  <text x="14" y="208" font-size="14" font-weight="700" fill="#9F1239">le contrat</text>
+  <rect x="130" y="172" width="850" height="34" rx="6" fill="#FDF2F4" stroke="#F1C4CD"/>
+  <text x="555" y="194" text-anchor="middle" font-size="12.5" font-weight="600" fill="#9F1239">Réserve de 2 M$ gardée en stablecoins toute l'année : rendement 0 %</text>
+  <circle cx="289.4" cy="230" r="5" fill="#9F1239"/>
+  <text class="note" x="302" y="234">Vendredi 18 h : besoin imprévu de 1 M$, payé avec la réserve</text>
+  <text x="980" y="262" text-anchor="end" font-size="16" font-weight="700" fill="#9F1239">Coût : 67 400 $ par an</text>
+
+  <line x1="14" y1="278" x2="986" y2="278" stroke="#CBD5E1" stroke-width="1"/>
+
+  <!-- Avec le contrat -->
+  <text x="14" y="308" font-size="14" font-weight="700" fill="#0F766E">Avec</text>
+  <text x="14" y="326" font-size="14" font-weight="700" fill="#0F766E">le contrat</text>
+  <rect x="130" y="290" width="850" height="34" rx="6" fill="#F3EEFC" stroke="#D6C7F5"/>
+  <text x="555" y="312" text-anchor="middle" font-size="12.5" font-weight="600" fill="#5B21B6">Réserve de 2 M$ placée dans le fonds toute l'année : rendement 3,37 %</text>
+
+  <rect x="289.4" y="344" width="566.6" height="34" rx="6" fill="#0F766E"/>
+  <text x="572.7" y="366" text-anchor="middle" font-size="12.5" font-weight="700" fill="#FFFFFF">Pension : 1 M$ emprunté pendant 64 heures</text>
+
+  <text class="note" x="289.4" y="400">Vendredi 18 h : parts déposées,</text>
+  <text class="note" x="289.4" y="416">stablecoins reçus en 5 secondes</text>
+  <text class="note" x="856" y="400" text-anchor="end">Lundi 10 h : remboursement,</text>
+  <text class="note" x="856" y="416" text-anchor="end">parts récupérées</text>
+
+  <text x="980" y="466" text-anchor="end" font-size="13" fill="#1F2937">Coût du week-end : 584 $, à un taux de pension de 8 %</text>
+  <text x="980" y="494" text-anchor="end" font-size="17" font-weight="700" fill="#0F766E">Gain : environ 52 000 $ par an</text>
+  <text x="980" y="514" text-anchor="end" font-size="11.5" fill="#64748B">scénario central : un emprunt de 1 M$ un week-end sur deux</text>
+</svg>
