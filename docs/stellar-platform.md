@@ -1,6 +1,6 @@
 # La plateforme Stellar en un coup d'œil
 
-Ces notes résument ce qu'on peut construire sur Stellar pendant HackMeridian. Elles ont été rédigées à partir du skill officiel [`stellar-dev`](https://github.com/stellar/stellar-dev-skill) (v1.2.0) et de [developers.stellar.org](https://developers.stellar.org). Dans Claude Code, chaque section renvoie au skill qui la détaille : `/stellar-dev:<skill>`.
+Ces notes résument ce qu'on peut construire sur Stellar. Elles ont été rédigées à partir du skill officiel [`stellar-dev`](https://github.com/stellar/stellar-dev-skill) (v1.2.0) et de [developers.stellar.org](https://developers.stellar.org). Dans Claude Code, chaque section renvoie au skill qui la détaille : `/stellar-dev:<skill>`.
 
 ## À quoi sert Stellar
 

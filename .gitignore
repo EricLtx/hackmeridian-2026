@@ -7,3 +7,6 @@ target
 
 # Claude Code personal settings
 .claude/settings.local.json
+
+# Third-party reference documents, kept locally only
+/references/

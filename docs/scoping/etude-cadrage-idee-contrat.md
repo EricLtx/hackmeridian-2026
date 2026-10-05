@@ -4,7 +4,7 @@ Date : 5 octobre 2026 · Statut : **cadrage terminé, en attente de validation a
 
 > **Version consolidée :** `proposition-commerciale-guichet-de-nuit.pdf` (sources dans `proposition-commerciale/`). Elle reprend cette étude avec des chiffres vérifiés à la source, un scénario de taux à 11 % et le taux de Blend comme repère. En cas d'écart, la proposition fait foi.
 
-Méthodes reprises des deux toolkits du répertoire : Situation / Complication / Question et pyramide de Minto, cadre « Entering a new market » (désirabilité, faisabilité, viabilité), barrières à l'entrée, matrice impact / effort, SWOT et matrice de risques.
+Méthodes reprises de deux toolkits de conseil, conservés hors du dépôt : Situation / Complication / Question et pyramide de Minto, cadre « Entering a new market » (désirabilité, faisabilité, viabilité), barrières à l'entrée, matrice impact / effort, SWOT et matrice de risques.
 
 ---
 
