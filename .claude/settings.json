@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "stellar-dev": {
+      "source": { "source": "github", "repo": "stellar/stellar-dev-skill" }
+    }
+  },
+  "enabledPlugins": {
+    "stellar-dev@stellar-dev": true
+  }
+}
