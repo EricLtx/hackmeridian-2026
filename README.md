@@ -72,15 +72,17 @@ The contract lives in `contracts/night-window/src/lib.rs`; its tests in `src/tes
 | `seize(repo_id)` | lender | declared, returns `NotImplemented` |
 | `get_offer(offer_id)`, `get_repo(repo_id)` | anyone | done |
 
-The specification still has to settle: the price staleness window, the interest formula for early repurchase, loan sizing from price, haircut and token decimals, and what the lender may do with seized shares.
+The framing decisions for the lifecycle are recorded in [docs/securite.md](docs/securite.md) (section 6, S1 to S19): price freshness window and absolute price band per fund, interest formula and rounding, loan sizing from price, haircut and token decimals, MiCA-only stablecoin allowlist, pause limited to new entries, lenders restricted to holders allowlisted by the issuer (which settles seized shares), multisig administrator behind a time delay, minimum term, launch caps, first-loss buffer, sponsor offers. The functional specification turns them into states, functions, errors and tests.
 
 ## Roadmap
 
 - [x] Rust workspace, pinned toolchain, CI with security lints and dependency audit
 - [x] Administration, upgrade path, fund registry, SEP-40 price lookup, tests
-- [ ] Specification of the repo lifecycle
-- [ ] Lifecycle: offers, open, repurchase, seize, withdraw, with property tests on the invariants
-- [ ] STRIDE threat model and on-chain monitoring plan
+- [x] Security baseline with threat model, invariants and the framing decisions S1 to S19 (October 2026)
+- [x] STRIDE threat model initiated with a first monitoring plan; CI green on GitHub (October 2026)
+- [ ] Specification of the repo lifecycle (states, functions, errors, tests)
+- [ ] Lifecycle: offers including sponsor offers, open, repurchase, seize, withdraw, with property tests on the invariants
+- [ ] Monitoring plan rehearsed on testnet with at least one real trigger
 - [ ] Multisig administrator, time delay on upgrades and oracle changes, emergency pause
 - [ ] Testnet deployment with test fund tokens and a test oracle
 - [ ] Minimal web interface
