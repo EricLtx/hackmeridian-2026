@@ -60,18 +60,18 @@ struct Fixture {
     env: Env,
     admin: Address,
     contract_id: Address,
-    client: NightWindowClient<'static>,
+    client: OpenWindowClient<'static>,
 }
 
 fn setup() -> Fixture {
     let env = Env::default();
     let admin = Address::generate(&env);
-    let contract_id = env.register(NightWindow, (admin.clone(),));
+    let contract_id = env.register(OpenWindow, (admin.clone(),));
     // The client borrows the Env; leaking a clone keeps the fixture simple.
     let leaked_env: &'static Env = std::boxed::Box::leak(std::boxed::Box::new(env.clone()));
     let leaked_id: &'static Address =
         std::boxed::Box::leak(std::boxed::Box::new(contract_id.clone()));
-    let client = NightWindowClient::new(leaked_env, leaked_id);
+    let client = OpenWindowClient::new(leaked_env, leaked_id);
     Fixture {
         env,
         admin,

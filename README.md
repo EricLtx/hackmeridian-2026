@@ -1,4 +1,4 @@
-# Night Window
+# Open Window
 
 [![CI](https://github.com/EricLtx/hackmeridian-2026/actions/workflows/ci.yml/badge.svg)](https://github.com/EricLtx/hackmeridian-2026/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -6,7 +6,7 @@
 
 An on-chain repo contract on Stellar. Holders of tokenized money market funds borrow stablecoins against their shares at any hour, for a fixed term and a fixed price, when the fund's redemption window is closed.
 
-> **Status:** early development, specification being refined (October 2026). The contract is scaffolded and tested (administration, fund registry, upgrade path, SEP-40 price lookup); the repo lifecycle itself is declared and waits for the specification. Nothing is deployed on mainnet. "Night Window" (French: *guichet de nuit*) is a working name.
+> **Status:** early development, specification being refined (October 2026). The contract is scaffolded and tested (administration, fund registry, upgrade path, SEP-40 price lookup); the repo lifecycle itself is declared and waits for the specification. Nothing is deployed on mainnet. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
 
 ## Why
 
@@ -14,7 +14,7 @@ An on-chain repo contract on Stellar. Holders of tokenized money market funds bo
 - **So holders keep a buffer of idle stablecoins** next to their fund shares, and that buffer earns nothing.
 - **A repo closes the gap.** The holder locks shares, receives stablecoins in the same transaction, and gets the shares back at a price fixed in advance. Lenders earn short-term interest secured by fund shares. Offers can come from the market, or from the fund issuer itself when it wants to back the liquidity of its own shares without building a dedicated facility.
 
-Two parties, a fixed term, a known price, and you get your shares back. Banks do this every night; Night Window does it on a public payment network, with offers deposited in advance by whoever wants to lend.
+Two parties, a fixed term, a known price, and you get your shares back. Banks do this every night; Open Window does it on a public payment network, with offers deposited in advance by whoever wants to lend.
 
 ## How it works
 
@@ -29,7 +29,7 @@ Two parties, a fixed term, a known price, and you get your shares back. Banks do
 ```mermaid
 sequenceDiagram
     participant L as Lender
-    participant C as Night Window
+    participant C as Open Window
     participant O as SEP-40 oracle
     participant B as Borrower
     L->>C: create_offer(stablecoins, rate, max term, accepted funds)
@@ -51,6 +51,7 @@ sequenceDiagram
 - Issuer-agnostic: any permissioned fund share can be registered with its own oracle, haircut and allowlist. The contract address itself has to be allowlisted by the issuer, like any other holder, and so do lenders and borrowers.
 - The share price comes from a NAV-based feed and is checked against an absolute band per fund, not a relative deviation from the previous reading: a money market fund share barely moves in a week, so a large jump is a faulty price, not a market move.
 - An administrator keeps the registry of accepted funds and can upgrade the code. Error codes and exported types are append-only.
+- Footprint: a repo is three transactions (offer, open, repurchase). The network's published estimates are about 0.2 Wh and 0.06 g CO2 per transaction (SDF and PwC, 2022; an independent 2021 measurement gives 0.222 Wh), so one repo costs well under one watt-hour. The design keeps it that way: constant cost per operation, no loops, minimal storage with TTL management, no polling.
 - Planned controls, documented in [docs/securite.md](docs/securite.md): an allowlist of accepted stablecoins, an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure, and an administrator held by a multisig with a time delay on upgrades and oracle changes.
 
 ## Contract interface

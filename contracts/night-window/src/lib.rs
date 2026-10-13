@@ -1,5 +1,6 @@
 #![no_std]
-//! Night Window: an on-chain repo contract on Stellar.
+//! Open Window (crate `night-window`): a stablecoin liquidity facility for
+//! tokenized fund shares on Stellar, built as an on-chain repo contract.
 //!
 //! Holders of tokenized money market fund shares borrow stablecoins against
 //! their shares, at any hour, for a fixed term and a fixed rate. Lenders fund
@@ -30,7 +31,7 @@ use soroban_sdk::{
 contractmeta!(key = "binver", val = "0.1.0");
 contractmeta!(
     key = "desc",
-    val = "Night Window: repo of tokenized money market fund shares"
+    val = "Open Window: stablecoin liquidity facility for tokenized fund shares (repo)"
 );
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
@@ -219,10 +220,10 @@ pub struct MaxTermChanged {
 // ---------------------------------------------------------------------------
 
 #[contract]
-pub struct NightWindow;
+pub struct OpenWindow;
 
 #[contractimpl]
-impl NightWindow {
+impl OpenWindow {
     /// Deploys the contract with its administrator. Runs once, at deploy time.
     pub fn __constructor(env: Env, admin: Address) {
         env.storage().instance().set(&DataKey::Admin, &admin);

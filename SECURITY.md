@@ -1,6 +1,6 @@
 # Security policy
 
-Night Window is under development. No contract is deployed on mainnet, and testnet deployments hold no real value. The security baseline, threat model and invariants are documented in [docs/securite.md](docs/securite.md) (French).
+Open Window (crate `night-window`) is under development. No contract is deployed on mainnet, and testnet deployments hold no real value. The security baseline, threat model and invariants are documented in [docs/securite.md](docs/securite.md) (French).
 
 ## Reporting a vulnerability
 

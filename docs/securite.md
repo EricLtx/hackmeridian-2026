@@ -1,4 +1,4 @@
-# Bases de cybersécurité du contrat Night Window
+# Bases de cybersécurité du contrat Open Window (crate `night-window`)
 
 Date : 6 octobre 2026, révisé le 13 octobre 2026 · Statut : **décisions de cadrage prises (S1 à S19), à formaliser dans la spécification puis à implémenter** · Référence métier : l'étude de cadrage interne, conservée hors du dépôt public · Modèle de menace STRIDE : [modele-menace-stride.md](modele-menace-stride.md)
 
@@ -64,7 +64,7 @@ Ces invariants sont la base des tests de propriété et de la revue. Ils sont é
 | I8 | Les codes d'erreur et les variantes de types exportés ne sont jamais renumérotés ni remodelés ; on ajoute | **En place** comme règle (commentaire dans `lib.rs`, AGENTS.md) |
 | I9 | Les conditions d'une pension (taux, échéance, décote appliquée) sont figées à l'ouverture ; retirer un fonds du registre ou changer sa décote n'affecte pas les pensions ouvertes | Documenté dans `remove_fund`, à garantir dans `open_repo` |
 
-## 4. Classes de vulnérabilité appliquées à Night Window
+## 4. Classes de vulnérabilité appliquées à Open Window
 
 | Classe | Risque pour ce contrat | Réponse |
 |---|---|---|

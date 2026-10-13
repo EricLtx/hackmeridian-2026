@@ -1,4 +1,4 @@
-# Modèle de menace STRIDE du contrat Night Window
+# Modèle de menace STRIDE du contrat Open Window (crate `night-window`)
 
 Date : 13 octobre 2026 · Statut : **initié, à compléter avec l'implémentation du cycle de vie** · Méthode : guide de modèle de menace de Stellar (quatre questions, six catégories STRIDE, au moins un problème par catégorie, un traitement par problème) · Document frère : [securite.md](securite.md), qui porte les invariants, les classes de vulnérabilité et les décisions S1 à S19.
 
