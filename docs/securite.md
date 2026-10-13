@@ -1,6 +1,6 @@
 # Bases de cybersécurité du contrat Open Window (crate `night-window`)
 
-Date : 6 octobre 2026, révisé le 13 octobre 2026 · Statut : **décisions de cadrage prises (S1 à S19), à formaliser dans la spécification puis à implémenter** · Référence métier : l'étude de cadrage interne, conservée hors du dépôt public · Modèle de menace STRIDE : [modele-menace-stride.md](modele-menace-stride.md)
+Date : 6 octobre 2026, révisé le 13 octobre 2026 · Statut : **décisions de cadrage prises (S1 à S19, DORA D1 et D2), à formaliser dans la spécification puis à implémenter** · Référence métier : l'étude de cadrage interne, conservée hors du dépôt public · Modèle de menace STRIDE : [modele-menace-stride.md](modele-menace-stride.md)
 
 Ce document fixe ce qui est déjà en place dans le code et la chaîne d'outils, ce que la spécification devra trancher, et les règles de revue qui s'appliquent à chaque évolution du contrat. Il suit la grille de revue du skill officiel `stellar-dev` (fichier `security.md`), appliquée au cas d'une mise en pension.
 
@@ -143,7 +143,41 @@ Chaque décision ci-dessous a été prise lors du peaufinement du cadrage, sur l
 - **Standards DeFi de la SDF (20 juillet 2026)** : audit publié avec version du code ; politique de divulgation (`SECURITY.md`) et bug bounty à dimensionner sur la valeur exposée ; procédures de risque écrites ; stress tests ; tampon de première perte (S16) ; aucun flux de prix unique pour une décision qui touche au collatéral (S1, S2) ; multisig et délai d'attente (S7) ; pouvoirs d'urgence étroits (S6) ; détection en minutes (S17) ; rapport préliminaire sous 48 heures ; page publique des risques.
 - **ESMA, appel à contributions du 9 octobre 2026, section 6** : les risques qu'elle nomme, gestion des clés, permissions, exécution des contrats, privilèges administratifs, perte ou compromission de clés privées, dysfonctionnement de contrat, intervention de gouvernance, conversion sous stress du collatéral, correspondent aux scénarios de 6.1 et aux décisions S6, S7, S9 et S15.
 - **FMI, rapport de stabilité financière d'octobre 2026, chapitre 3** : l'avertissement selon lequel le collatéral programmable et le règlement instantané peuvent accélérer les liquidations forcées ne s'applique pas à cette conception : durée fixe, pas d'appel de marge, pas de liquidation automatique ; le contrat refuse une opération plutôt que de liquider une position.
-- **DORA, article 30** : les clauses qu'un émetteur régulé devra imposer par contrat (description du service, sécurité, assistance en cas d'incident, droits d'audit, stratégie de sortie) sont préparées d'avance : code public, événements exploitables, sorties disponibles en permanence par conception, préavis de 48 heures sur tout changement par le délai d'attente, procédure de fin de vie sous 7 jours.
+- **DORA** : voir 6.3.
+
+### 6.3 DORA : position et exigences retenues (13 octobre 2026)
+
+**Champ.** DORA, règlement (UE) 2022/2554, s'applique aux entités financières de l'article 2, paragraphe 1, points a) à t) : notamment sociétés de gestion, gestionnaires de FIA, entreprises d'investissement, établissements de monnaie électronique, prestataires MiCA et émetteurs d'ART. Le projet n'en fait pas partie. Il n'est pas non plus un prestataire critique désigné au titre de l'article 31, désignation fondée sur l'impact systémique, le nombre d'entités servies et la substituabilité.
+
+**Ce qui nous concerne quand même.** Les émetteurs de parts et de stablecoins avec lesquels le contrat travaille sont des entités financières. Elles restent « à tout moment pleinement responsables » (article 28, paragraphe 1) et répercutent leurs obligations par contrat. Deux cas se distinguent, comme un firmware livré se distingue d'un service exploité :
+
+| Cas | Qualification | Conséquence |
+|---|---|---|
+| L'émetteur déploie et exploite lui-même une instance du code open source | Livraison de logiciel, pas de service continu | Rien n'entre dans son registre au titre du projet ; DORA reste entièrement chez l'émetteur |
+| Le projet exploite l'instance : administration, registre des fonds, délai d'attente, monitoring, support | Service TIC « fourni de manière continue » (article 3, point 21) ; le projet devient prestataire tiers de services TIC (article 3, point 19) | Une ligne dans le registre d'informations de l'émetteur (article 28, paragraphe 3) ; contrat conforme à l'article 30 |
+
+La qualification de chaque service appartient à l'entité financière (Commission, réponse publiée par l'ABE le 14 novembre 2025, Q&A 2024_7290). Il en va de même pour la classification en fonction critique ou importante (article 3, point 22) : aucune liste officielle n'existe. Un pilote plafonné, dont la panne laisse intact le rachat quotidien au guichet du fonds, ne relève vraisemblablement que des clauses de l'article 30, paragraphe 2. Une sortie instantanée annoncée aux clients de l'émetteur serait vraisemblablement classée importante, ce qui ajoute les clauses de l'article 30, paragraphe 3.
+
+**Décision D1 : concevoir pour l'article 30, paragraphe 3, dès maintenant.** Le surcoût est faible à ce stade et le rattrapage tardif serait coûteux. Chaque clause est rattachée à une réponse :
+
+| Clause | Exigence | Réponse du projet | État |
+|---|---|---|---|
+| 30(2)(a) | Description complète des fonctions et services, sous-traitance | Spécification fonctionnelle ; sous-traitants nommés : fournisseur de prix, RPC, monitoring, hébergeur de l'indexeur | À écrire |
+| 30(2)(b) | Lieux de fourniture et de traitement | La chaîne est publique et mondiale par nature ; monitoring, indexeur et hébergement déclarés et situés dans l'Union européenne | À décider |
+| 30(2)(c), (d) | Intégrité, confidentialité, accès, récupération et restitution des données | Événements par transition (S13), état public, indexeur conservant l'historique ; export lisible | Partiel |
+| 30(2)(e) | Niveaux de service | Sorties disponibles en permanence par conception (S6) ; délais de réponse humaine à chiffrer | Partiel |
+| 30(2)(f) | Assistance en cas d'incident | Responsable d'incident nommé ; notification à l'émetteur sous 4 heures, alignée sur ses propres délais de déclaration d'incident majeur ; rapport sous 48 heures | À écrire |
+| 30(2)(g), (h), (i) | Coopération avec les autorités, résiliation, formation | Engagement de coopération ; résiliation sans pénalité ; participation aux sessions de sensibilisation de l'émetteur | À écrire |
+| 30(3)(a) | Objectifs de performance quantitatifs | Délai de règlement d'une transaction ; délai de détection d'anomalie (S17) ; disponibilité des sorties | À chiffrer |
+| 30(3)(b) | Préavis et obligations d'information | Délai de 48 heures sur tout changement de code ou d'oracle (S7) ; file du timelock publique | En place par conception |
+| 30(3)(c) | Plans de continuité testés | Pause des entrées (S6), procédure de fin de vie sous 7 jours, tampon de première perte (S16) ; répétition sur testnet | À tester |
+| 30(3)(d) | Participation aux tests de pénétration fondés sur la menace (TLPT) | Engagement de participer aux TLPT de l'émetteur ; modèle STRIDE et plan de monitoring fournis | Nouveau |
+| 30(3)(e) | Droit de suivi, d'accès, d'inspection et d'audit illimité | Code public, rapport d'audit publié, événements on-chain ; accès à l'exploitation (journaux, procédures) pour l'émetteur et son autorité | Partiel |
+| 30(3)(f) | Stratégie de sortie et période de transition | L'émetteur peut reprendre l'instance open source en interne ou la confier à un autre opérateur ; échéance de toutes les pensions sous 7 jours au plus ; politique de fin d'upgradabilité (S15) | En place par conception |
+| 28(5) | Normes de sécurité de l'information | Présente base de sécurité, audit externe ; attestation indépendante à l'échelle (standards SDF) | Partiel |
+
+**Décision D2 : offrir les deux modes.** Instance exploitée par le projet, ou instance exploitée par l'émetteur à partir du code public. Le second mode est la stratégie de sortie de l'émetteur et réduit son risque de concentration (article 29).
+
 
 ## 7. Chaîne d'outils et processus de revue
 
@@ -192,7 +226,7 @@ Chaque décision ci-dessous a été prise lors du peaufinement du cadrage, sur l
 4. **Faut-il un plafond global ?** Oui (S18) : par pension, par fonds et au total, aligné sur le premier seuil d'audit de suivi.
 5. **Qui décide de la pause ?** Un seul signataire, pouvoir limité aux entrées (S6) ; les prêteurs gardent le retrait de la part non prêtée à tout moment.
 
-Questions restant ouvertes : le prix d'un flux de valeur liquidative pour un fonds qui n'en a pas encore ; la qualification du service comme fonction critique au sens de DORA par l'émetteur, qui fixe l'intensité des clauses ; le coût réel du monitoring.
+Questions restant ouvertes : le prix d'un flux de valeur liquidative pour un fonds qui n'en a pas encore ; la classification du service en fonction critique ou importante par chaque émetteur (la conception vise le cas le plus exigeant, décision D1 de la section 6.3) ; la localisation dans l'Union européenne du monitoring et de l'indexeur ; le coût réel du monitoring.
 
 ## 9. Sources
 
@@ -202,5 +236,6 @@ Questions restant ouvertes : le prix d'un flux de valeur liquidative pour un fon
 - Audits publics de protocoles de prêt sur Stellar, pour les défauts de liquidation qui parcourent toutes les positions : [Slender, Certora](https://stellarsecurityportal.com/report/24), [Peridot, Halborn](https://stellarsecurityportal.com/report/83).
 - Outils : [Scout pour Soroban](https://github.com/CoinFabrik/scout-soroban), [Security Detectors SDK](https://github.com/OpenZeppelin/soroban-security-detectors-sdk), [RustSec](https://rustsec.org), [Audit Bank](https://stellar.org/grants-and-funding/soroban-audit-bank), [règles officielles de l'Audit Bank](https://stellar.gitbook.io/scf-handbook/supporting-programs/audit-bank/official-rules), [TimelockController pour Soroban](https://docs.openzeppelin.com/stellar-contracts/governance/timelock-controller), [multisig natif](https://developers.stellar.org/docs/learn/fundamentals/transactions/signatures-multisig#thresholds).
 - Standards et attentes externes : [Stellar DeFi Security Standards and Best Practices, SDF, 20 juillet 2026](https://stellar.org/blog/ecosystem/stellar-defi-security-standards-and-best-practices) ; [critères de soumission du fonds communautaire, tranche 2](https://stellar.gitbook.io/scf-handbook/scf-awards/build-award/submission-criteria) ; [guide de modèle de menace STRIDE, Stellar](https://developers.stellar.org/docs/build/security-docs/threat-modeling/threat-modeling-how-to) ; [Auditing Smart Contracts on Stellar, Certora, 7 octobre 2026](https://www.certora.com/blog/auditing-smart-contracts-stellar) ; [Monitoring Stellar with Hypernative, SDF](https://stellar.org/blog/developers/monitoring-stellar-with-hypernative) ; [ESMA, Call for evidence on CCP collateral tokenisation, 9 octobre 2026](https://www.esma.europa.eu/sites/default/files/2026-10/ESMA91-1505572268-4934_-_Call_for_evidence_tokenisation.pdf) ; [ESMA, avis du 8 octobre 2026 sur les stablecoins non conformes à MiCA, via CoinDesk](https://www.coindesk.com/policy/2026/10/08/eu-securities-regulator-gives-crypto-platforms-3-months-to-remove-unauthorized-stablecoins) ; [FMI, GFSR octobre 2026, chapitre 3](https://www.imf.org/-/media/files/publications/gfsr/2026/october/english/ch3.pdf).
+- DORA : [règlement (UE) 2022/2554, EUR-Lex](https://eur-lex.europa.eu/eli/reg/2022/2554/oj/eng) ; [article 2](https://www.springlex.eu/en/packages/dora/dora-regulation/article-2/), [article 3](https://www.springlex.eu/en/packages/dora/dora-regulation/article-3/), [article 28](https://www.springlex.eu/en/packages/dora/dora-regulation/article-28/), [article 30](https://www.springlex.eu/en/packages/dora/dora-regulation/article-30/), [article 31](https://www.springlex.eu/en/packages/dora/dora-regulation/article-31/) ; [Q&A 2024_7290 sur la notion de service TIC, ABE, 14 novembre 2025](https://www.eba.europa.eu/single-rule-book-qa/qna/view/publicId/2024_7290).
 - Incidents de référence : [YieldBlox, 22 février 2026, post-mortem Blockaid](https://www.blockaid.io/blog/73-quarantined-how-blockaid-and-stellar-validators-contained-a-10m-price-manipulation-attack) ; [Comet, 25 août 2026, post-mortem](https://lumenloop.com/news/comet-blnd-usdc-lp-incident-post-mortem).
 - Conventions Rust (gestion d'erreurs par `Result`, pas d'`unwrap` en production, rustfmt et Clippy) : *Mastering Rust Programming*, A. M. Veldt, 2025, conservé hors du dépôt dans `references/`.
