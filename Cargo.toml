@@ -7,6 +7,27 @@ members = [
 [workspace.dependencies]
 soroban-sdk = "28"
 
+# Security baseline shared by every contract crate (`[lints] workspace = true`).
+# Rationale: docs/securite.md, section "Chaîne d'outils".
+[workspace.lints.rust]
+# `deny`, not `forbid`: the soroban-sdk entry-point macros allow unsafe locally
+# in generated code; hand-written contract code still cannot use it.
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Arithmetic must use checked_* / saturating_* so overflow is a typed error,
+# not a trap. The release profile keeps overflow-checks on as a second net.
+arithmetic_side_effects = "deny"
+# Failure paths return `Error` or panic_with_error!; never an opaque panic.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+# Tests run with overflow checks too, so arithmetic bugs surface off-chain first.
+[profile.test]
+overflow-checks = true
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true

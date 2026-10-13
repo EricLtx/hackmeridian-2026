@@ -1,5 +1,5 @@
 [package]
-name = "hello-world"
+name = "night-window"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -7,6 +7,9 @@ publish = false
 [lib]
 crate-type = ["lib", "cdylib"]
 doctest = false
+
+[lints]
+workspace = true
 
 [dependencies]
 soroban-sdk = { workspace = true }

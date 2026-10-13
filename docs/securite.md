@@ -1,0 +1,206 @@
+# Bases de cybersécurité du contrat Night Window
+
+Date : 6 octobre 2026, révisé le 13 octobre 2026 · Statut : **décisions de cadrage prises (S1 à S19), à formaliser dans la spécification puis à implémenter** · Référence métier : l'étude de cadrage interne, conservée hors du dépôt public · Modèle de menace STRIDE : [modele-menace-stride.md](modele-menace-stride.md)
+
+Ce document fixe ce qui est déjà en place dans le code et la chaîne d'outils, ce que la spécification devra trancher, et les règles de revue qui s'appliquent à chaque évolution du contrat. Il suit la grille de revue du skill officiel `stellar-dev` (fichier `security.md`), appliquée au cas d'une mise en pension.
+
+---
+
+## 1. Ce qu'il faut protéger
+
+| Actif | Où il vit | Qui peut le perdre |
+|---|---|---|
+| Stablecoins déposés dans les offres | Solde du contrat, ventilé par entrée `Offer(id)` | Prêteurs |
+| Parts de fonds bloquées en pension | Solde du contrat, ventilé par entrée `Repo(id)` | Emprunteurs |
+| Registre des fonds acceptés (oracle, décote) | Entrées `Fund(adresse)` | Tous : un mauvais oracle ou une décote nulle permet d'emprunter plus que la valeur des parts |
+| Clé d'administration | Entrée `Admin` (stockage d'instance) | Tous : l'admin change le registre et le code |
+| Code du contrat | WASM référencé par l'instance | Tous : une mise à niveau malveillante vide le contrat |
+
+Le contrat est **porteur de valeur** dès qu'une offre est déposée. Les exigences de la section 6 (pause, gouvernance de l'admin) s'appliquent avant tout dépôt réel, pas seulement avant le mainnet.
+
+## 2. Modèle de menace
+
+### 2.1 Ce que l'attaquant contrôle
+
+Hypothèses standard de la plateforme, reprises telles quelles :
+
+- tous les arguments passés aux fonctions du contrat ;
+- l'ordre et le moment des transactions (il voit une offre arriver et peut la prendre ou la devancer) ;
+- tous les comptes sauf ceux dont il n'a pas la signature ;
+- le déploiement de contrats qui imitent une interface (un faux oracle SEP-40, un faux token SEP-41) ;
+- la forme de l'état on-chain qu'il peut créer légalement : nombre d'entrées, et même le TTL de **nos** entrées, qu'il peut prolonger.
+
+### 2.2 Acteurs et confiance accordée
+
+| Acteur | Confiance | Conséquence pour le contrat |
+|---|---|---|
+| Emprunteur | Aucune | Chaque fonction qu'il appelle vérifie son `require_auth` et ses bornes |
+| Prêteur | Aucune | Idem ; une offre ne peut être retirée que par son auteur et seulement pour la part non prêtée |
+| Administrateur | Élevée, à encadrer | Il choisit les oracles, les décotes et le code. La section 6 propose de l'encadrer (multisig, délai) |
+| Émetteur du fonds | Externe, subie | Les parts sont des tokens à permissions : token Soroban à permissions ou actif classique à autorisation, selon l'émetteur. L'émetteur peut geler ou reprendre un solde, y compris celui du contrat |
+| Oracle SEP-40 | Allowlisté par l'admin | Son prix est une donnée externe : fraîcheur et bornes à vérifier à chaque lecture |
+| Hôte Soroban | Totale | Fournit l'auth, bloque la réentrance, mesure les ressources |
+
+### 2.3 Ce que la plateforme garantit
+
+- Pas de `delegatecall` : aucun code étranger ne s'exécute dans le contexte du contrat.
+- Pas de réentrance : l'hôte bloque les appels réentrants, directs ou indirects. Les appels externes restent des frontières d'échec et de budget ; l'ordre des écritures reste à soigner.
+- Protection contre le rejeu des autorisations : nonces et expirations sont gérés par l'hôte.
+- L'autorisation est **explicite et optionnelle** : l'oubli d'un `require_auth` est la faille à chercher en priorité.
+
+## 3. Invariants du contrat
+
+Ces invariants sont la base des tests de propriété et de la revue. Ils sont écrits ici en langage courant ; la spécification les formalisera.
+
+| # | Invariant | État |
+|---|---|---|
+| I1 | Le solde en stablecoins du contrat est au moins égal à la somme des montants disponibles de toutes les offres | À implémenter avec le cycle de vie |
+| I2 | Chaque part bloquée appartient à exactement une pension ouverte ; le solde en parts du contrat pour un fonds est au moins égal à la somme des parts des pensions ouvertes sur ce fonds | À implémenter |
+| I3 | À l'ouverture, principal ≤ valeur des parts × (1 − décote), avec un prix non périmé | À spécifier (section 6) |
+| I4 | Avant l'échéance, seul l'emprunteur peut clôturer la pension (rachat). Après l'échéance, le rachat reste possible tant que la saisie n'a pas eu lieu, et seul le prêteur peut saisir | À spécifier |
+| I5 | Une pension change d'état une seule fois : `Open` → `Repurchased` ou `Open` → `Defaulted`. Aucun retour en arrière | Types en place, logique à implémenter |
+| I6 | Aucune fonction ne parcourt l'ensemble des offres ou des pensions ; chaque appel touche un nombre borné d'entrées | **En place par construction** : clés `Offer(u64)` et `Repo(u64)` individuelles, aucun index global |
+| I7 | Seul l'admin modifie le registre, la durée maximale, l'admin et le code | **En place** : `require_admin` charge l'admin depuis le stockage, jamais depuis un argument |
+| I8 | Les codes d'erreur et les variantes de types exportés ne sont jamais renumérotés ni remodelés ; on ajoute | **En place** comme règle (commentaire dans `lib.rs`, AGENTS.md) |
+| I9 | Les conditions d'une pension (taux, échéance, décote appliquée) sont figées à l'ouverture ; retirer un fonds du registre ou changer sa décote n'affecte pas les pensions ouvertes | Documenté dans `remove_fund`, à garantir dans `open_repo` |
+
+## 4. Classes de vulnérabilité appliquées à Night Window
+
+| Classe | Risque pour ce contrat | Réponse |
+|---|---|---|
+| 1. Autorisation manquante | Retrait d'une offre par un tiers, saisie par un non-prêteur, changement d'oracle par un non-admin | En place pour l'admin (`require_admin`). À faire pour chaque `Address` du cycle de vie : `lender` sur `create_offer` et `withdraw_offer`, `borrower` sur `open_repo` et `repurchase`, prêteur chargé depuis `Repo` sur `seize` |
+| 2. Rejeu d'autorisation via intermédiaire | `open_repo` fera un `transfer` de parts au nom de l'emprunteur. Sans `require_auth` de l'emprunteur **dans `open_repo` lui-même**, quiconque peut consommer une autorisation pré-signée | Règle : chaque couche qui exerce l'autorité d'une adresse la ré-authentifie. Test obligatoire avec `mock_auths` ciblé et vérification de l'arbre `env.auths()` |
+| 3. Réinitialisation | Capture de l'admin par un second `initialize` | **Écartée** : constructeur `__constructor`, pas de fonction `initialize` |
+| 4. Appel de contrat arbitraire | Faux oracle, faux token de parts, stablecoin exotique | Fonds et oracles **allowlistés** par l'admin (registre). Stablecoins des offres : à allowlister aussi (section 6) |
+| 5. Débordement arithmétique | Calcul d'intérêt (`principal × taux × durée`), conversion prix × parts avec décimales | Lint `clippy::arithmetic_side_effects` en `deny` : toute opération doit passer par `checked_*` ou `saturating_*` et renvoyer une erreur typée. `overflow-checks = true` en release **et** en test. Montants `i128` : refuser `≤ 0` à l'entrée |
+| 6. Collision de clés | Écrasement d'une offre par une pension | **Écartée** : énumération `DataKey` typée ; noms de types uniques dans le crate |
+| 7. Course vérifier-puis-agir | Le prêteur retire son offre entre la simulation et l'exécution d'un `open_repo` ; prix qui bouge entre deux ledgers | Vérifications et écritures dans la même invocation ; l'emprunteur passe des bornes (`principal` demandé, durée) et le contrat refuse plutôt que d'ajuster en silence |
+| 8. TTL et archivage | Une pension archivée bloque le rachat ou la saisie ; un TTL utilisé comme échéance | L'échéance est **stockée dans la valeur** (`Repo.maturity`) et comparée au `ledger().timestamp()`, jamais déduite du TTL. TTL des entrées `Fund`, `Offer`, `Repo` prolongé à chaque écriture ; TTL d'instance prolongé sur les chemins admin |
+| 9. Confiance dans une valeur externe | Prix périmé, prix nul ou aberrant, oracle qui renvoie `None` | `fund_price` renvoie une erreur typée sur `None`. **À spécifier** : fenêtre de fraîcheur (`PriceData.timestamp` contre l'horloge du ledger), bornes de variation, comportement si le prix est indisponible le week-end |
+| 10. Épuisement de ressources | Liste de fonds acceptés d'une offre trop longue ; parcours de positions | I6. **À spécifier** : plafond sur `Offer.funds` (par exemple 8 adresses) |
+| 11. Comptes personnalisés | Non concerné : le contrat n'implémente pas `__check_auth` | — |
+
+### Revue « consommateur de tokens », spécifique aux parts de fonds
+
+| Point | Réponse |
+|---|---|
+| Tokens acceptés | Allowlistés : parts via le registre ; stablecoins à allowlister (section 6) |
+| Décimales | À interroger et stocker à l'enregistrement du fonds (`decimals()` du token et de l'oracle) ; ne jamais supposer 7 |
+| Montant reçu après `transfer` | Pour des tokens à permissions, vérifier le solde avant et après le transfert dans `open_repo` et `create_offer` plutôt que faire confiance au montant demandé |
+| Particularités SAC et tokens à permissions | **Le risque propre à ce projet.** Si l'émetteur gèle le solde du contrat ou reprend les parts (clawback), le rachat devient impossible et l'emprunteur perd ses parts sans faute de sa part. Si le prêteur n'est pas autorisé à détenir les parts, la saisie échoue. Le cadrage note ce point ; la spécification doit décider : rachat du fonds par le contrat, vente à un tiers autorisé, ou prêteurs eux-mêmes autorisés par l'émetteur |
+| Flux `transfer_from` | Non prévu : les transferts se font par `transfer` avec l'autorisation de l'adresse concernée dans la même transaction |
+| Événements standard | Les tokens émettent les leurs ; le contrat émettra ses propres événements de cycle de vie (offre créée, pension ouverte, rachetée, saisie, retrait) |
+
+## 5. Contrôles déjà en place dans le code
+
+- Constructeur atomique avec l'admin ; pas de fenêtre d'initialisation.
+- `require_admin` charge l'admin depuis le stockage et appelle `require_auth` dessus, sur chaque fonction privilégiée : `set_admin`, `upgrade`, `set_max_term`, `set_fund`, `remove_fund`.
+- Décote validée strictement inférieure à 100 % ; durée maximale strictement positive.
+- Oracle lu uniquement depuis le registre, jamais depuis un argument ; `None` devient `Error::NoPrice`.
+- Clés de stockage typées, une entrée par fonds, offre et pension ; TTL prolongés sur les écritures.
+- Erreurs typées (`#[contracterror]`), aucun `unwrap` ni `panic!` dans le code du contrat (lints `deny`), échec de lecture de l'admin converti en `Error::NotInitialized`.
+- Événements sur chaque changement d'état administratif, pour l'audit et l'indexation.
+- Tests : autorisation vérifiée avec `env.auths()` et avec des `mock_auths` ciblés qui prouvent qu'un intrus est refusé sur `set_admin`, `set_fund` et `upgrade` ; événements comparés en XDR ; chemins d'erreur couverts par les méthodes `try_`.
+
+## 6. Décisions prises au cadrage (13 octobre 2026)
+
+Chaque décision ci-dessous a été prise lors du peaufinement du cadrage, sur la base de faits vérifiés : code des contrats d'émetteurs régulés déjà déployés sur Stellar, documentation du réseau, incidents publics, standards de sécurité DeFi publiés par la SDF le 20 juillet 2026, appel à contributions de l'ESMA du 9 octobre 2026. La spécification les formalise ; chaque point devra avoir un test.
+
+| # | Sujet | Décision |
+|---|---|---|
+| S1 | Fraîcheur du prix | Le prix lu doit porter un `timestamp` d'au plus N heures ; N est un paramètre du registre, par fonds, fixé pour couvrir un week-end si le flux ne publie pas le samedi. Prix absent ou périmé : refus (`Error::NoPrice`, nouvelle erreur `StalePrice`), jamais d'ajustement silencieux |
+| S2 | Bornes du prix | **Bande absolue par fonds**, et non une déviation relative au prix précédent. Une part de fonds monétaire ne bouge pas de 1 % en une semaine : un prix hors d'une bande de ±0,5 % autour de la dernière valeur acceptée est un prix faux. L'incident YieldBlox du 22 février 2026 (10,2 M$) a contourné un contrôle de déviation relative parce que les deux fenêtres comparées étaient déjà manipulées |
+| S3 | Intérêt et arrondis | `principal × taux_bps × durée_secondes / (10 000 × 365 × 86 400)` en `i128` avec `checked_mul`, arrondi en faveur du prêteur ; durée réelle plafonnée à la durée convenue |
+| S4 | Plafond d'emprunt | `parts × prix × (10 000 − décote) / (10^décimales_oracle × 10 000)`, décimales du token de parts et du stablecoin prises en compte, arrondi vers le bas |
+| S5 | Stablecoins acceptés | Registre tenu par l'admin, comme pour les fonds. **Liste blanche conforme à MiCA par construction** pour tout usage européen : EURC, EURCV, EURAU, USDC. USDT0 et PYUSD exclus : l'avis de l'ESMA du 8 octobre 2026 impose aux prestataires MiCA de cesser tout service sur les stablecoins non agréés au plus tard le 8 janvier 2027 |
+| S6 | Pause d'urgence | `pause` et `unpause` réservées à l'admin. La pause bloque `create_offer` et `open_repo`, **jamais** `repurchase`, `withdraw_offer` ni `seize` : on arrête les entrées, pas les sorties. Un seul signataire suffit pour mettre en pause ; le pouvoir est étroitement délimité |
+| S7 | Gouvernance de l'admin | Admin porté par un compte multisignature natif Stellar à seuils, avec au moins un signataire extérieur au mainteneur. `upgrade`, `set_fund` (oracle, décote) et `set_max_term` passent par un contrat TimelockController (OpenZeppelin pour Soroban) avec un délai de 48 heures ; la pause et `remove_fund` restent immédiates. Transfert d'admin en deux temps (proposer, accepter) |
+| S8 | Parts saisies | **Les prêteurs sont obligatoirement des détenteurs autorisés par l'émetteur** (liste blanche). La saisie est alors un simple transfert vers une adresse autorisée ; aucune présentation au rachat par le contrat n'est nécessaire |
+| S9 | Gel ou reprise par l'émetteur pendant une pension | La dette reste due. Si les parts ne peuvent plus être rendues, l'emprunteur peut clôturer en remboursant en stablecoins sans restitution des parts ; le prêteur reçoit principal et intérêt ; les parts gelées restent attribuées à l'emprunteur vis-à-vis de l'émetteur. À expliciter dans les conditions d'utilisation |
+| S10 | Bornes de ressources | Au plus 8 fonds par offre ; un seul transfert de parts et un seul transfert de stablecoins par opération ; aucune boucle sur l'ensemble des offres ou des pensions (I6) |
+| S11 | Durée minimale | 1 heure |
+| S12 | Identifiants | Compteurs monotones `NextOfferId` et `NextRepoId` en `u64`, jamais réutilisés |
+| S13 | Événements | Un événement par transition d'état, identifiants et adresses en topics, pour l'audit, l'indexation et la réconciliation côté émetteur |
+| S14 | Migration de schéma | Version de schéma stockée ; fonction `migrate` idempotente réservée à l'admin ; mécanisme de migration de données du SDK 28 |
+| S15 | Fin d'upgradabilité | Le contrat reste upgradable derrière le délai d'attente et des rôles publiés. Engagement : renoncer à l'upgrade après le pilote si un émetteur le demande, par transfert de l'admin au timelock puis renonciation. Procédure écrite avant tout dépôt réel |
+| S16 | Tampon de première perte | Réserve d'environ 5 % des offres déposées, conforme au repère des standards DeFi de la SDF, constituée avant tout dépôt réel sur le réseau principal |
+| S17 | Plan de monitoring | Écrit avant tout dépôt réel, dérivé du modèle de menace : déclencheurs sur les événements du contrat, sur la déviation des prix et sur les soldes ; alerte en minutes ; pause automatique possible sur alerte. Exigé par la tranche 2 du fonds communautaire |
+| S18 | Plafonds de lancement | Par pension, par fonds et au total, dérivés des scénarios de perte maximale (6.1). Le plafond total est aligné sur le seuil du premier audit de suivi gratuit de l'Audit Bank, 10 M$ de valeur bloquée |
+| S19 | Offre sponsor | Une offre peut être marquée « sponsor » par l'admin, avec priorité d'allocation sur un fonds donné ; elle suit les mêmes règles que toute offre (liste blanche, retrait de la part non prêtée). Aucun privilège de sortie |
+
+### 6.1 Perte maximale par scénario
+
+| Scénario | Ce qui limite la perte | Perte maximale |
+|---|---|---|
+| Prix manipulé ou oracle compromis | Bande absolue (S2) et décote : une manipulation dans la bande ne crée pas de sous-collatéralisation ; hors bande, refus | Zéro dans la bande ; plafond par fonds si l'oracle entier est compromis |
+| Clé admin compromise | Délai de 48 h (S7) ; sorties jamais bloquées (S6) | Flux entrés pendant le délai, si personne ne surveille (S17) |
+| Gel ou reprise des parts par l'émetteur | Dette maintenue (S9) ; le prêteur perd les parts saisies | Pensions ouvertes sur ce fonds, donc plafond par fonds |
+| Bug du contrat | Pause des entrées ; sorties intactes ; tampon (S16) | Valeur bloquée au moment du bug, donc plafond total |
+| Prêteur non autorisé à recevoir les parts | Impossible par construction (S8) | Zéro |
+
+### 6.2 Réponses aux attentes externes
+
+- **Standards DeFi de la SDF (20 juillet 2026)** : audit publié avec version du code ; politique de divulgation (`SECURITY.md`) et bug bounty à dimensionner sur la valeur exposée ; procédures de risque écrites ; stress tests ; tampon de première perte (S16) ; aucun flux de prix unique pour une décision qui touche au collatéral (S1, S2) ; multisig et délai d'attente (S7) ; pouvoirs d'urgence étroits (S6) ; détection en minutes (S17) ; rapport préliminaire sous 48 heures ; page publique des risques.
+- **ESMA, appel à contributions du 9 octobre 2026, section 6** : les risques qu'elle nomme, gestion des clés, permissions, exécution des contrats, privilèges administratifs, perte ou compromission de clés privées, dysfonctionnement de contrat, intervention de gouvernance, conversion sous stress du collatéral, correspondent aux scénarios de 6.1 et aux décisions S6, S7, S9 et S15.
+- **FMI, rapport de stabilité financière d'octobre 2026, chapitre 3** : l'avertissement selon lequel le collatéral programmable et le règlement instantané peuvent accélérer les liquidations forcées ne s'applique pas à cette conception : durée fixe, pas d'appel de marge, pas de liquidation automatique ; le contrat refuse une opération plutôt que de liquider une position.
+- **DORA, article 30** : les clauses qu'un émetteur régulé devra imposer par contrat (description du service, sécurité, assistance en cas d'incident, droits d'audit, stratégie de sortie) sont préparées d'avance : code public, événements exploitables, sorties disponibles en permanence par conception, préavis de 48 heures sur tout changement par le délai d'attente, procédure de fin de vie sous 7 jours.
+
+## 7. Chaîne d'outils et processus de revue
+
+### En place
+
+| Mécanisme | Où | Rôle |
+|---|---|---|
+| Chaîne d'outils figée (Rust 1.98.1, cible `wasm32v1-none`, `rustfmt`, `clippy`) | `rust-toolchain.toml` | Même binaire pour tous et pour la CI ; les changements de version sont volontaires et tracés |
+| Lints de sécurité en `deny` | `Cargo.toml`, `[workspace.lints]` | `unsafe_code`, `arithmetic_side_effects`, `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`. Les tests les désactivent explicitement en tête de `test.rs` |
+| `overflow-checks = true` en release et en test | `Cargo.toml` | Filet de sécurité si un calcul échappe aux lints |
+| CI bloquante | `.github/workflows/ci.yml` | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`, `stellar contract build`, et `cargo audit` (avis RustSec sur `Cargo.lock`) dans un job séparé |
+| Chaîne d'approvisionnement de la CI | `.github/workflows/ci.yml`, `.github/dependabot.yml` | Permissions au plus juste (`contents: read` par défaut, `issues: write` limité au job d'audit) ; chaque action tierce figée sur un SHA de commit complet ; Rust installé depuis `rust-toolchain.toml` sans action tierce ; Dependabot propose les mises à jour des actions et des crates en PR relues |
+| Cibles Make | `contracts/night-window/Makefile` | `make lint`, `make audit`, `make scout` reproduisent les contrôles en local |
+
+### Règles de revue à chaque modification du contrat
+
+1. Pour chaque fonction publique, lister chaque argument `Address` et dire quelle autorité chaque écriture consomme. Chaque autorité consommée a son `require_auth` dans cette fonction.
+2. Pour chaque appel externe (token, oracle), dire ce qui se passe s'il échoue, s'il renvoie une valeur absurde, ou s'il consomme tout le budget.
+3. Pour chaque calcul, montrer qu'il est en `checked_*` et dans quel sens il arrondit.
+4. Pour chaque nouvelle entrée de stockage, dire qui prolonge son TTL et ce qui se passe si elle est archivée.
+5. Chaque chemin d'erreur a un test `try_` ; chaque fonction privilégiée a un test qui prouve le refus d'un intrus ; chaque événement est comparé en XDR.
+6. Aucune renumérotation d'erreur, aucune modification d'un type exporté existant : on ajoute des variantes.
+
+### Avant le testnet public
+
+- Modèle de menace STRIDE tenu à jour dans [modele-menace-stride.md](modele-menace-stride.md) : au moins un problème identifié par catégorie, un traitement par problème, revue à chaque changement d'architecture. Il est exigé par la tranche 2 du fonds communautaire et par l'évaluation de préparation de l'Audit Bank.
+- Analyse statique : `cargo scout-audit` (CoinFabrik) et les détecteurs OpenZeppelin pour Soroban ; corriger ou justifier chaque alerte dans ce document.
+- Tests de propriété sur I1, I2, I5 et sur les arrondis de S3 et S4 ; test de montée en charge qui ouvre un grand nombre de pensions et vérifie un coût constant par opération (exigence du cadrage).
+- Test de mise à niveau : chemin nominal avec un WASM réellement téléversé, et refus d'un non-admin.
+- Admin multisignature (S7), pause disponible (S6), procédure d'incident écrite (qui appelle `pause`, comment, et comment on communique aux prêteurs et emprunteurs) avec un responsable d'incident nommé.
+- Relecture lors des Security Office Hours de Runtime Verification, sessions individuelles gratuites proposées par l'écosystème.
+
+### Avant le mainnet
+
+- Audit externe par un cabinet pré-approuvé de l'Audit Bank (Certora, Code4rena, ChainSecurity, Halborn, Oak Security, OtterSec, Runtime Verification, Spearbit et Cantina, Veridise, Zellic). Le programme couvre jusqu'à 100 % du premier audit des projets financés par le fonds communautaire, contre une participation de 5 % remboursée si tous les constats critiques, élevés et moyens sont corrigés sous 20 jours ouvrés ; audits de suivi gratuits à 10 M$ et 100 M$ de valeur bloquée. Conditions d'entrée : code complet et proche du mainnet, testnet déployé, modèle STRIDE, résultats d'analyse statique avec plan de correction. Le rapport final est publié par le cabinet. Le code en production doit être celui qui a été audité ; tout changement significatif déclenche une revue ciblée.
+- Surveillance des événements, des prix et des TTL en production (Hypernative ou OctoPos, guide SDF de juillet 2026), reliée au plan de monitoring (S17), avec pause sur alerte.
+- Politique de divulgation responsable publiée (`SECURITY.md`) et bug bounty dimensionné sur la valeur exposée.
+- Tampon de première perte constitué (S16), plafonds de lancement en place (S18), page publique des risques (audits, rôles privilégiés, dépendances, historique d'incidents).
+- Règle de maintenance : rester dans les deux dernières versions majeures de `soroban-sdk`, les seules qui reçoivent les correctifs de sécurité ; rebuild et tests à chaque mise à niveau du protocole ; échéances en secondes, jamais déduites des TTL.
+
+## 8. Questions du cadrage et réponses apportées
+
+1. **Qui porte la clé d'administration ?** Une clé unique pendant le hackathon ; un multisig natif à seuils avec un signataire extérieur dès le testnet public ; un TimelockController devant l'upgrade et l'oracle avant tout dépôt réel (S7, S15).
+2. **L'émetteur accepte-t-il que le contrat détienne des parts ?** Techniquement, le contrat est une adresse comme une autre pour la liste blanche d'un émetteur : sur Stellar, le token d'un émetteur régulé exige le même rôle sur l'expéditeur et le destinataire, et le propre contrat de rachat de cet émetteur doit le détenir. Pour un actif classique à autorisation requise, l'émetteur autorise l'adresse du contrat via `set_authorized`. La décision commerciale reste celle de l'émetteur ; S8 et S9 fixent les règles de gel et de saisie.
+3. **L'oracle publie-t-il le week-end ?** Les flux de valeur liquidative pour les parts de fonds existent sur Stellar (RedStone, 18 flux SEP-40 dont BENJI ; Pyth) ; leur rythme de publication est un paramètre par fonds (S1), complété par la bande absolue (S2) et la décote.
+4. **Faut-il un plafond global ?** Oui (S18) : par pension, par fonds et au total, aligné sur le premier seuil d'audit de suivi.
+5. **Qui décide de la pause ?** Un seul signataire, pouvoir limité aux entrées (S6) ; les prêteurs gardent le retrait de la part non prêtée à tout moment.
+
+Questions restant ouvertes : le prix d'un flux de valeur liquidative pour un fonds qui n'en a pas encore ; la qualification du service comme fonction critique au sens de DORA par l'émetteur, qui fixe l'intensité des clauses ; le coût réel du monitoring.
+
+## 9. Sources
+
+- Skill officiel `stellar-dev`, fichiers `security.md`, `development.md` et `testing.md` (v1.2.0), appliqués au cas présent.
+- Documentation : [stratégies de stockage](https://developers.stellar.org/docs/build/guides/storage/storage-strategies), [mise à niveau des contrats](https://developers.stellar.org/docs/build/guides/conventions/upgrading-contracts), [autorisation des soldes SAC](https://developers.stellar.org/docs/tokens/stellar-asset-contract#balance-authorization-required), [frais et limites](https://developers.stellar.org/docs/learn/fundamentals/fees-resource-limits-metering).
+- Standards : [SEP-40](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0040.md) (oracle), [SEP-41](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md) (token), [SEP-49](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0049.md) (contrats évolutifs).
+- Audits publics de protocoles de prêt sur Stellar, pour les défauts de liquidation qui parcourent toutes les positions : [Slender, Certora](https://stellarsecurityportal.com/report/24), [Peridot, Halborn](https://stellarsecurityportal.com/report/83).
+- Outils : [Scout pour Soroban](https://github.com/CoinFabrik/scout-soroban), [Security Detectors SDK](https://github.com/OpenZeppelin/soroban-security-detectors-sdk), [RustSec](https://rustsec.org), [Audit Bank](https://stellar.org/grants-and-funding/soroban-audit-bank), [règles officielles de l'Audit Bank](https://stellar.gitbook.io/scf-handbook/supporting-programs/audit-bank/official-rules), [TimelockController pour Soroban](https://docs.openzeppelin.com/stellar-contracts/governance/timelock-controller), [multisig natif](https://developers.stellar.org/docs/learn/fundamentals/transactions/signatures-multisig#thresholds).
+- Standards et attentes externes : [Stellar DeFi Security Standards and Best Practices, SDF, 20 juillet 2026](https://stellar.org/blog/ecosystem/stellar-defi-security-standards-and-best-practices) ; [critères de soumission du fonds communautaire, tranche 2](https://stellar.gitbook.io/scf-handbook/scf-awards/build-award/submission-criteria) ; [guide de modèle de menace STRIDE, Stellar](https://developers.stellar.org/docs/build/security-docs/threat-modeling/threat-modeling-how-to) ; [Auditing Smart Contracts on Stellar, Certora, 7 octobre 2026](https://www.certora.com/blog/auditing-smart-contracts-stellar) ; [Monitoring Stellar with Hypernative, SDF](https://stellar.org/blog/developers/monitoring-stellar-with-hypernative) ; [ESMA, Call for evidence on CCP collateral tokenisation, 9 octobre 2026](https://www.esma.europa.eu/sites/default/files/2026-10/ESMA91-1505572268-4934_-_Call_for_evidence_tokenisation.pdf) ; [ESMA, avis du 8 octobre 2026 sur les stablecoins non conformes à MiCA, via CoinDesk](https://www.coindesk.com/policy/2026/10/08/eu-securities-regulator-gives-crypto-platforms-3-months-to-remove-unauthorized-stablecoins) ; [FMI, GFSR octobre 2026, chapitre 3](https://www.imf.org/-/media/files/publications/gfsr/2026/october/english/ch3.pdf).
+- Incidents de référence : [YieldBlox, 22 février 2026, post-mortem Blockaid](https://www.blockaid.io/blog/73-quarantined-how-blockaid-and-stellar-validators-contained-a-10m-price-manipulation-attack) ; [Comet, 25 août 2026, post-mortem](https://lumenloop.com/news/comet-blnd-usdc-lp-incident-post-mortem).
+- Conventions Rust (gestion d'erreurs par `Result`, pas d'`unwrap` en production, rustfmt et Clippy) : *Mastering Rust Programming*, A. M. Veldt, 2025, conservé hors du dépôt dans `references/`.

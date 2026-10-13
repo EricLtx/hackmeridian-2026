@@ -20,7 +20,17 @@ That compiles every `cdylib` member to WASM. Artifacts land in `target/wasm32v1-
 
 Do not substitute this with `cargo build --target wasm32v1-none`. `stellar contract build` applies the flags and metadata the network expects.
 
-The `wasm32v1-none` Rust target must be installed (`rustup target add wasm32v1-none`). Rust 1.84 or newer is required for that target. Rust 1.82 and 1.83 cannot build contracts.
+`rust-toolchain.toml` pins the Rust version, the `wasm32v1-none` target and the `rustfmt` and `clippy` components; rustup installs them on the first `cargo` command. Do not override the toolchain. To bump it, edit that file, rebuild, rerun the tests and say so in the commit.
+
+## Security baseline
+
+Read `docs/securite.md` before changing the contract. The enforced rules:
+
+- Workspace lints (`Cargo.toml`, `[workspace.lints]`) deny `unsafe_code`, unchecked arithmetic, `unwrap`, `expect`, `panic!` and slice indexing in contract code. Use `checked_*` arithmetic and return a typed `Error`, or `panic_with_error!`. Tests opt out at the top of `test.rs`; do not opt out in `lib.rs`.
+- Every privileged function loads the admin from storage and calls `require_auth` on it. Every `Address` argument whose authority a function consumes gets its own `require_auth` in that function.
+- Deadlines live in stored values and are compared to the ledger timestamp, never inferred from a TTL.
+- Error codes and exported types are append-only.
+- Before finishing a change, run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `stellar contract build`. CI runs the same, plus a RustSec advisory check.
 
 ## Test
 
@@ -38,19 +48,30 @@ On testnet, after a successful build:
 
 ```sh
 stellar contract deploy \
-  --wasm target/wasm32v1-none/release/<name>.wasm \
+  --wasm target/wasm32v1-none/release/night_window.wasm \
   --source-account <identity> \
   --network testnet \
-  --alias <alias>
+  --alias night_window \
+  -- --admin <identity>
 
 stellar contract invoke \
-  --id <alias> \
+  --id night_window \
   --network testnet \
   --source-account <identity> \
-  -- hello --to world
+  -- version
 ```
 
-The sample `hello_world` contract exposes `hello(to: String) -> Vec<String>`. Replace that with your own functions; `stellar contract invoke --id <id> -- -h` prints the generated CLI for the deployed contract.
+The workspace holds one contract, `night-window` (`contracts/night-window/`), a repo of tokenized money market fund shares. Its constructor takes `--admin <address>`, passed after the `--` separator at deploy time. `stellar contract invoke --id <id> -- -h` prints the generated CLI for the deployed contract.
+
+Administration, the fund registry, the upgrade path and the SEP-40 price lookup are implemented. The lifecycle entry points (`create_offer`, `withdraw_offer`, `open_repo`, `repurchase`, `seize`) are declared and return `Error::NotImplemented` until the functional specification is validated. Error codes are public ABI: add new ones, never renumber.
+
+## Public repository: what stays out
+
+This repository is public. The market study, the business proposal and third-party reference material are working documents kept in `private/` and `references/`, both git-ignored.
+
+- Never add files from `private/` or `references/` to git, and never copy their content (figures, partner or product names, business case, pitch) into tracked files. Tracked documentation describes the product and the code, not the business plan.
+- When the functional specification is written, it is the reference for the lifecycle; keep it in `private/` until the maintainer decides otherwise, and keep tracked files limited to what the code needs (interface, invariants, security decisions).
+- Do not add event, application or team-administration content.
 
 ## Further reading
 

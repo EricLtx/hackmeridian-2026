@@ -10,3 +10,6 @@ target
 
 # Third-party reference documents, kept locally only
 /references/
+
+# Internal scoping and business documents (market study, proposal): local only
+/private/
