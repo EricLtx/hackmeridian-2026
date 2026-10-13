@@ -19,7 +19,11 @@ jobs:
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # The action derives the CLI version from the action ref; a SHA pin would
+      # yield a non-existent release, so the version is passed explicitly.
       - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
+        with:
+          version: 28.1.0
       - name: Format
         run: cargo fmt --all --check
       - name: Lint (security lints are denied in Cargo.toml)
@@ -33,6 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      checks: write # audit-check publishes its result as a check run
       issues: write # audit-check opens an issue when an advisory lands
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
