@@ -5,6 +5,8 @@
 //   npm run setup -- --restage new short repo for the seizure scene
 //   npm run setup -- --fx=local     re-admit the fund on the local FX feed
 //   npm run setup -- --fx=reflector back to the Reflector FX feed
+//   npm run setup -- --multisig     make the governor a 2-of-2 account with an
+//                                   outside co-signer (decision S7); done once
 //
 // Each step is recorded in the state file once it succeeds, so a network
 // drop costs one step, not the whole setup.
@@ -159,6 +161,29 @@ async function main() {
 
   const ow = state.contracts.openWindow;
   const shares = state.contracts.shares;
+
+  if (process.argv.includes("--multisig")) {
+    await once(state, "multisig", "Governor becomes a native 2-of-2 multisig with an outside co-signer", async () => {
+      if (!state.keys.cosigner) state.keys.cosigner = Keypair.random().secret();
+      saveState(state);
+      const cosigner = pub("cosigner");
+      // Master key and co-signer weigh 1 each; every threshold needs 2, so no
+      // single key can act as governor, on a transaction or an authorization.
+      await classic(
+        state,
+        "governor",
+        Operation.setOptions({
+          signer: { ed25519PublicKey: cosigner, weight: 1 },
+          masterWeight: 1,
+          lowThreshold: 2,
+          medThreshold: 2,
+          highThreshold: 2,
+        }),
+      );
+      state.multisig = { ...(state.multisig ?? {}), governor: ["governor", "cosigner"] };
+      console.log(`  governor ${pub("governor")} now needs both keys; co-signer ${cosigner}`);
+    });
+  }
 
   await once(state, "governor", "Governor: guardian, stablecoin registry, currency cap", async () => {
     await invoke(state, "governor", ow, "set_guardian", [sv.address(pub("guardian"))]);

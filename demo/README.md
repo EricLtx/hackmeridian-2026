@@ -20,6 +20,7 @@ npm run setup -- --restage       # new short repo for the seizure scene
 npm run setup -- --fx=local      # re-admit the fund on the local FX feed
 npm run setup -- --fx=reflector  # back to the Reflector FX feed
 npm run setup -- --fresh         # new contracts, same funded accounts
+npm run setup -- --multisig      # governor becomes a 2-of-2 account with an outside co-signer
 npm run status                   # the board only
 npm run demo                     # every scene, Enter between scenes
 npm run demo -- --auto           # no pauses, for rehearsal or recording

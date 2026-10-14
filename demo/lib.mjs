@@ -273,13 +273,46 @@ export function keypair(state, role) {
   return Keypair.fromSecret(secret);
 }
 
-/** Finds the local key of a G-address, to sign its authorization entries. */
-function keyForAddress(state, address) {
-  for (const secret of Object.values(state.keys)) {
-    const kp = Keypair.fromSecret(secret);
-    if (kp.publicKey() === address) return kp;
+/**
+ * The keys that sign for a role. A role turned into a native multisig
+ * account (`state.multisig[role]`, set by `setup -- --multisig`) needs every
+ * listed key: the account's thresholds require their combined weight.
+ */
+export function signersOf(state, role) {
+  const roles = state.multisig?.[role] ?? [role];
+  return roles.map((r) => keypair(state, r));
+}
+
+/** The keys that sign for a G-address, to authorize its entries. */
+function signersForAddress(state, address) {
+  for (const role of Object.keys(state.keys)) {
+    if (keypair(state, role).publicKey() === address) return signersOf(state, role);
   }
   throw new Error(`no local key can authorize ${address}`);
+}
+
+/** Signs a transaction envelope with every key of the source role. */
+function signTx(state, role, tx) {
+  for (const key of signersOf(state, role)) tx.sign(key);
+}
+
+/**
+ * Signature value for an address credential signed by several keys of one
+ * account: a vector of { public_key, signature } maps, sorted by public key,
+ * which is the order the host requires for a multisig account.
+ */
+function multisigSignature(keys, payload) {
+  const entries = keys
+    .map((key) => ({ raw: key.rawPublicKey(), signature: key.sign(Buffer.from(payload)) }))
+    .sort((a, b) => Buffer.compare(Buffer.from(a.raw), Buffer.from(b.raw)));
+  return xdr.ScVal.scvVec(
+    entries.map(({ raw, signature }) =>
+      nativeToScVal(
+        { public_key: Buffer.from(raw), signature: Buffer.from(signature) },
+        { type: { public_key: ["symbol", null], signature: ["symbol", null] } },
+      ),
+    ),
+  );
 }
 
 /** Funds an account on testnet. Friendbot answers 400 when the account already exists. */
@@ -377,8 +410,11 @@ async function signAuth(state, entries) {
   return Promise.all(
     entries.map(async (entry) => {
       if (!isAddressCredential(entry)) return entry;
-      const key = keyForAddress(state, credentialAddress(entry));
-      return authorizeEntry(entry, key, sequence + 100, PASSPHRASE);
+      const address = credentialAddress(entry);
+      const keys = signersForAddress(state, address);
+      if (keys.length === 1) return authorizeEntry(entry, keys[0], sequence + 100, PASSPHRASE);
+      const signer = async (_preimage, payload) => ({ signatureScVal: multisigSignature(keys, payload), address });
+      return authorizeEntry(entry, signer, sequence + 100, PASSPHRASE);
     }),
   );
 }
@@ -406,7 +442,7 @@ export async function send(state, sourceRole, operation, label = sourceRole) {
   }
 
   const ready = rpc.assembleTransaction(tx, sim).build();
-  ready.sign(source);
+  signTx(state, sourceRole, ready);
   const { result, hash, seconds, fee } = await submit(ready, label);
   return {
     value: result.returnValue ? scValToNative(result.returnValue) : undefined,
@@ -448,7 +484,7 @@ export async function probe(state, sourceRole, contractId, fn, args = []) {
 export async function classic(state, sourceRole, operation) {
   const source = keypair(state, sourceRole);
   const tx = await build(source.publicKey(), operation);
-  tx.sign(source);
+  signTx(state, sourceRole, tx);
   return (await submit(tx, `${sourceRole} ${operation.type ?? "classic"}`)).hash;
 }
 
@@ -524,7 +560,7 @@ export async function extendTtl(state, sourceRole, keys, ledgers) {
   const sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   const ready = rpc.assembleTransaction(tx, sim).build();
-  ready.sign(source);
+  signTx(state, sourceRole, ready);
   const { hash, seconds, fee } = await submit(ready, `${sourceRole} extend TTL`);
   return { hash, seconds, fee };
 }
