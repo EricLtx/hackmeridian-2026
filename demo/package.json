@@ -1,0 +1,15 @@
+{
+  "name": "open-window-demo",
+  "private": true,
+  "type": "module",
+  "description": "Testnet demo runner for the Open Window contract",
+  "scripts": {
+    "setup": "node setup.mjs",
+    "demo": "node run.mjs",
+    "status": "node run.mjs --status"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@stellar/stellar-sdk": "17.2.1"
+  }
+}

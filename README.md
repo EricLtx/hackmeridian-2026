@@ -92,7 +92,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Demo contracts: allowlisted fund share token (`fund-token`) and operator-fed SEP-40 feed (`nav-oracle`)
 - [ ] Monitoring plan rehearsed on testnet with at least one real trigger
 - [ ] Multisig administrator and time delay on upgrades and oracle changes (the emergency pause is in place)
-- [ ] Testnet deployment with test fund tokens and a test oracle
+- [x] Testnet deployment with test fund tokens and a test oracle: a scripted live demo in [demo/](demo/README.md), with a fallback FX feed
 - [ ] Minimal web interface
 - [ ] Third-party audit before any mainnet deployment
 
@@ -169,10 +169,20 @@ stellar contract deploy \
 
 stellar contract invoke --id night_window --source-account alice --network testnet \
   -- version
-# 1
+# 2
 ```
 
 The deployed contract can be inspected on [stellar.expert/explorer/testnet](https://stellar.expert/explorer/testnet) or in [Stellar Lab](https://lab.stellar.org). `stellar contract invoke --id night_window -- -h` prints the generated command line for every function.
+
+### 4. Run the live demo
+
+[demo/README.md](demo/README.md) deploys the three contracts on testnet with a test euro stablecoin, then runs the scenes live: opening a repo, the refusals (loan too large, faulty NAV, pause), repurchase, seizure at maturity, and a comparison with the redemption route at four moments of the week.
+
+```sh
+cd demo && npm install
+npm run setup     # at least one hour before: the seizure scene needs a matured repo
+npm run demo
+```
 
 ## Documentation
 

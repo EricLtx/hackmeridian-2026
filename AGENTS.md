@@ -61,9 +61,9 @@ stellar contract invoke \
   -- version
 ```
 
-The workspace holds one contract, `night-window` (`contracts/night-window/`): the Open Window contract, a stablecoin liquidity facility for tokenized fund shares built as a repo. The crate keeps its historical name; the product name is Open Window. Its constructor takes `--admin <address>`, passed after the `--` separator at deploy time. `stellar contract invoke --id <id> -- -h` prints the generated CLI for the deployed contract.
+The product contract is `night-window` (`contracts/night-window/`): the Open Window contract, a stablecoin liquidity facility for tokenized fund shares built as a repo. The crate keeps its historical name; the product name is Open Window. Its constructor takes `--admin <address>`, passed after the `--` separator at deploy time. `stellar contract invoke --id <id> -- -h` prints the generated CLI for the deployed contract.
 
-Administration, the fund registry, the upgrade path and the SEP-40 price lookup are implemented. The lifecycle entry points (`create_offer`, `withdraw_offer`, `open_repo`, `repurchase`, `seize`) are declared and return `Error::NotImplemented` until the functional specification is validated. Error codes are public ABI: add new ones, never renumber.
+The full lifecycle is implemented and tested: roles, fund admission, offers, `open_repo`, `repurchase`, `seize`, price checks. `contracts/fund-token/` (allowlisted SEP-41 share token) and `contracts/nav-oracle/` (operator-fed SEP-40 feed) exist for the tests and the testnet demo in `demo/`; they are not part of the product. Error codes are public ABI: add new ones, never renumber; `NotImplemented` (code 1) stays reserved.
 
 ## Public repository: what stays out
 
