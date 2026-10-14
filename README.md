@@ -92,10 +92,12 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Model-based NAV corridor, cross price through an FX feed with its own band and haircut
 - [x] Independent security review; every finding fixed or recorded, with a test per fix
 - [x] Demo contracts: allowlisted fund share token (`fund-token`) and operator-fed SEP-40 feed (`nav-oracle`)
-- [ ] Monitoring plan rehearsed on testnet with at least one real trigger
+- [x] Monitoring plan implemented and rehearsed on testnet: six of seven detectors fired on a real trigger ([docs/procedure-incident.md](docs/procedure-incident.md))
+- [x] Upgrade test with the real WASM, 200-repo load test at constant cost, Scout static analysis with every alert justified
 - [ ] Multisig administrator and time delay on upgrades and oracle changes (the emergency pause is in place)
 - [x] Testnet deployment with test fund tokens and a test oracle: a scripted live demo in [demo/](demo/README.md), with a fallback FX feed
-- [ ] Minimal web interface
+- [x] Minimal web interface with Freighter: market board, borrow, positions, repurchase, lend, withdraw, take the shares at maturity ([web/](web/README.md))
+- [ ] OpenZeppelin detectors for Soroban, and an indexer that keeps history beyond the RPC's retention
 - [ ] Third-party audit before any mainnet deployment
 
 ## Security
@@ -118,10 +120,14 @@ The enforced part of the baseline:
 │   ├── night-window/        # Open Window, the repo contract, and its host-side tests (src/test.rs)
 │   ├── fund-token/          # demo: SEP-41 share token restricted to an issuer allowlist
 │   └── nav-oracle/          # demo: SEP-40 feed an operator publishes a NAV to
-├── demo/                    # testnet demo runner (Node.js, @stellar/stellar-sdk)
+├── demo/                    # testnet demo runner, wallet onboarding and monitoring (Node.js)
+├── web/                     # minimal web interface (Vite, plain JavaScript, Freighter)
 ├── docs/
 │   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S19 (French)
-│   ├── modele-menace-stride.md # STRIDE threat model and first monitoring plan (French)
+│   ├── modele-menace-stride.md # STRIDE threat model and monitoring plan (French)
+│   ├── procedure-incident.md # incident procedure and monitoring rehearsal (French)
+│   ├── faq.md               # questions and answers for five audiences
+│   ├── roadmap.md           # from MVP to a product in operation
 │   ├── stellar-platform.md  # overview of the Stellar platform (French)
 │   └── claude-tooling.md    # AI tooling: plugins, skills, MCP (French)
 ├── .github/
@@ -186,6 +192,15 @@ npm run setup     # at least one hour before: the seizure scene needs a matured 
 npm run demo
 ```
 
+### 5. Use the web interface
+
+[web/README.md](web/README.md) serves the interface against the testnet deployment written by `npm run setup`. The market board needs no wallet. To borrow or lend, connect Freighter on testnet, add the tEUR trustline in the page, then let the operator onboard the address.
+
+```sh
+cd web && npm install && npm run dev
+cd demo && npm run onboard -- G...YOUR_ADDRESS     # --role=lender for a lender
+```
+
 ## Documentation
 
 - [docs/faq.md](docs/faq.md): questions and answers for newcomers, users, the Stellar ecosystem, engineers and security reviewers.
@@ -193,6 +208,7 @@ npm run demo
 
 - [docs/securite.md](docs/securite.md): security baseline, threat model and invariants of the contract (French).
 - [docs/modele-menace-stride.md](docs/modele-menace-stride.md): STRIDE threat model and monitoring plan (French).
+- [docs/procedure-incident.md](docs/procedure-incident.md): incident procedure, roles, action per alert and the monitoring rehearsal (French).
 - [docs/stellar-platform.md](docs/stellar-platform.md): overview of the Stellar platform (French).
 - [docs/claude-tooling.md](docs/claude-tooling.md): AI tooling (French).
 - [AGENTS.md](AGENTS.md): build, test and security rules for contributors and AI agents.

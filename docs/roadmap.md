@@ -58,6 +58,18 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **What it retires:** the operating risk. The team can see, explain and stop what happens on chain.
 
+**Status on 14 October 2026:**
+
+| Item | State | Evidence |
+|---|---|---|
+| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; a manual run with Freighter is still to record |
+| Indexer | Partly | Positions are read from the contract and from RPC events; history beyond the RPC's retention of about seven days needs a dedicated indexer |
+| Monitoring | Done | Six of seven detectors fired on a real testnet trigger and the action was taken; the TTL threshold had to be forced, and the event trail has no possible real trigger ([procedure-incident.md](procedure-incident.md)) |
+| Incident procedure | Done | [procedure-incident.md](procedure-incident.md) |
+| Static analysis | Partly | Scout: 2 medium and 23 enhancement alerts, all justified; OpenZeppelin detectors not run yet |
+| Upgrade test | Done | `upgrade_to_the_built_wasm_keeps_offers_repos_and_roles` |
+| Load test | Done | `many_repos_keep_a_constant_footprint_per_operation`: 200 repos, 17 entries read and 9 written by every `open_repo` |
+
 ### Step 2: hardening for real assets
 
 **Adds:**

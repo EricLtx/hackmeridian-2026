@@ -10,3 +10,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /demo
+    schedule:
+      interval: weekly

@@ -253,9 +253,8 @@ Open Window is designed to be operated as an ICT service a regulated entity can 
 
 - **Third-party audit:** not done.
 - **Multisig governor and time delay** on upgrades and oracle changes: not in place. Today the governor is a single key.
-- **Monitoring plan:** written, not rehearsed.
-- **Static analysis** with Scout and the OpenZeppelin detectors: to run.
-- **Upgrade test with a real uploaded WASM:** to write.
+- **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where six of seven detectors fired on a real trigger ([procedure-incident.md](procedure-incident.md)); it is not yet run continuously on dedicated infrastructure.
+- **Static analysis:** Scout has run, with every alert justified in [securite.md](securite.md), section 7; the OpenZeppelin detectors have not run yet.
 - **Issuer freeze during a repo:** documented limit, planned for version 1.1.
 
 Each item has a place in the [roadmap](roadmap.md), before any real deposit.
@@ -265,7 +264,7 @@ Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 ## Status and limits
 
 - **Testnet only.** Nothing is deployed on mainnet, and no real asset is at stake.
-- **No web interface yet.** The demo runs in a terminal; transactions can be checked on the testnet explorer.
+- **A minimal web interface** in `web/` covers the market board, borrowing, positions, repurchase, lending and seizure at maturity, with the Freighter wallet on testnet. The scripted demo runs in a terminal, and every transaction can be checked on the testnet explorer.
 - **Version 1 scope:**
   - whole repurchase only, no partial repayment and no rollover;
   - one NAV feed per fund;
