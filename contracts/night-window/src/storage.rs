@@ -4,7 +4,10 @@
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
 use crate::error::Error;
-use crate::types::{DataKey, FundConfig, FundState, Offer, Repo, RiskEnvelope, StablecoinConfig};
+use crate::types::{
+    DataKey, FallbackFeed, FundConfig, FundState, Offer, PendingFallback, PendingFundChange,
+    PendingRelease, PendingUpgrade, Repo, RiskEnvelope, StablecoinConfig,
+};
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -227,4 +230,134 @@ pub fn repo(env: &Env, repo_id: u64) -> Result<Repo, Error> {
 
 pub fn set_repo(env: &Env, repo_id: u64, repo: &Repo) {
     put(env, &DataKey::Repo(repo_id), repo);
+}
+
+pub fn pending_release(env: &Env, repo_id: u64) -> Option<PendingRelease> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingRelease(repo_id))
+}
+
+pub fn set_pending_release(env: &Env, repo_id: u64, release: &PendingRelease) {
+    put(env, &DataKey::PendingRelease(repo_id), release);
+}
+
+pub fn remove_pending_release(env: &Env, repo_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingRelease(repo_id));
+}
+
+// -- Time delay (decision S7) --------------------------------------------------
+
+pub fn timelock_delay(env: &Env, default: u64) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::TimelockDelay)
+        .unwrap_or(default)
+}
+
+pub fn set_timelock_delay(env: &Env, delay: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TimelockDelay, &delay);
+}
+
+/// Whether value can be at stake: a fund was admitted, or an offer was ever
+/// created. The second test covers a contract upgraded from version 2, whose
+/// funds were admitted before the flag existed: offers need admitted funds.
+pub fn past_bootstrap(env: &Env) -> bool {
+    let admitted: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::FundsAdmitted)
+        .unwrap_or(false);
+    let next_offer: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::NextOfferId)
+        .unwrap_or(1);
+    admitted || next_offer > 1
+}
+
+pub fn mark_funds_admitted(env: &Env) {
+    env.storage().instance().set(&DataKey::FundsAdmitted, &true);
+}
+
+pub fn pending_upgrade(env: &Env) -> Option<PendingUpgrade> {
+    env.storage().instance().get(&DataKey::PendingUpgrade)
+}
+
+pub fn set_pending_upgrade(env: &Env, pending: &PendingUpgrade) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PendingUpgrade, pending);
+}
+
+pub fn remove_pending_upgrade(env: &Env) {
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
+}
+
+pub fn pending_fund_change(env: &Env, fund: &Address) -> Option<PendingFundChange> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingFundChange(fund.clone()))
+}
+
+pub fn set_pending_fund_change(env: &Env, fund: &Address, pending: &PendingFundChange) {
+    put(env, &DataKey::PendingFundChange(fund.clone()), pending);
+}
+
+pub fn remove_pending_fund_change(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingFundChange(fund.clone()));
+}
+
+// -- Fallback NAV feed -----------------------------------------------------------
+
+/// The active fallback feed of a fund and its decimals. The instance flag is
+/// read first, so a fund without fallback touches no extra ledger entry.
+pub fn fallback(env: &Env, fund: &Address) -> Option<(FallbackFeed, u32)> {
+    let decimals: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::FallbackDecimals(fund.clone()))?;
+    let feed: FallbackFeed = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Fallback(fund.clone()))?;
+    Some((feed, decimals))
+}
+
+pub fn set_fallback(env: &Env, fund: &Address, feed: &FallbackFeed, decimals: u32) {
+    put(env, &DataKey::Fallback(fund.clone()), feed);
+    env.storage()
+        .instance()
+        .set(&DataKey::FallbackDecimals(fund.clone()), &decimals);
+}
+
+pub fn remove_fallback(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::Fallback(fund.clone()));
+    env.storage()
+        .instance()
+        .remove(&DataKey::FallbackDecimals(fund.clone()));
+}
+
+pub fn pending_fallback(env: &Env, fund: &Address) -> Option<PendingFallback> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingFallback(fund.clone()))
+}
+
+pub fn set_pending_fallback(env: &Env, fund: &Address, pending: &PendingFallback) {
+    put(env, &DataKey::PendingFallback(fund.clone()), pending);
+}
+
+pub fn remove_pending_fallback(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingFallback(fund.clone()));
 }

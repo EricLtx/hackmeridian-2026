@@ -9,8 +9,8 @@
 use soroban_sdk::{contractclient, Address, Env};
 
 use crate::error::Error;
-use crate::math::{corridor, model_path, within_band, Bps, Price};
-use crate::types::{Asset, FundConfig, FundState, PriceData, PriceSource};
+use crate::math::{corridor, model_path, rescale_floor, within_band, Bps, Price};
+use crate::types::{Asset, FallbackFeed, FundConfig, FundState, PriceData, PriceSource};
 
 /// The subset of the SEP-40 interface this contract consumes.
 #[contractclient(name = "OracleClient")]
@@ -53,15 +53,91 @@ pub fn read_fresh(
     let data = OracleClient::new(env, oracle)
         .lastprice(asset)
         .ok_or(Error::NoPrice)?;
+    check_fresh(env, &data, decimals, decimals, max_age)
+}
+
+/// Checks a price point for freshness and sign, and expresses it with
+/// `to_decimals` digits, rounding down.
+fn check_fresh(
+    env: &Env,
+    data: &PriceData,
+    from_decimals: u32,
+    to_decimals: u32,
+    max_age: u64,
+) -> Result<Reading, Error> {
     let now = env.ledger().timestamp();
     let age = now.checked_sub(data.timestamp).ok_or(Error::InvalidPrice)?;
     if age > max_age {
         return Err(Error::StalePrice);
     }
+    if data.price <= 0 {
+        return Err(Error::InvalidPrice);
+    }
     Ok(Reading {
-        price: Price::new(data.price, decimals)?,
+        price: Price::new(
+            rescale_floor(data.price, from_decimals, to_decimals)?,
+            to_decimals,
+        )?,
         timestamp: data.timestamp,
     })
+}
+
+/// Reads a fallback feed, expressed with the primary feed's decimals. A
+/// fallback that traps is treated as silent: a broken backup must not take
+/// the primary feed down with it.
+pub fn read_fallback(
+    env: &Env,
+    feed: &FallbackFeed,
+    decimals: u32,
+    nav_decimals: u32,
+) -> Result<Reading, Error> {
+    let data = match OracleClient::new(env, &feed.oracle).try_lastprice(&feed.asset) {
+        Ok(Ok(Some(data))) => data,
+        _ => return Err(Error::NoPrice),
+    };
+    check_fresh(env, &data, decimals, nav_decimals, feed.max_age_secs)
+}
+
+/// The fund's NAV, from the primary feed or its fallback, like a redundant
+/// sensor pair: the primary is used whenever it is fresh, and a fresh
+/// fallback must then agree with it within `max_divergence_bps`, otherwise
+/// neither is trusted. When the primary is stale or silent, a fresh fallback
+/// stands in; when both are, the primary's error is returned, as without a
+/// fallback. A primary that publishes an invalid price is not replaced: that
+/// is a faulty feed to investigate, not an outage.
+pub fn read_nav(
+    env: &Env,
+    config: &FundConfig,
+    state: &FundState,
+    fallback: Option<&(FallbackFeed, u32)>,
+) -> Result<Reading, Error> {
+    let primary = read_fresh(
+        env,
+        &config.oracle,
+        &config.oracle_asset,
+        state.nav_decimals,
+        config.nav_max_age_secs,
+    );
+    let Some((feed, decimals)) = fallback else {
+        return primary;
+    };
+    let backup = read_fallback(env, feed, *decimals, state.nav_decimals);
+    match primary {
+        Ok(nav) => {
+            if let Ok(backup) = backup {
+                if !within_band(
+                    backup.price.mantissa(),
+                    nav.price.mantissa(),
+                    feed.max_divergence_bps,
+                )? {
+                    return Err(Error::PriceDivergence);
+                }
+            }
+            Ok(nav)
+        }
+        Err(error @ (Error::StalePrice | Error::NoPrice)) => backup.map_err(|_| error),
+        Err(error) => Err(error),
+    }
 }
 
 /// Checks that `nav` lies in the corridor predicted from the fund's reference.
@@ -102,15 +178,15 @@ pub fn next_reference(
     ))
 }
 
-/// Values a fund's shares in its loan currency.
-pub fn value(env: &Env, config: &FundConfig, state: &FundState) -> Result<Valuation, Error> {
-    let nav = read_fresh(
-        env,
-        &config.oracle,
-        &config.oracle_asset,
-        state.nav_decimals,
-        config.nav_max_age_secs,
-    )?;
+/// Values a fund's shares in its loan currency. Whichever feed supplied the
+/// NAV, it goes through the same corridor and FX checks.
+pub fn value(
+    env: &Env,
+    config: &FundConfig,
+    state: &FundState,
+    fallback: Option<&(FallbackFeed, u32)>,
+) -> Result<Valuation, Error> {
+    let nav = read_nav(env, config, state, fallback)?;
     check_corridor(config, state, &nav)?;
     let haircut = Bps::haircut(config.haircut_bps)?;
     match &config.source {

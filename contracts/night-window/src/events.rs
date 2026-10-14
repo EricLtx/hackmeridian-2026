@@ -1,7 +1,7 @@
 //! Events: one per state transition (decision S13), identifiers and
 //! addresses as topics, for audit, indexing and issuer reconciliation.
 
-use soroban_sdk::{contractevent, Address, Symbol};
+use soroban_sdk::{contractevent, Address, BytesN, Symbol};
 
 use crate::types::RiskEnvelope;
 
@@ -158,6 +158,94 @@ pub struct RepoRepurchased {
 
 #[contractevent]
 pub struct RepoSeized {
+    #[topic]
+    pub repo_id: u64,
+    pub to: Address,
+    pub shares: i128,
+}
+
+// -- Time delay (decision S7) -------------------------------------------------
+
+#[contractevent]
+pub struct TimelockDelayChanged {
+    pub delay: u64,
+}
+
+#[contractevent]
+pub struct UpgradeProposed {
+    pub wasm_hash: BytesN<32>,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct UpgradeCancelled {
+    pub wasm_hash: BytesN<32>,
+    pub by: Address,
+}
+
+/// Published just before the code switches, by the code being replaced.
+#[contractevent]
+pub struct Upgraded {
+    pub wasm_hash: BytesN<32>,
+}
+
+#[contractevent]
+pub struct FundChangeProposed {
+    #[topic]
+    pub fund: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct FundChangeCancelled {
+    #[topic]
+    pub fund: Address,
+    pub by: Address,
+}
+
+// -- Fallback NAV feed ----------------------------------------------------------
+
+#[contractevent]
+pub struct FallbackProposed {
+    #[topic]
+    pub fund: Address,
+    pub oracle: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct FallbackSet {
+    #[topic]
+    pub fund: Address,
+    pub oracle: Address,
+}
+
+#[contractevent]
+pub struct FallbackCancelled {
+    #[topic]
+    pub fund: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct FallbackRemoved {
+    #[topic]
+    pub fund: Address,
+    pub by: Address,
+}
+
+// -- Deferred share release (decision S9) ---------------------------------------
+
+#[contractevent]
+pub struct ReleaseDeferred {
+    #[topic]
+    pub repo_id: u64,
+    pub to: Address,
+    pub shares: i128,
+}
+
+#[contractevent]
+pub struct SharesReleased {
     #[topic]
     pub repo_id: u64,
     pub to: Address,

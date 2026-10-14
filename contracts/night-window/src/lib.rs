@@ -14,14 +14,18 @@
 //! - guardian: pauses new entries, nothing else;
 //! - steward, one per fund (the issuer's key): approves lenders, tunes its
 //!   fund inside the envelope, freezes its fund, marks sponsor offers;
-//! - anyone: refreshes a fund's NAV reference inside the corridor.
+//! - anyone: refreshes a fund's NAV reference inside the corridor, applies a
+//!   change whose time delay has elapsed, retries a deferred share release.
 //!
 //! The pause stops new offers and new repos; it never blocks a repurchase, a
-//! withdrawal of an offer or a seizure. Security baseline, invariants and
+//! withdrawal of an offer or a seizure. Upgrades, replacements of an admitted
+//! fund and fallback NAV feeds wait for a time delay, during which the
+//! guardian can cancel them (decision S7). Security baseline, invariants and
 //! decisions: `docs/securite.md`.
 
 use soroban_sdk::{
-    contract, contractimpl, contractmeta, Address, BytesN, ContractExecutable, Env, Symbol, Vec,
+    contract, contractimpl, contractmeta, panic_with_error, Address, BytesN, ContractExecutable,
+    Env, Symbol, Vec,
 };
 
 mod error;
@@ -35,14 +39,15 @@ mod types;
 pub use error::Error;
 pub use oracle::{OracleClient, Sep40Oracle};
 pub use types::{
-    Asset, DataKey, FundConfig, FundState, FxLeg, Offer, PriceData, PriceSource, Quote, Repo,
+    Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg, Offer, PendingFallback,
+    PendingFundChange, PendingRelease, PendingUpgrade, PriceData, PriceSource, Quote, Repo,
     RepoStatus, RiskEnvelope, StablecoinConfig,
 };
 
 use events::*;
 use math::Bps;
 
-contractmeta!(key = "binver", val = "0.2.0");
+contractmeta!(key = "binver", val = "0.3.0");
 contractmeta!(
     key = "desc",
     val = "Open Window: stablecoin liquidity facility for tokenized fund shares (repo)"
@@ -60,6 +65,14 @@ pub const MAX_FUNDS_PER_OFFER: u32 = 8;
 /// Highest ceiling the governor may set for a term: thirty days, well inside
 /// the 120 days of TTL every repo entry receives at each write.
 pub const MAX_TERM_CEILING_SECS: u64 = 30 * 24 * 60 * 60;
+/// Time delay on upgrades and fund changes at deployment: 48 hours, enough
+/// for monitoring to alert and the guardian to pause and cancel (S7).
+pub const DEFAULT_TIMELOCK_SECS: u64 = 48 * 60 * 60;
+/// Shortest delay the governor may set: one minute, for demonstrations.
+pub const MIN_TIMELOCK_SECS: u64 = 60;
+/// Longest delay: thirty days, the longest term a repo may have. A longer
+/// delay would hold an urgent fix back for longer than any repo lasts.
+pub const MAX_TIMELOCK_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Envelope at deployment. The governor may tighten or widen it.
 pub fn default_envelope() -> RiskEnvelope {
@@ -85,6 +98,7 @@ impl OpenWindow {
         storage::set_guardian(&env, &admin);
         storage::set_max_term(&env, DEFAULT_MAX_TERM_SECS);
         storage::set_envelope(&env, &default_envelope());
+        storage::set_timelock_delay(&env, DEFAULT_TIMELOCK_SECS);
         env.storage().instance().set(&DataKey::NextOfferId, &1u64);
         env.storage().instance().set(&DataKey::NextRepoId, &1u64);
     }
@@ -93,7 +107,7 @@ impl OpenWindow {
 
     /// Version of the contract interface. Bump on every incompatible change.
     pub fn version() -> u32 {
-        2
+        3
     }
 
     /// The governor (historical name kept for interface stability).
@@ -137,10 +151,87 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Replaces the contract code. The WASM must already be uploaded; storage
-    /// and address are kept. Requires the governor.
+    /// Time delay applied to upgrades, fund replacements and fallback feeds,
+    /// in seconds.
+    pub fn timelock_delay(env: Env) -> u64 {
+        storage::timelock_delay(&env, DEFAULT_TIMELOCK_SECS)
+    }
+
+    /// Sets the time delay, between one minute and thirty days. Until a fund
+    /// is first admitted nothing is at stake, so any value in that range is
+    /// accepted (a demonstration may run with minutes); from then on, the
+    /// delay may only grow, or a compromised governor would shorten the
+    /// window before acting. Proposals already made keep their eta. Requires
+    /// the governor.
+    pub fn set_timelock_delay(env: Env, delay: u64) -> Result<(), Error> {
+        storage::require_governor(&env);
+        if !(MIN_TIMELOCK_SECS..=MAX_TIMELOCK_SECS).contains(&delay) {
+            return Err(Error::OutsideEnvelope);
+        }
+        if storage::past_bootstrap(&env)
+            && delay < storage::timelock_delay(&env, DEFAULT_TIMELOCK_SECS)
+        {
+            return Err(Error::DelayCannotDecrease);
+        }
+        storage::set_timelock_delay(&env, delay);
+        storage::bump_instance(&env);
+        TimelockDelayChanged { delay }.publish(&env);
+        Ok(())
+    }
+
+    /// Proposes new contract code, applicable by `upgrade` once the delay has
+    /// elapsed. Replaces any earlier proposal. Requires the governor.
+    pub fn propose_upgrade(env: Env, wasm_hash: BytesN<32>) -> Result<(), Error> {
+        storage::require_governor(&env);
+        let eta = eta(&env)?;
+        storage::set_pending_upgrade(
+            &env,
+            &PendingUpgrade {
+                wasm_hash: wasm_hash.clone(),
+                eta,
+            },
+        );
+        storage::bump_instance(&env);
+        UpgradeProposed { wasm_hash, eta }.publish(&env);
+        Ok(())
+    }
+
+    pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        storage::pending_upgrade(&env)
+    }
+
+    /// Withdraws the proposed upgrade. `caller` must be the governor or the
+    /// guardian: the guardian's veto is what the delay is for.
+    pub fn cancel_upgrade(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        let pending = storage::pending_upgrade(&env).ok_or(Error::NotProposed)?;
+        storage::remove_pending_upgrade(&env);
+        storage::bump_instance(&env);
+        UpgradeCancelled {
+            wasm_hash: pending.wasm_hash,
+            by: caller,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Replaces the contract code with the proposed WASM, once its delay has
+    /// elapsed. The WASM must already be uploaded; storage and address are
+    /// kept. Requires the governor. The signature is the one of version 2,
+    /// so failures are raised as typed contract errors.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         storage::require_governor(&env);
+        if let Err(error) = take_due_upgrade(&env, &new_wasm_hash) {
+            panic_with_error!(&env, error);
+        }
+        storage::bump_instance(&env);
+        Upgraded {
+            wasm_hash: new_wasm_hash.clone(),
+        }
+        .publish(&env);
         env.deployer()
             .update_current_contract(ContractExecutable::Wasm(new_wasm_hash));
     }
@@ -245,13 +336,20 @@ impl OpenWindow {
         storage::currency_outstanding(&env, &currency)
     }
 
-    /// Admits a fund, or replaces its configuration. Requires both the
-    /// governor and the fund's steward: a two-key admission. A replacement
-    /// also requires the current steward, and cannot change the currency
-    /// while repos are open. Checks the configuration against the envelope,
-    /// checks the oracles report in the right currency, reads the decimals,
-    /// and sets the NAV and FX references from fresh prices. Open repos keep
-    /// their frozen terms (invariant I9).
+    /// Admits a fund, or proposes a replacement of its configuration.
+    /// Requires both the governor and the fund's steward: a two-key
+    /// admission. A replacement also requires the current steward, and
+    /// cannot change the currency while repos are open. Checks the
+    /// configuration against the envelope, checks the oracles report in the
+    /// right currency, reads the decimals and fresh prices.
+    ///
+    /// A first admission applies at once: no offer can list the fund yet, so
+    /// nobody is exposed to it. A replacement changes the oracle or the
+    /// haircut under existing offers, so it is stored and applies through
+    /// `apply_fund_change` once the time delay has elapsed (decision S7). A
+    /// fund that was removed keeps its runtime state, so its re-admission is
+    /// a replacement too: removing then re-admitting cannot skip the delay.
+    /// Open repos keep their frozen terms (invariant I9).
     pub fn set_fund(env: Env, fund: Address, config: FundConfig) -> Result<(), Error> {
         storage::require_governor(&env);
         config.steward.require_auth();
@@ -260,68 +358,171 @@ impl OpenWindow {
                 current.steward.require_auth();
             }
         }
-        check_fund_config(&env, &config)?;
-
-        let nav_decimals = OracleClient::new(&env, &config.oracle).decimals();
-        let fx_decimals = match &config.source {
-            PriceSource::Cross(fx) => OracleClient::new(&env, &fx.oracle).decimals(),
-            PriceSource::Direct => 0,
-        };
-        let nav = oracle::read_fresh(
-            &env,
-            &config.oracle,
-            &config.oracle_asset,
-            nav_decimals,
-            config.nav_max_age_secs,
-        )?;
-        let reference_fx = match &config.source {
-            PriceSource::Cross(fx) => {
-                oracle::read_fresh(&env, &fx.oracle, &fx.asset, fx_decimals, fx.max_age_secs)?
-                    .price
-                    .mantissa()
-            }
-            PriceSource::Direct => 0,
-        };
-        let previous = storage::fund_state(&env, &fund).ok();
-        if let Some(previous) = &previous {
-            if previous.outstanding > 0 && previous.currency != config.currency {
-                return Err(Error::CurrencyMismatch);
-            }
+        let state = prepare_fund(&env, &fund, &config)?;
+        if storage::fund_state(&env, &fund).is_ok() {
+            let eta = eta(&env)?;
+            storage::set_pending_fund_change(&env, &fund, &PendingFundChange { config, eta });
+            storage::mark_funds_admitted(&env);
+            storage::bump_instance(&env);
+            FundChangeProposed { fund, eta }.publish(&env);
+            return Ok(());
         }
-        let state = FundState {
-            currency: config.currency.clone(),
-            share_decimals: token_io::decimals(&env, &fund),
-            nav_decimals,
-            fx_decimals,
-            reference_nav: nav.price.mantissa(),
-            reference_time: nav.timestamp,
-            reference_fx,
-            outstanding: previous.as_ref().map_or(0, |s| s.outstanding),
-            frozen: previous.as_ref().is_some_and(|s| s.frozen),
-        };
-        storage::set_fund(&env, &fund, &config);
-        storage::set_fund_state(&env, &fund, &state);
+        install_fund(&env, fund, config, state);
+        Ok(())
+    }
+
+    /// Applies a fund replacement whose delay has elapsed. Anyone may call
+    /// it: the keys signed the proposal. The configuration is checked again
+    /// now, with fresh prices, and the references are anchored as at
+    /// admission; on failure the proposal stays for a later attempt.
+    pub fn apply_fund_change(env: Env, fund: Address) -> Result<(), Error> {
+        let pending = storage::pending_fund_change(&env, &fund).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        let state = prepare_fund(&env, &fund, &pending.config)?;
+        storage::remove_pending_fund_change(&env, &fund);
+        install_fund(&env, fund, pending.config, state);
+        Ok(())
+    }
+
+    /// Withdraws a pending fund replacement. `caller` must be the governor,
+    /// the guardian or the fund's current steward.
+    pub fn cancel_fund_change(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        if storage::pending_fund_change(&env, &fund).is_none() {
+            return Err(Error::NotProposed);
+        }
+        storage::remove_pending_fund_change(&env, &fund);
         storage::bump_instance(&env);
-        FundSet {
+        FundChangeCancelled { fund, by: caller }.publish(&env);
+        Ok(())
+    }
+
+    pub fn pending_fund_change(env: Env, fund: Address) -> Option<PendingFundChange> {
+        storage::pending_fund_change(&env, &fund)
+    }
+
+    /// Removes a fund from the registry, at once: removal never harms an open
+    /// repo. Open repos on that fund can still be repurchased or seized:
+    /// their terms are frozen. A pending replacement and the fallback feed go
+    /// with it, so that nothing brings the fund back on its own. Requires
+    /// the governor.
+    pub fn remove_fund(env: Env, fund: Address) -> Result<(), Error> {
+        let governor = storage::require_governor(&env);
+        if !storage::has_fund(&env, &fund) {
+            return Err(Error::FundNotAccepted);
+        }
+        storage::remove_fund(&env, &fund);
+        if storage::pending_fund_change(&env, &fund).is_some() {
+            storage::remove_pending_fund_change(&env, &fund);
+            FundChangeCancelled {
+                fund: fund.clone(),
+                by: governor.clone(),
+            }
+            .publish(&env);
+        }
+        if storage::pending_fallback(&env, &fund).is_some() {
+            storage::remove_pending_fallback(&env, &fund);
+            FallbackCancelled {
+                fund: fund.clone(),
+                by: governor.clone(),
+            }
+            .publish(&env);
+        }
+        if storage::fallback(&env, &fund).is_some() {
+            storage::remove_fallback(&env, &fund);
+            FallbackRemoved {
+                fund: fund.clone(),
+                by: governor,
+            }
+            .publish(&env);
+        }
+        storage::bump_instance(&env);
+        FundRemoved { fund }.publish(&env);
+        Ok(())
+    }
+
+    // -- Fallback NAV feed ----------------------------------------------------
+
+    /// Proposes a fallback NAV feed for a fund. It is an oracle change, so it
+    /// needs the same two keys as an admission and waits for the time delay.
+    /// The feed must report in the NAV oracle's base, publish a fresh price
+    /// for the shares now and agree with the primary feed when that one is
+    /// fresh; its age limit stays within the envelope's NAV age, and its
+    /// divergence tolerance within the envelope's corridor floor. Replaces
+    /// any earlier proposal. Requires the governor and the fund's steward.
+    pub fn propose_fallback(env: Env, fund: Address, feed: FallbackFeed) -> Result<(), Error> {
+        storage::require_governor(&env);
+        let config = storage::fund(&env, &fund)?;
+        config.steward.require_auth();
+        check_fallback(&env, &fund, &config, &feed)?;
+        let eta = eta(&env)?;
+        let oracle = feed.oracle.clone();
+        storage::set_pending_fallback(&env, &fund, &PendingFallback { feed, eta });
+        storage::bump_instance(&env);
+        FallbackProposed { fund, oracle, eta }.publish(&env);
+        Ok(())
+    }
+
+    /// Activates a proposed fallback feed once its delay has elapsed, after
+    /// checking it again. Anyone may call it.
+    pub fn apply_fallback(env: Env, fund: Address) -> Result<(), Error> {
+        let pending = storage::pending_fallback(&env, &fund).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        let config = storage::fund(&env, &fund)?;
+        let decimals = check_fallback(&env, &fund, &config, &pending.feed)?;
+        storage::remove_pending_fallback(&env, &fund);
+        storage::set_fallback(&env, &fund, &pending.feed, decimals);
+        storage::bump_instance(&env);
+        FallbackSet {
             fund,
-            oracle: config.oracle,
-            haircut_bps: config.haircut_bps,
+            oracle: pending.feed.oracle,
         }
         .publish(&env);
         Ok(())
     }
 
-    /// Removes a fund from the registry. Open repos on that fund can still be
-    /// repurchased or seized: their terms are frozen. Requires the governor.
-    pub fn remove_fund(env: Env, fund: Address) -> Result<(), Error> {
-        storage::require_governor(&env);
-        if !storage::has_fund(&env, &fund) {
-            return Err(Error::FundNotAccepted);
+    /// Withdraws a proposed fallback feed. `caller` must be the governor, the
+    /// guardian or the fund's steward.
+    pub fn cancel_fallback(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+            return Err(Error::Unauthorized);
         }
-        storage::remove_fund(&env, &fund);
+        if storage::pending_fallback(&env, &fund).is_none() {
+            return Err(Error::NotProposed);
+        }
+        storage::remove_pending_fallback(&env, &fund);
         storage::bump_instance(&env);
-        FundRemoved { fund }.publish(&env);
+        FallbackCancelled { fund, by: caller }.publish(&env);
         Ok(())
+    }
+
+    /// Removes a fund's fallback feed, at once: removing a source never
+    /// loosens a check, it only makes valuation stop when the primary feed
+    /// does. `caller` must be the governor or the fund's steward.
+    pub fn remove_fallback(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != storage::governor(&env) && !is_steward(&env, &fund, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        if storage::fallback(&env, &fund).is_none() {
+            return Err(Error::NoFallback);
+        }
+        storage::remove_fallback(&env, &fund);
+        storage::bump_instance(&env);
+        FallbackRemoved { fund, by: caller }.publish(&env);
+        Ok(())
+    }
+
+    pub fn get_fallback(env: Env, fund: Address) -> Option<FallbackFeed> {
+        storage::fallback(&env, &fund).map(|(feed, _)| feed)
+    }
+
+    pub fn pending_fallback(env: Env, fund: Address) -> Option<PendingFallback> {
+        storage::pending_fallback(&env, &fund)
     }
 
     pub fn get_fund(env: Env, fund: Address) -> Option<FundConfig> {
@@ -435,18 +636,15 @@ impl OpenWindow {
     /// Lowers the NAV reference to the oracle's current NAV, for instance after
     /// a legitimate drop. It can only lower it: upward, the reference follows
     /// the model path, so a steward who also runs the feed cannot inflate the
-    /// collateral. Takes no price from the caller. Requires the fund's steward.
+    /// collateral. Takes no price from the caller; the NAV follows the same
+    /// rule as a valuation, so a fresh fallback stands in for a silent
+    /// primary feed. Requires the fund's steward.
     pub fn reset_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
         let mut state = storage::fund_state(&env, &fund)?;
-        let nav = oracle::read_fresh(
-            &env,
-            &config.oracle,
-            &config.oracle_asset,
-            state.nav_decimals,
-            config.nav_max_age_secs,
-        )?;
+        let fallback = storage::fallback(&env, &fund);
+        let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
         let lowered = nav.price.mantissa().min(state.reference_nav);
         let timestamp = nav.timestamp.max(state.reference_time);
         Ok(set_reference(&env, &fund, &mut state, lowered, timestamp))
@@ -476,13 +674,8 @@ impl OpenWindow {
     pub fn refresh_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         let mut state = storage::fund_state(&env, &fund)?;
-        let nav = oracle::read_fresh(
-            &env,
-            &config.oracle,
-            &config.oracle_asset,
-            state.nav_decimals,
-            config.nav_max_age_secs,
-        )?;
+        let fallback = storage::fallback(&env, &fund);
+        let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
         oracle::check_corridor(&config, &state, &nav)?;
         if let Some(next) = oracle::next_reference(&config, &state, &nav)? {
             return Ok(set_reference(&env, &fund, &mut state, next, nav.timestamp));
@@ -515,7 +708,8 @@ impl OpenWindow {
         if coin.currency != config.currency {
             return Err(Error::CurrencyMismatch);
         }
-        let valuation = oracle::value(&env, &config, &state)?;
+        let fallback = storage::fallback(&env, &fund);
+        let valuation = oracle::value(&env, &config, &state, fallback.as_ref())?;
         let max_principal = math::max_principal(
             shares,
             state.share_decimals,
@@ -673,7 +867,10 @@ impl OpenWindow {
             return Err(Error::InsufficientOffer);
         }
 
-        let valuation = oracle::value(&env, &config, &state)?;
+        // Without a fallback, this reads only an instance key: the footprint
+        // of a fund without fallback does not grow.
+        let fallback = storage::fallback(&env, &fund);
+        let valuation = oracle::value(&env, &config, &state, fallback.as_ref())?;
         let ceiling = math::max_principal(
             shares,
             state.share_decimals,
@@ -768,6 +965,12 @@ impl OpenWindow {
     /// hour, with a minimum of one hour. Principal and interest both flow back
     /// into the offer, where the lender withdraws them: nothing in the
     /// borrower's exit depends on an address the lender controls.
+    ///
+    /// If the share token refuses to return the shares (issuer freeze,
+    /// allowlist removal, clawback), the debt still settles and the repo
+    /// closes; the shares stay attributed to the borrower as a pending
+    /// release that anyone can retry with `release` (decision S9). A failed
+    /// repayment still reverts everything.
     pub fn repurchase(env: Env, repo_id: u64) -> Result<(), Error> {
         let mut repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -792,7 +995,6 @@ impl OpenWindow {
         storage::bump_instance(&env);
 
         token_io::pull(&env, &repo.stablecoin, &repo.borrower, repayment)?;
-        token_io::push(&env, &repo.fund, &repo.borrower, repo.shares);
 
         RepoRepurchased {
             repo_id,
@@ -800,12 +1002,15 @@ impl OpenWindow {
             interest,
         }
         .publish(&env);
+        deliver_shares(&env, repo_id, &repo.fund, &repo.borrower, repo.shares);
         Ok(())
     }
 
     /// From maturity, the lender seizes the shares of an unpaid repo and sends
     /// them to `to`, the lender or another address the fund's steward
-    /// approved. Allowed while paused.
+    /// approved. Allowed while paused. If the share token refuses the
+    /// delivery, the repo still defaults and the shares wait for `to` as a
+    /// pending release (decision S9).
     pub fn seize(env: Env, repo_id: u64, to: Address) -> Result<(), Error> {
         let mut repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -823,15 +1028,42 @@ impl OpenWindow {
         repo.status = RepoStatus::Defaulted;
         storage::set_repo(&env, repo_id, &repo);
         storage::bump_instance(&env);
-        token_io::push(&env, &repo.fund, &to, repo.shares);
 
         RepoSeized {
             repo_id,
-            to,
+            to: to.clone(),
             shares: repo.shares,
         }
         .publish(&env);
+        deliver_shares(&env, repo_id, &repo.fund, &to, repo.shares);
         Ok(())
+    }
+
+    /// Retries the delivery of shares a closed repo owes, to the beneficiary
+    /// recorded when the token refused them. Anyone may call it, typically
+    /// once the issuer has lifted the freeze or restored the allowlist; the
+    /// beneficiary cannot be changed, and no other path moves these shares.
+    /// Works while paused.
+    pub fn release(env: Env, repo_id: u64) -> Result<(), Error> {
+        let pending = storage::pending_release(&env, repo_id).ok_or(Error::NothingToRelease)?;
+        // The transfer goes first so that a refusal leaves the record as it
+        // is; Soroban forbids re-entering this contract during the call.
+        if !token_io::try_push(&env, &pending.fund, &pending.to, pending.shares) {
+            return Err(Error::ReleaseBlocked);
+        }
+        storage::remove_pending_release(&env, repo_id);
+        storage::bump_instance(&env);
+        SharesReleased {
+            repo_id,
+            to: pending.to,
+            shares: pending.shares,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn pending_release(env: Env, repo_id: u64) -> Option<PendingRelease> {
+        storage::pending_release(&env, repo_id)
     }
 
     pub fn get_offer(env: Env, offer_id: u64) -> Option<Offer> {
@@ -846,6 +1078,171 @@ impl OpenWindow {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn is_governor_or_guardian(env: &Env, caller: &Address) -> bool {
+    *caller == storage::governor(env) || *caller == storage::guardian(env)
+}
+
+/// Whether `caller` is the current steward of `fund`. A removed fund has
+/// none.
+fn is_steward(env: &Env, fund: &Address, caller: &Address) -> bool {
+    storage::fund(env, fund).is_ok_and(|config| config.steward == *caller)
+}
+
+/// When a proposal made now may apply.
+fn eta(env: &Env) -> Result<u64, Error> {
+    env.ledger()
+        .timestamp()
+        .checked_add(storage::timelock_delay(env, DEFAULT_TIMELOCK_SECS))
+        .ok_or(Error::ArithmeticOverflow)
+}
+
+/// Deadlines are compared to the ledger time, never inferred from a TTL.
+fn ensure_due(env: &Env, eta: u64) -> Result<(), Error> {
+    if env.ledger().timestamp() < eta {
+        return Err(Error::TimelockPending);
+    }
+    Ok(())
+}
+
+/// Consumes the pending upgrade if it names `wasm_hash` and its delay has
+/// elapsed.
+fn take_due_upgrade(env: &Env, wasm_hash: &BytesN<32>) -> Result<(), Error> {
+    let pending = storage::pending_upgrade(env).ok_or(Error::NotProposed)?;
+    if pending.wasm_hash != *wasm_hash {
+        return Err(Error::NotProposed);
+    }
+    ensure_due(env, pending.eta)?;
+    storage::remove_pending_upgrade(env);
+    Ok(())
+}
+
+/// Validates a fund configuration and computes the runtime state it would
+/// install, without writing anything: envelope, oracle currencies, decimals,
+/// fresh NAV and FX references, the currency rule under open repos, and the
+/// base of an active fallback feed. Used at admission, at the proposal of a
+/// replacement and again when the replacement applies.
+fn prepare_fund(env: &Env, fund: &Address, config: &FundConfig) -> Result<FundState, Error> {
+    check_fund_config(env, config)?;
+    let nav_oracle = OracleClient::new(env, &config.oracle);
+    let nav_decimals = nav_oracle.decimals();
+    let fx_decimals = match &config.source {
+        PriceSource::Cross(fx) => OracleClient::new(env, &fx.oracle).decimals(),
+        PriceSource::Direct => 0,
+    };
+    let nav = oracle::read_fresh(
+        env,
+        &config.oracle,
+        &config.oracle_asset,
+        nav_decimals,
+        config.nav_max_age_secs,
+    )?;
+    let reference_fx = match &config.source {
+        PriceSource::Cross(fx) => {
+            oracle::read_fresh(env, &fx.oracle, &fx.asset, fx_decimals, fx.max_age_secs)?
+                .price
+                .mantissa()
+        }
+        PriceSource::Direct => 0,
+    };
+    let previous = storage::fund_state(env, fund).ok();
+    if let Some(previous) = &previous {
+        if previous.outstanding > 0 && previous.currency != config.currency {
+            return Err(Error::CurrencyMismatch);
+        }
+    }
+    // A fallback backs up one NAV oracle: a new oracle in another base would
+    // make the two feeds incomparable. Remove the fallback first.
+    if let Some((feed, _)) = storage::fallback(env, fund) {
+        if OracleClient::new(env, &feed.oracle).base() != nav_oracle.base() {
+            return Err(Error::CurrencyMismatch);
+        }
+    }
+    Ok(FundState {
+        currency: config.currency.clone(),
+        share_decimals: token_io::decimals(env, fund),
+        nav_decimals,
+        fx_decimals,
+        reference_nav: nav.price.mantissa(),
+        reference_time: nav.timestamp,
+        reference_fx,
+        outstanding: previous.as_ref().map_or(0, |s| s.outstanding),
+        frozen: previous.as_ref().is_some_and(|s| s.frozen),
+    })
+}
+
+/// Writes a validated configuration and its state.
+fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) {
+    storage::set_fund(env, &fund, &config);
+    storage::set_fund_state(env, &fund, &state);
+    storage::mark_funds_admitted(env);
+    storage::bump_instance(env);
+    FundSet {
+        fund,
+        oracle: config.oracle,
+        haircut_bps: config.haircut_bps,
+    }
+    .publish(env);
+}
+
+/// Checks a fallback feed for a fund and returns its decimals.
+///
+/// The divergence tolerance is capped by the envelope's corridor floor: the
+/// floor is how far below the model the protocol lets a NAV fall before it
+/// calls the price faulty, so two feeds of the same NAV that differ by more
+/// than that cannot both be right. The age limit is capped like the primary
+/// feed's.
+fn check_fallback(
+    env: &Env,
+    fund: &Address,
+    config: &FundConfig,
+    feed: &FallbackFeed,
+) -> Result<u32, Error> {
+    let envelope = storage::envelope(env);
+    if feed.max_age_secs == 0
+        || feed.max_age_secs > envelope.max_nav_age_secs
+        || feed.max_divergence_bps == 0
+        || feed.max_divergence_bps > envelope.max_corridor_floor_bps
+    {
+        return Err(Error::OutsideEnvelope);
+    }
+    let fallback = OracleClient::new(env, &feed.oracle);
+    if fallback.base() != OracleClient::new(env, &config.oracle).base() {
+        return Err(Error::CurrencyMismatch);
+    }
+    let decimals = fallback.decimals();
+    let state = storage::fund_state(env, fund)?;
+    // The feed must track the shares now, and agree with a fresh primary.
+    oracle::read_fallback(env, feed, decimals, state.nav_decimals)?;
+    let candidate = (feed.clone(), decimals);
+    if let Err(Error::PriceDivergence) = oracle::read_nav(env, config, &state, Some(&candidate)) {
+        return Err(Error::PriceDivergence);
+    }
+    Ok(decimals)
+}
+
+/// Sends the shares a closed repo owes. When the token refuses, the shares
+/// stay in the contract, recorded for `to` (decision S9).
+fn deliver_shares(env: &Env, repo_id: u64, fund: &Address, to: &Address, shares: i128) {
+    if token_io::try_push(env, fund, to, shares) {
+        return;
+    }
+    storage::set_pending_release(
+        env,
+        repo_id,
+        &PendingRelease {
+            fund: fund.clone(),
+            to: to.clone(),
+            shares,
+        },
+    );
+    ReleaseDeferred {
+        repo_id,
+        to: to.clone(),
+        shares,
+    }
+    .publish(env);
+}
 
 /// Checks a fund configuration against the envelope and the currencies its
 /// oracles report in.

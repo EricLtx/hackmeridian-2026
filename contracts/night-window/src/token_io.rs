@@ -28,6 +28,17 @@ pub fn push(env: &Env, token: &Address, to: &Address, amount: i128) {
     TokenClient::new(env, token).transfer(&env.current_contract_address(), to, &amount);
 }
 
+/// Tries to move `amount` of `token` from the contract to `to` and reports
+/// whether the token accepted. A refusal (issuer freeze, allowlist, balance
+/// short after a clawback) rolls back only the token call, not the caller:
+/// the debt side of a repo can settle while the shares wait (decision S9).
+pub fn try_push(env: &Env, token: &Address, to: &Address, amount: i128) -> bool {
+    matches!(
+        TokenClient::new(env, token).try_transfer(&env.current_contract_address(), to, &amount),
+        Ok(Ok(()))
+    )
+}
+
 pub fn decimals(env: &Env, token: &Address) -> u32 {
     TokenClient::new(env, token).decimals()
 }

@@ -67,4 +67,22 @@ pub enum Error {
     DuplicateFund = 29,
     /// The caller does not hold the role this function requires.
     Unauthorized = 30,
+    /// Once a fund has been admitted, the time delay may only grow: a
+    /// compromised governor cannot shorten the window others have to react.
+    DelayCannotDecrease = 31,
+    /// No pending proposal matches: nothing proposed, already applied or
+    /// cancelled, or an upgrade to another WASM hash than the one proposed.
+    NotProposed = 32,
+    /// The proposal exists but its time delay has not elapsed yet.
+    TimelockPending = 33,
+    /// The share token still refuses to deliver the shares held for a closed
+    /// repo (issuer freeze, allowlist, clawback). The record is kept.
+    ReleaseBlocked = 34,
+    /// The fund's NAV feed and its fallback feed disagree by more than the
+    /// tolerance set for the fallback.
+    PriceDivergence = 35,
+    /// No shares are waiting to be released for this repo.
+    NothingToRelease = 36,
+    /// The fund has no fallback NAV feed.
+    NoFallback = 37,
 }

@@ -1,7 +1,7 @@
 //! Types exported in the contract interface. The interface freezes at the
 //! first public testnet deployment; from then on, add, never reshape.
 
-use soroban_sdk::{contracttype, Address, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
 /// Asset identifier as defined by SEP-40.
 #[contracttype]
@@ -56,6 +56,27 @@ pub enum DataKey {
     CurrencyCap(Symbol),
     /// Instance: governor proposed by `set_admin`, awaiting acceptance.
     PendingAdmin,
+    /// Instance: time delay of upgrades and fund changes, in seconds.
+    TimelockDelay,
+    /// Instance: set once a fund has been admitted. From then on, the time
+    /// delay may only grow.
+    FundsAdmitted,
+    /// Instance: the upgrade proposed by the governor, with its eta.
+    PendingUpgrade,
+    /// Persistent: replacement of an admitted fund's configuration, waiting
+    /// for its time delay.
+    PendingFundChange(Address),
+    /// Persistent: shares owed by a closed repo that the share token refused
+    /// to deliver, by repo identifier.
+    PendingRelease(u64),
+    /// Persistent: fallback NAV feed of a fund.
+    Fallback(Address),
+    /// Instance: decimals of a fund's fallback feed, present only while the
+    /// fallback is active. Kept in instance storage so that a fund without
+    /// fallback reads no extra ledger entry when it is valued.
+    FallbackDecimals(Address),
+    /// Persistent: fallback NAV feed proposed for a fund, with its eta.
+    PendingFallback(Address),
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -221,4 +242,63 @@ pub struct Quote {
     pub haircut_bps: u32,
     pub max_principal: i128,
     pub nav_timestamp: u64,
+}
+
+/// An upgrade proposed by the governor (decision S7). It can be applied by
+/// the governor from `eta` on, or cancelled by the governor or the guardian
+/// until then.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingUpgrade {
+    pub wasm_hash: BytesN<32>,
+    /// Ledger timestamp from which `upgrade` accepts this hash.
+    pub eta: u64,
+}
+
+/// A replacement of an admitted fund's configuration, signed by the governor
+/// and the steward(s), waiting for its time delay (decision S7).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingFundChange {
+    pub config: FundConfig,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// Shares a closed repo owes but the share token refused to deliver: the
+/// issuer froze the contract or the recipient, removed one of them from its
+/// allowlist, or clawed shares back (decision S9). Anyone may retry the
+/// delivery to `to`; nothing else moves these shares.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingRelease {
+    pub fund: Address,
+    /// The borrower after a repurchase, the seizure recipient after a default.
+    pub to: Address,
+    pub shares: i128,
+}
+
+/// A second NAV source for a fund, used when the primary feed is stale or
+/// silent, and checked against it when both are fresh.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FallbackFeed {
+    /// SEP-40 oracle reporting in the same base as the fund's NAV oracle.
+    pub oracle: Address,
+    /// Identifier of the shares in that oracle.
+    pub asset: Asset,
+    /// Oldest acceptable price, in seconds; within the envelope's NAV age.
+    pub max_age_secs: u64,
+    /// Largest gap allowed between the two feeds when both are fresh, in
+    /// basis points of the primary NAV.
+    pub max_divergence_bps: u32,
+}
+
+/// A fallback feed proposed for a fund, waiting for its time delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingFallback {
+    pub feed: FallbackFeed,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
 }

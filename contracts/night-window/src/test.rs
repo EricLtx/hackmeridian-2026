@@ -14,9 +14,9 @@ use super::*;
 use crate::math;
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, ContractEvents, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    vec, Address, Env, IntoVal, Symbol,
+    vec, Address, BytesN, Env, Event as _, IntoVal, Symbol,
 };
 
 // ---------------------------------------------------------------------------
@@ -212,6 +212,17 @@ fn publish_nav(f: &Fixture, nav: i128) {
         .set_price(&Asset::Stellar(f.shares.clone()), &nav, &now);
 }
 
+/// Events published by Open Window itself during the last invocation, in
+/// XDR, for comparison with the expected `#[contractevent]` values.
+fn own_events(f: &Fixture) -> ContractEvents {
+    f.env.events().all().filter_by_contract(&f.contract_id)
+}
+
+/// A contract error as raised by an entry point that returns no `Result`.
+fn raised(error: Error) -> soroban_sdk::Error {
+    soroban_sdk::Error::from_contract_error(error as u32)
+}
+
 // ---------------------------------------------------------------------------
 // Governor, guardian and envelope
 // ---------------------------------------------------------------------------
@@ -221,7 +232,9 @@ fn constructor_sets_roles_and_defaults() {
     let f = bare();
     assert_eq!(f.client.admin(), f.governor);
     assert_eq!(f.client.guardian(), f.governor);
-    assert_eq!(f.client.version(), 2);
+    assert_eq!(f.client.version(), 3);
+    assert_eq!(f.client.timelock_delay(), DEFAULT_TIMELOCK_SECS);
+    assert_eq!(f.client.pending_upgrade(), None);
     assert_eq!(f.client.max_term(), DEFAULT_MAX_TERM_SECS);
     assert_eq!(f.client.envelope(), default_envelope());
     assert!(!f.client.is_paused());
@@ -671,6 +684,359 @@ fn steward_re_anchors_after_a_legitimate_drop() {
 }
 
 // ---------------------------------------------------------------------------
+// Fallback NAV feed
+// ---------------------------------------------------------------------------
+
+/// The fallback feed publishes with fewer decimals than the primary one, so
+/// every comparison goes through the rescaling.
+const FALLBACK_DECIMALS: u32 = 8;
+/// 1.05 EUR per share, with 8 decimals.
+const NAV_EUR_8: i128 = 105_000_000;
+
+/// A second SEP-40 feed in the primary feed's base, publishing the same NAV
+/// now.
+fn second_feed(f: &Fixture, base: Symbol) -> (Address, MockOracleClient<'static>) {
+    let id = f
+        .env
+        .register(MockOracle, (Asset::Other(base), FALLBACK_DECIMALS));
+    let feed = MockOracleClient::new(leak(f.env.clone()), leak(id.clone()));
+    publish_on(f, &feed, NAV_EUR_8);
+    (id, feed)
+}
+
+/// Publishes a NAV on `feed`, stamped at the current ledger time.
+fn publish_on(f: &Fixture, feed: &MockOracleClient, nav: i128) {
+    let now = f.env.ledger().timestamp();
+    feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &now);
+}
+
+fn fallback_feed(f: &Fixture, oracle: &Address) -> FallbackFeed {
+    FallbackFeed {
+        oracle: oracle.clone(),
+        asset: Asset::Stellar(f.shares.clone()),
+        max_age_secs: 26 * HOUR,
+        max_divergence_bps: 20,
+    }
+}
+
+/// `ready()` plus an active fallback feed. The delay has elapsed, and both
+/// feeds have just published the admission NAV.
+fn ready_with_fallback() -> (Fixture, u64, MockOracleClient<'static>) {
+    let (f, offer_id) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &oracle));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fallback(&f.shares);
+    (f, offer_id, feed)
+}
+
+#[test]
+fn fallback_needs_two_keys_and_the_delay() {
+    let (f, _) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    let proposal = fallback_feed(&f, &oracle);
+    // The governor alone cannot add a price source.
+    f.env.mock_auths(&[MockAuth {
+        address: &f.governor,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "propose_fallback",
+            args: (f.shares.clone(), proposal.clone()).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_propose_fallback(&f.shares, &proposal).is_err());
+    f.env.mock_all_auths();
+
+    f.client.propose_fallback(&f.shares, &proposal);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(f.env.auths()[1].0, f.steward);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![FallbackProposed {
+            fund: f.shares.clone(),
+            oracle: oracle.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_fallback(&f.shares),
+        Some(PendingFallback {
+            feed: proposal.clone(),
+            eta
+        })
+    );
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.env.set_auths(&[]);
+    f.client.apply_fallback(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FallbackSet {
+            fund: f.shares.clone(),
+            oracle
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.get_fallback(&f.shares), Some(proposal));
+    assert_eq!(f.client.pending_fallback(&f.shares), None);
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn fallback_proposal_checks() {
+    let (f, _) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    let base = fallback_feed(&f, &oracle);
+    let with = |change: fn(&mut FallbackFeed)| {
+        let mut feed = base.clone();
+        change(&mut feed);
+        f.client.try_propose_fallback(&f.shares, &feed)
+    };
+    let outside = Err(Ok(Error::OutsideEnvelope));
+    assert_eq!(with(|feed| feed.max_age_secs = 0), outside);
+    assert_eq!(with(|feed| feed.max_age_secs = 3 * DAY + 1), outside);
+    assert_eq!(with(|feed| feed.max_divergence_bps = 0), outside);
+    assert_eq!(with(|feed| feed.max_divergence_bps = 51), outside);
+    let unknown = new_token(&f.env);
+    assert_eq!(
+        f.client.try_propose_fallback(&unknown, &base),
+        Err(Ok(Error::FundNotAccepted))
+    );
+    // A feed in another base cannot be compared with the NAV oracle.
+    let (usd_oracle, _) = second_feed(&f, usd(&f.env));
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &usd_oracle)),
+        Err(Ok(Error::CurrencyMismatch))
+    );
+    // The feed must track the shares now.
+    let mut other_asset = base.clone();
+    other_asset.asset = Asset::Stellar(unknown);
+    assert_eq!(
+        f.client.try_propose_fallback(&f.shares, &other_asset),
+        Err(Ok(Error::NoPrice))
+    );
+    // 0.3 % away from the primary NAV, for a tolerance of 0.2 %.
+    publish_on(&f, &feed, NAV_EUR_8 * 1_003 / 1_000);
+    assert_eq!(
+        f.client.try_propose_fallback(&f.shares, &base),
+        Err(Ok(Error::PriceDivergence))
+    );
+    assert_eq!(f.client.pending_fallback(&f.shares), None);
+}
+
+#[test]
+fn fallback_is_checked_again_when_applied() {
+    let (f, _) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &oracle));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    // The fallback stopped publishing during the delay.
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::StalePrice))
+    );
+    publish_on(&f, &feed, NAV_EUR_8 * 1_003 / 1_000);
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::PriceDivergence))
+    );
+    assert!(f.client.pending_fallback(&f.shares).is_some());
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fallback(&f.shares);
+}
+
+#[test]
+fn stale_primary_falls_back_to_a_fresh_fallback() {
+    let (f, offer_id, feed) = ready_with_fallback();
+    advance(&f, 26 * HOUR + 1);
+    publish_on(&f, &feed, NAV_EUR_8);
+    let quote = f.client.quote(&f.shares, &(10_000 * ONE), &f.eurc);
+    // Rescaled to the primary feed's 14 decimals.
+    assert_eq!(quote.price, NAV_EUR);
+    assert_eq!(quote.price_decimals, NAV_DECIMALS);
+    assert_eq!(quote.nav_timestamp, f.env.ledger().timestamp());
+    assert_eq!(quote.max_principal, 10_290 * ONE);
+    open(&f, offer_id);
+    // The reference moves with the fallback reading, along the model only.
+    assert_eq!(
+        f.client.refresh_reference(&f.shares).timestamp,
+        f.env.ledger().timestamp()
+    );
+}
+
+#[test]
+fn diverging_feeds_block_the_valuation() {
+    let (f, offer_id, feed) = ready_with_fallback();
+    advance(&f, HOUR);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8 * 1_003 / 1_000);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceDivergence))
+    );
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &ONE,
+            &DAY
+        ),
+        Err(Ok(Error::PriceDivergence))
+    );
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::PriceDivergence))
+    );
+    // Within the tolerance, the primary NAV is used.
+    publish_on(&f, &feed, NAV_EUR_8 * 1_001 / 1_000);
+    assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).price, NAV_EUR);
+}
+
+#[test]
+fn stale_fallback_is_ignored_while_the_primary_is_fresh() {
+    let (f, _, feed) = ready_with_fallback();
+    // An old, diverging fallback price: too old to count.
+    publish_on(&f, &feed, NAV_EUR_8 * 2);
+    advance(&f, 26 * HOUR + 1);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).price, NAV_EUR);
+}
+
+#[test]
+fn both_feeds_stale_is_a_stale_price() {
+    let (f, _, _) = ready_with_fallback();
+    advance(&f, 26 * HOUR + 1);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::StalePrice))
+    );
+}
+
+#[test]
+fn fallback_price_goes_through_the_corridor() {
+    let (f, _, feed) = ready_with_fallback();
+    advance(&f, 26 * HOUR + 1);
+    publish_on(&f, &feed, NAV_EUR_8 * 102 / 100);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+}
+
+#[test]
+fn guardian_cancels_a_fallback_and_the_steward_removes_one_at_once() {
+    let (f, _, _) = ready_with_fallback();
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    let (oracle, _) = second_feed(&f, eur(&f.env));
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &oracle));
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_fallback(&f.shares, &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_fallback(&f.shares, &guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FallbackCancelled {
+            fund: f.shares.clone(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_fallback(&f.shares), None);
+    assert_eq!(
+        f.client.try_cancel_fallback(&f.shares, &guardian),
+        Err(Ok(Error::NotProposed))
+    );
+
+    // Removal is immediate, for the governor or the steward only.
+    assert_eq!(
+        f.client.try_remove_fallback(&f.shares, &guardian),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.remove_fallback(&f.shares, &f.steward);
+    assert_eq!(f.env.auths()[0].0, f.steward);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FallbackRemoved {
+            fund: f.shares.clone(),
+            by: f.steward.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+    assert_eq!(
+        f.client.try_remove_fallback(&f.shares, &f.governor),
+        Err(Ok(Error::NoFallback))
+    );
+    // Without the fallback, a stale primary stops valuation again.
+    advance(&f, 26 * HOUR + 1);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::StalePrice))
+    );
+}
+
+#[test]
+fn removing_a_fund_removes_its_fallback() {
+    let (f, _, _) = ready_with_fallback();
+    f.client.remove_fund(&f.shares);
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+}
+
+#[test]
+fn fund_change_to_an_oracle_in_another_base_needs_the_fallback_removed() {
+    let (f, _, _) = ready_with_fallback();
+    let (usd_oracle, usd_feed) = second_feed(&f, usd(&f.env));
+    publish_on(&f, &usd_feed, NAV_USD / 1_000_000);
+    let fx_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let fx_feed = MockOracleClient::new(&f.env, &fx_oracle);
+    let now = f.env.ledger().timestamp();
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &EUR_USD, &now);
+    let mut config = fund_config(&f);
+    config.oracle = usd_oracle;
+    config.source = PriceSource::Cross(FxLeg {
+        oracle: fx_oracle,
+        asset: Asset::Other(eur(&f.env)),
+        haircut_bps: 200,
+        max_age_secs: 3 * DAY,
+        band_bps: 500,
+    });
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::CurrencyMismatch))
+    );
+    f.client.remove_fallback(&f.shares, &f.governor);
+    f.client.set_fund(&f.shares, &config);
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+}
+
+// ---------------------------------------------------------------------------
 // Steward powers
 // ---------------------------------------------------------------------------
 
@@ -1089,6 +1455,7 @@ fn replacing_a_steward_needs_the_current_steward() {
     assert!(f.client.try_set_fund(&f.shares, &config).is_err());
     f.env.mock_all_auths();
     assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, f.steward);
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
 }
 
 /// Review finding M4: the currency cannot change under open repos.
@@ -1111,6 +1478,376 @@ fn currency_cannot_change_while_repos_are_open() {
         f.client.try_set_fund(&f.shares, &config),
         Err(Ok(Error::CurrencyMismatch))
     );
+}
+
+// ---------------------------------------------------------------------------
+// Time delay on upgrades and fund changes (decision S7)
+// ---------------------------------------------------------------------------
+
+fn wasm_hash(env: &Env, byte: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[byte; 32])
+}
+
+#[test]
+fn upgrade_needs_a_proposal_its_delay_and_the_same_hash() {
+    let f = bare();
+    let hash = wasm_hash(&f.env, 7);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+    // A newer proposal replaces the older one and restarts the delay.
+    f.client.propose_upgrade(&wasm_hash(&f.env, 6));
+    advance(&f, HOUR);
+    f.client.propose_upgrade(&hash);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    let eta = T0 + HOUR + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![UpgradeProposed {
+            wasm_hash: hash.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_upgrade(),
+        Some(PendingUpgrade {
+            wasm_hash: hash.clone(),
+            eta
+        })
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::TimelockPending)))
+    );
+    advance(&f, 1);
+    assert_eq!(
+        f.client.try_upgrade(&wasm_hash(&f.env, 6)),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+    // The refusals left the proposal in place.
+    assert_eq!(f.client.pending_upgrade().unwrap().wasm_hash, hash);
+}
+
+#[test]
+fn guardian_cancels_an_upgrade_and_an_intruder_cannot() {
+    let f = bare();
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    let hash = wasm_hash(&f.env, 7);
+    f.client.propose_upgrade(&hash);
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_upgrade(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_upgrade(&guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![UpgradeCancelled {
+            wasm_hash: hash.clone(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(
+        f.client.try_cancel_upgrade(&guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+}
+
+#[test]
+fn intruder_cannot_propose_an_upgrade_or_cancel_in_the_governors_name() {
+    let f = bare();
+    let intruder = Address::generate(&f.env);
+    let hash = wasm_hash(&f.env, 7);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "propose_upgrade",
+            args: (hash.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_propose_upgrade(&hash).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.pending_upgrade(), None);
+    f.client.propose_upgrade(&hash);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "cancel_upgrade",
+            args: (f.governor.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_cancel_upgrade(&f.governor).is_err());
+    f.env.mock_all_auths();
+    assert!(f.client.pending_upgrade().is_some());
+}
+
+#[test]
+fn delay_moves_freely_before_the_first_admission_then_only_grows() {
+    let f = bare();
+    f.client.set_timelock_delay(&600);
+    assert_eq!(
+        own_events(&f),
+        std::vec![TimelockDelayChanged { delay: 600 }.to_xdr(&f.env, &f.contract_id)]
+    );
+    // Nothing is at stake yet: a demonstration may shorten it.
+    f.client.set_timelock_delay(&300);
+    assert_eq!(f.client.timelock_delay(), 300);
+    assert_eq!(
+        f.client.try_set_timelock_delay(&(MIN_TIMELOCK_SECS - 1)),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    assert_eq!(
+        f.client.try_set_timelock_delay(&(MAX_TIMELOCK_SECS + 1)),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    assert_eq!(
+        f.client.try_set_timelock_delay(&299),
+        Err(Ok(Error::DelayCannotDecrease))
+    );
+    f.client.set_timelock_delay(&DEFAULT_TIMELOCK_SECS);
+    assert_eq!(f.client.timelock_delay(), DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client
+            .try_set_timelock_delay(&(DEFAULT_TIMELOCK_SECS - 1)),
+        Err(Ok(Error::DelayCannotDecrease))
+    );
+}
+
+/// A contract upgraded from version 2 has admitted funds but no admission
+/// flag; its offers are enough to close the bootstrap window.
+#[test]
+fn delay_cannot_decrease_on_a_contract_upgraded_with_offers() {
+    let (f, _) = ready();
+    f.env.as_contract(&f.contract_id, || {
+        f.env.storage().instance().remove(&DataKey::FundsAdmitted);
+        f.env.storage().instance().remove(&DataKey::TimelockDelay);
+    });
+    assert_eq!(f.client.timelock_delay(), DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_set_timelock_delay(&300),
+        Err(Ok(Error::DelayCannotDecrease))
+    );
+}
+
+#[test]
+fn intruder_cannot_change_the_delay() {
+    let f = bare();
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_timelock_delay",
+            args: (300u64,).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_set_timelock_delay(&300).is_err());
+    assert_eq!(f.client.timelock_delay(), DEFAULT_TIMELOCK_SECS);
+}
+
+/// The admitted configuration with a higher haircut.
+fn replacement(f: &Fixture) -> FundConfig {
+    let mut config = fund_config(f);
+    config.haircut_bps = 300;
+    config
+}
+
+#[test]
+fn fund_replacement_waits_for_the_delay_then_anyone_applies_it() {
+    let (f, _) = ready();
+    let config = replacement(&f);
+    f.client.set_fund(&f.shares, &config);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundChangeProposed {
+            fund: f.shares.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_fund_change(&f.shares),
+        Some(PendingFundChange {
+            config: config.clone(),
+            eta
+        })
+    );
+    // Nothing changed yet: offers keep lending on the admitted terms.
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 200);
+    assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).haircut_bps, 200);
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, 1);
+    publish_nav(&f, NAV_EUR);
+    f.env.set_auths(&[]);
+    f.client.apply_fund_change(&f.shares);
+    assert!(f.env.auths().is_empty());
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundSet {
+            fund: f.shares.clone(),
+            oracle: f.nav_oracle.clone(),
+            haircut_bps: 300
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.get_fund(&f.shares), Some(config));
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+    // References are anchored at application, as at admission.
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().reference_time,
+        eta
+    );
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn steward_cancels_a_fund_replacement_and_an_intruder_cannot() {
+    let (f, _) = ready();
+    f.client.set_fund(&f.shares, &replacement(&f));
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_fund_change(&f.shares, &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_fund_change(&f.shares, &f.steward);
+    assert_eq!(f.env.auths()[0].0, f.steward);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundChangeCancelled {
+            fund: f.shares.clone(),
+            by: f.steward.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+    assert_eq!(
+        f.client.try_cancel_fund_change(&f.shares, &f.governor),
+        Err(Ok(Error::NotProposed))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 200);
+}
+
+#[test]
+fn guardian_cancels_a_fund_replacement() {
+    let (f, _) = ready();
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    f.client.set_fund(&f.shares, &replacement(&f));
+    f.client.cancel_fund_change(&f.shares, &guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+}
+
+#[test]
+fn fund_change_is_checked_again_when_applied() {
+    let (f, _) = ready();
+    f.client.set_fund(&f.shares, &replacement(&f));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    // The NAV published at admission is stale by now: the change waits.
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::StalePrice))
+    );
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+    // A tighter envelope set in the meantime applies too.
+    let mut envelope = default_envelope();
+    envelope.min_haircut_bps = 400;
+    f.client.set_envelope(&envelope);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    f.client.set_envelope(&default_envelope());
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 300);
+}
+
+#[test]
+fn currency_rule_is_checked_again_when_applied() {
+    let (f, offer_id) = ready();
+    let usd_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let usd_feed = MockOracleClient::new(&f.env, &usd_oracle);
+    usd_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &T0);
+    let mut config = fund_config(&f);
+    config.oracle = usd_oracle;
+    config.currency = usd(&f.env);
+    // No repo is open yet: the proposal passes.
+    f.client.set_fund(&f.shares, &config);
+    open(&f, offer_id);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let now = f.env.ledger().timestamp();
+    usd_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::CurrencyMismatch))
+    );
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+}
+
+#[test]
+fn removing_a_fund_drops_its_pending_change_and_its_readmission_waits() {
+    let (f, _) = ready();
+    f.client.set_fund(&f.shares, &replacement(&f));
+    f.client.remove_fund(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FundChangeCancelled {
+                fund: f.shares.clone(),
+                by: f.governor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundRemoved {
+                fund: f.shares.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+    // Removing then re-admitting is a replacement: it waits too.
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    assert_eq!(f.client.get_fund(&f.shares), None);
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+    // With no steward in place, the guardian holds the veto.
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    f.client.cancel_fund_change(&f.shares, &guardian);
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,7 +2044,8 @@ impl Lcg {
 }
 
 /// I1: stablecoins held cover the offers; I2: shares held equal the open
-/// repos; totals equal the sum of open principals.
+/// repos plus the shares awaiting release (decision S9); totals equal the sum
+/// of open principals.
 fn check_invariants(f: &Fixture, offers: &[u64], repos: &[u64]) {
     let available: i128 = offers
         .iter()
@@ -1320,7 +2058,16 @@ fn check_invariants(f: &Fixture, offers: &[u64], repos: &[u64]) {
         .filter(|r| r.status == RepoStatus::Open)
         .collect();
     let locked: i128 = open.iter().map(|r| r.shares).sum();
-    assert_eq!(balance(&f.env, &f.shares, &f.contract_id), locked);
+    let awaiting: i128 = repos
+        .iter()
+        .filter_map(|id| f.client.pending_release(id))
+        .filter(|p| p.fund == f.shares)
+        .map(|p| p.shares)
+        .sum();
+    assert_eq!(
+        balance(&f.env, &f.shares, &f.contract_id),
+        locked + awaiting
+    );
     let principal: i128 = open.iter().map(|r| r.principal).sum();
     assert_eq!(f.client.currency_outstanding(&eur(&f.env)), principal);
     assert_eq!(
@@ -1406,6 +2153,27 @@ fn invariants_hold_over_random_sequences() {
 #[test]
 fn opening_a_repo_touches_a_constant_number_of_entries() {
     let (f, offer_id) = ready();
+    let (read, written) = constant_open_footprint(&f, offer_id, "no fallback");
+    // Version 2 read 17 entries and wrote 9: the fallback check costs a fund
+    // without fallback nothing.
+    assert_eq!((read, written), (17, 9));
+}
+
+/// The same with a fallback feed: the footprint grows by the fallback's own
+/// entries and stays constant.
+#[test]
+fn opening_a_repo_with_a_fallback_touches_a_constant_number_of_entries() {
+    let (f, offer_id, feed) = ready_with_fallback();
+    // The fallback must be fresh, or it is not read beyond its first entry.
+    publish_on(&f, &feed, NAV_EUR_8);
+    let (read, written) = constant_open_footprint(&f, offer_id, "with a fallback");
+    assert!(read > 17, "{read}");
+    assert_eq!(written, 9);
+}
+
+/// Opens 152 repos and checks the second and the last touch the same number
+/// of entries. Returns that footprint (read, written).
+fn constant_open_footprint(f: &Fixture, offer_id: u64, label: &str) -> (u32, u32) {
     let measure = |f: &Fixture| {
         f.client.open_repo(
             &f.borrower,
@@ -1418,24 +2186,23 @@ fn opening_a_repo_touches_a_constant_number_of_entries() {
         f.env.cost_estimate().resources()
     };
     // The first repo creates the contract's share balance entry: warm up.
-    measure(&f);
-    let first = measure(&f);
+    measure(f);
+    let first = measure(f);
     for _ in 0..150 {
-        measure(&f);
+        measure(f);
     }
-    let last = measure(&f);
-    assert_eq!(
-        last.disk_read_entries + last.memory_read_entries,
-        first.disk_read_entries + first.memory_read_entries
-    );
+    let last = measure(f);
+    let read = last.disk_read_entries + last.memory_read_entries;
+    assert_eq!(read, first.disk_read_entries + first.memory_read_entries);
     assert_eq!(last.write_entries, first.write_entries);
     std::println!(
-        "open_repo footprint: {} entries read, {} written; instructions {} -> {} (test host)",
-        last.disk_read_entries + last.memory_read_entries,
+        "open_repo footprint, {label}: {read} entries read, {} written; \
+         instructions {} -> {} (test host)",
         last.write_entries,
         first.instructions,
         last.instructions
     );
+    (read, last.write_entries)
 }
 
 /// Ledger entries an invocation read and wrote, and its instructions (test
@@ -1609,6 +2376,7 @@ struct Snapshot {
     guardian: Address,
     paused: bool,
     max_term: u64,
+    timelock_delay: u64,
     envelope: RiskEnvelope,
     stablecoin: Option<StablecoinConfig>,
     currency_cap: i128,
@@ -1629,6 +2397,7 @@ fn snapshot(f: &Fixture, offers: &[u64], repos: &[u64]) -> Snapshot {
         guardian: f.client.guardian(),
         paused: f.client.is_paused(),
         max_term: f.client.max_term(),
+        timelock_delay: f.client.timelock_delay(),
         envelope: f.client.envelope(),
         stablecoin: f.client.get_stablecoin(&f.eurc),
         currency_cap: f.client.currency_cap(&eur(&f.env)),
@@ -1647,7 +2416,8 @@ fn snapshot(f: &Fixture, offers: &[u64], repos: &[u64]) -> Snapshot {
 /// upgrade path with a really uploaded WASM. The contract starts as the
 /// natively compiled code, holds offers, open repos and a closed one, a
 /// separate guardian, a changed term ceiling and the pause flag; the governor
-/// switches it to the release WASM. Every value survives, and the WASM, now
+/// proposes the release WASM, waits for the time delay (S7), then switches
+/// the contract to it. Every value survives, and the WASM, now
 /// running in the VM, still serves the open repos, opens new ones and refuses
 /// an intruder's upgrade.
 #[cfg(night_window_wasm)]
@@ -1682,19 +2452,39 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
 
     let offers = [first_offer, second_offer];
     let repos = [long_repo, short_repo, closed_repo];
+
+    // Decision S7: the upgrade is proposed, waits for its delay, and only
+    // then can the governor apply it.
+    let hash = f.env.deployer().upload_contract_wasm(NIGHT_WINDOW_WASM);
+    let native = executable_hash(&f.env, &f.contract_id);
+    assert!(native.is_some());
+    assert_ne!(native, Some(hash.to_array()));
+    f.client.propose_upgrade(&hash);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::TimelockPending)))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(executable_hash(&f.env, &f.contract_id), native);
+    // The NAV feed kept publishing during the delay.
+    publish_nav(&f, NAV_EUR);
+
     let before = snapshot(&f, &offers, &repos);
     assert!(before.paused);
     assert_eq!(
         before.repos[2].as_ref().unwrap().status,
         RepoStatus::Repurchased
     );
-
-    let hash = f.env.deployer().upload_contract_wasm(NIGHT_WINDOW_WASM);
-    let native = executable_hash(&f.env, &f.contract_id);
-    assert!(native.is_some());
-    assert_ne!(native, Some(hash.to_array()));
     f.client.upgrade(&hash);
     assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        own_events(&f),
+        std::vec![Upgraded {
+            wasm_hash: hash.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
     assert_eq!(
         executable_hash(&f.env, &f.contract_id),
         Some(hash.to_array())
@@ -1702,7 +2492,8 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
 
     // From here on, every call runs the uploaded WASM in the VM.
     assert_eq!(snapshot(&f, &offers, &repos), before);
-    assert_eq!(f.client.version(), 2);
+    assert_eq!(f.client.version(), 3);
+    assert_eq!(f.client.pending_upgrade(), None);
     check_invariants(&f, &offers, &repos);
 
     // The pause survived: entries stay closed, exits stay open.
@@ -1745,7 +2536,10 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
     check_invariants(&f, &offers, &all_repos);
     assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
 
-    // The upgraded contract still refuses an intruder's upgrade.
+    // The upgraded contract still refuses an intruder's upgrade, even one
+    // whose delay has elapsed.
+    f.client.propose_upgrade(&hash);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
     let intruder = Address::generate(&f.env);
     let other = soroban_sdk::BytesN::from_array(&f.env, &[7u8; 32]);
     f.env.mock_auths(&[MockAuth {
@@ -1994,29 +2788,216 @@ mod integration {
         );
     }
 
-    #[test]
-    fn issuer_freezing_the_contract_blocks_the_exit_known_limit_s9() {
-        // Decision S9 (version 1.1): if the issuer freezes the contract's
-        // balance, the repurchase cannot return the shares and reverts. The
-        // borrower keeps the stablecoins; the lender can seize only once the
-        // issuer lifts the freeze. Documented, not yet handled on-chain.
-        let live = live(true);
+    // -- Decision S9 (version 1.1): issuer freeze, allowlist removal or
+    // clawback while a repo is open. The debt still settles; the shares wait
+    // as a pending release that anyone can retry.
+
+    const SHARES: i128 = 10_000 * ONE;
+
+    fn open_live(live: &Live, term: u64) -> u64 {
         let f = &live.f;
-        let repo_id = f.client.open_repo(
+        f.client.open_repo(
             &f.borrower,
             &live.offer_id,
             &f.shares,
+            &SHARES,
             &(10_000 * ONE),
-            &(10_000 * ONE),
-            &DAY,
+            &term,
+        )
+    }
+
+    /// Checks the debt side settled, the shares stayed in the contract and
+    /// are recorded for `to`, and `release` is refused while the token still
+    /// refuses.
+    fn assert_deferred(live: &Live, repo_id: u64, to: &Address) {
+        let f = &live.f;
+        assert_eq!(
+            f.client.pending_release(&repo_id),
+            Some(PendingRelease {
+                fund: f.shares.clone(),
+                to: to.clone(),
+                shares: SHARES
+            })
         );
+        assert_eq!(f.client.get_fund_state(&f.shares).unwrap().outstanding, 0);
+        assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
+        f.env.set_auths(&[]);
+        assert_eq!(
+            f.client.try_release(&repo_id),
+            Err(Ok(Error::ReleaseBlocked))
+        );
+        f.env.mock_all_auths();
+        assert!(f.client.pending_release(&repo_id).is_some());
+    }
+
+    /// Anyone retries the release once the token accepts again.
+    fn assert_released(live: &Live, repo_id: u64, to: &Address, before: i128) {
+        let f = &live.f;
+        f.env.set_auths(&[]);
+        f.client.release(&repo_id);
+        assert!(f.env.auths().is_empty());
+        assert_eq!(
+            own_events(f),
+            std::vec![SharesReleased {
+                repo_id,
+                to: to.clone(),
+                shares: SHARES
+            }
+            .to_xdr(&f.env, &f.contract_id)]
+        );
+        f.env.mock_all_auths();
+        assert_eq!(live.token.balance(to), before + SHARES);
+        assert_eq!(f.client.pending_release(&repo_id), None);
+        assert_eq!(
+            f.client.try_release(&repo_id),
+            Err(Ok(Error::NothingToRelease))
+        );
+    }
+
+    #[test]
+    fn issuer_freeze_defers_the_shares_and_the_borrower_still_repays() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, DAY);
+        advance(f, HOUR);
         live.token.set_frozen(&f.contract_id, &true);
+        let interest = f.client.repo_due(&repo_id);
+        let borrower_shares = live.token.balance(&f.borrower);
+        f.client.repurchase(&repo_id);
+        assert_eq!(
+            own_events(f),
+            std::vec![
+                RepoRepurchased {
+                    repo_id,
+                    principal: 10_000 * ONE,
+                    interest
+                }
+                .to_xdr(&f.env, &f.contract_id),
+                ReleaseDeferred {
+                    repo_id,
+                    to: f.borrower.clone(),
+                    shares: SHARES
+                }
+                .to_xdr(&f.env, &f.contract_id)
+            ]
+        );
+        // The lender is paid; interest stops; the shares stay attributed to
+        // the borrower.
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().status,
+            RepoStatus::Repurchased
+        );
+        assert_eq!(
+            f.client.get_offer(&live.offer_id).unwrap().available,
+            100_000 * ONE + interest
+        );
+        assert_eq!(live.token.balance(&f.contract_id), SHARES);
+        assert_deferred(&live, repo_id, &f.borrower);
+        check_invariants(f, &[live.offer_id], &[repo_id]);
+        assert_eq!(
+            f.client.try_repurchase(&repo_id),
+            Err(Ok(Error::RepoNotOpen))
+        );
+
+        live.token.set_frozen(&f.contract_id, &false);
+        assert_released(&live, repo_id, &f.borrower, borrower_shares);
+        assert_eq!(live.token.balance(&f.contract_id), 0);
+        check_invariants(f, &[live.offer_id], &[repo_id]);
+    }
+
+    #[test]
+    fn seizure_of_frozen_shares_waits_for_the_release() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, 2 * HOUR);
+        advance(f, 2 * HOUR);
+        live.token.set_frozen(&f.contract_id, &true);
+        f.client.seize(&repo_id, &f.lender);
+        assert_eq!(
+            own_events(f),
+            std::vec![
+                RepoSeized {
+                    repo_id,
+                    to: f.lender.clone(),
+                    shares: SHARES
+                }
+                .to_xdr(&f.env, &f.contract_id),
+                ReleaseDeferred {
+                    repo_id,
+                    to: f.lender.clone(),
+                    shares: SHARES
+                }
+                .to_xdr(&f.env, &f.contract_id)
+            ]
+        );
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().status,
+            RepoStatus::Defaulted
+        );
+        assert_deferred(&live, repo_id, &f.lender);
+        live.token.set_frozen(&f.contract_id, &false);
+        assert_released(&live, repo_id, &f.lender, 0);
+    }
+
+    #[test]
+    fn borrower_removed_from_the_allowlist_still_repays() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, DAY);
+        live.token.set_whitelisted(&f.borrower, &false);
+        let borrower_shares = live.token.balance(&f.borrower);
+        f.client.repurchase(&repo_id);
+        assert_deferred(&live, repo_id, &f.borrower);
+        // A frozen recipient blocks the release the same way.
+        live.token.set_whitelisted(&f.borrower, &true);
+        live.token.set_frozen(&f.borrower, &true);
+        assert_deferred(&live, repo_id, &f.borrower);
+        live.token.set_frozen(&f.borrower, &false);
+        assert_released(&live, repo_id, &f.borrower, borrower_shares);
+    }
+
+    #[test]
+    fn clawback_leaving_too_few_shares_defers_the_release() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, DAY);
+        live.token.clawback(&f.contract_id, &(SHARES / 2));
+        let borrower_shares = live.token.balance(&f.borrower);
+        f.client.repurchase(&repo_id);
+        assert_deferred(&live, repo_id, &f.borrower);
+        // The issuer restores the shares it took; the release goes through.
+        live.token.mint(&f.contract_id, &(SHARES / 2));
+        assert_released(&live, repo_id, &f.borrower, borrower_shares);
+    }
+
+    #[test]
+    fn a_failed_repayment_still_reverts_the_whole_repurchase() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, DAY);
+        live.token.set_frozen(&f.contract_id, &true);
+        // The borrower spends the stablecoins: the repayment cannot be pulled.
+        let spent = balance(&f.env, &f.eurc, &f.borrower);
+        let elsewhere = Address::generate(&f.env);
+        TokenClient::new(&f.env, &f.eurc).transfer(&f.borrower, &elsewhere, &spent);
         assert!(f.client.try_repurchase(&repo_id).is_err());
         assert_eq!(
             f.client.get_repo(&repo_id).unwrap().status,
             RepoStatus::Open
         );
-        live.token.set_frozen(&f.contract_id, &false);
-        f.client.repurchase(&repo_id);
+        assert_eq!(f.client.pending_release(&repo_id), None);
+        assert_eq!(
+            f.client.get_fund_state(&f.shares).unwrap().outstanding,
+            10_000 * ONE
+        );
+    }
+
+    #[test]
+    fn release_of_an_unknown_repo_is_refused() {
+        let live = live(true);
+        assert_eq!(
+            live.f.client.try_release(&42),
+            Err(Ok(Error::NothingToRelease))
+        );
     }
 }
