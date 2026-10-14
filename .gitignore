@@ -13,3 +13,7 @@ target
 
 # Internal scoping and business documents (market study, proposal): local only
 /private/
+
+# Demo runner: dependencies and testnet state (keys, addresses), local only
+/demo/node_modules/
+/demo/.state/

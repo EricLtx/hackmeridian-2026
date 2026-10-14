@@ -99,6 +99,44 @@ pub fn mul_div_ceil(a: i128, b: i128, c: i128) -> Result<i128, Error> {
     }
 }
 
+/// Highest value the reference may take after `elapsed` seconds: the
+/// reference grown at `max_yield_bps` per year, rounded down. However often a
+/// faulty feed publishes, the reference cannot outrun this path.
+pub fn model_path(
+    reference: i128,
+    reference_time: u64,
+    observed_time: u64,
+    max_yield_bps: u32,
+) -> Result<i128, Error> {
+    let elapsed = i128::from(observed_time.saturating_sub(reference_time));
+    let year_bps = BPS.checked_mul(YEAR_SECS).ok_or(OVERFLOW)?;
+    let growth = i128::from(max_yield_bps)
+        .checked_mul(elapsed)
+        .ok_or(OVERFLOW)?;
+    mul_div_floor(
+        reference,
+        year_bps.checked_add(growth).ok_or(OVERFLOW)?,
+        year_bps,
+    )
+}
+
+/// Whether `value` lies within `band_bps` of `reference`, both ways.
+pub fn within_band(value: i128, reference: i128, band_bps: u32) -> Result<bool, Error> {
+    let band = i128::from(band_bps);
+    let low = mul_div_floor(reference, BPS.checked_sub(band).ok_or(OVERFLOW)?, BPS)?;
+    let high = mul_div_ceil(reference, BPS.checked_add(band).ok_or(OVERFLOW)?, BPS)?;
+    Ok(value >= low && value <= high)
+}
+
+/// Rounds a duration up to whole hours: interest accrues per started hour, so
+/// the amount a borrower signs for does not change between simulation and
+/// execution of the same transaction.
+pub fn ceil_to_hour(seconds: u64) -> Result<u64, Error> {
+    const HOUR: u64 = 3_600;
+    let hours = seconds.div_ceil(HOUR);
+    hours.checked_mul(HOUR).ok_or(OVERFLOW)
+}
+
 /// Converts an amount between two decimal precisions, rounding down.
 pub fn rescale_floor(amount: i128, from: u32, to: u32) -> Result<i128, Error> {
     if to >= from {
@@ -141,9 +179,9 @@ pub fn interest(principal: i128, rate_bps: u32, elapsed: u64) -> Result<i128, Er
 /// value grows slowly and almost never falls. Given a reference NAV observed
 /// at `reference_time`, a NAV observed at `observed_time` is plausible when it
 /// lies between `reference * (1 - floor)` and
-/// `reference * (1 + floor + max_yield * elapsed / year)`. A faulty or
-/// compromised feed can therefore only move the reference at `max_yield`
-/// per year, however many times it publishes.
+/// `reference * (1 + floor + max_yield * elapsed / year)`. The floor is a
+/// tolerance of the check only: the reference itself follows [`model_path`],
+/// never the oracle, so a faulty feed cannot ratchet it.
 pub fn corridor(
     reference: i128,
     reference_time: u64,

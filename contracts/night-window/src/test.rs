@@ -246,6 +246,18 @@ fn intruder_cannot_take_the_governor_role() {
 }
 
 #[test]
+fn governor_handover_takes_two_steps() {
+    let f = bare();
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    assert_eq!(f.client.admin(), f.governor);
+    f.client.accept_admin();
+    assert_eq!(f.env.auths()[0].0, successor);
+    assert_eq!(f.client.admin(), successor);
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
 fn intruder_cannot_upgrade() {
     let f = bare();
     let intruder = Address::generate(&f.env);
@@ -267,6 +279,10 @@ fn max_term_cannot_go_below_the_minimum_term() {
     let f = bare();
     assert_eq!(
         f.client.try_set_max_term(&(MIN_TERM_SECS - 1)),
+        Err(Ok(Error::InvalidTerm))
+    );
+    assert_eq!(
+        f.client.try_set_max_term(&(MAX_TERM_CEILING_SECS + 1)),
         Err(Ok(Error::InvalidTerm))
     );
     f.client.set_max_term(&(3 * DAY));
@@ -420,6 +436,7 @@ fn cross_fund() -> (Fixture, Address) {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 200,
         max_age_secs: 3 * DAY,
+        band_bps: 500,
     });
     f.client.set_stablecoin(&f.eurc, &eur(&f.env));
     f.client.set_fund(&f.shares, &config);
@@ -458,6 +475,7 @@ fn cross_fund_refuses_an_fx_feed_in_another_base() {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 200,
         max_age_secs: 3 * DAY,
+        band_bps: 500,
     });
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
@@ -486,11 +504,33 @@ fn cross_fund_refuses_an_fx_haircut_below_the_envelope() {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 100,
         max_age_secs: 3 * DAY,
+        band_bps: 500,
     });
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
         Err(Ok(Error::OutsideEnvelope))
     );
+}
+
+/// Review finding M3: a faulty FX feed cannot inflate the collateral.
+#[test]
+fn fx_rate_outside_its_band_blocks_the_quote() {
+    let (f, fx_oracle) = cross_fund();
+    MockOracleClient::new(&f.env, &fx_oracle).set_price(
+        &Asset::Other(eur(&f.env)),
+        &(EUR_USD * 94 / 100),
+        &T0,
+    );
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    MockOracleClient::new(&f.env, &fx_oracle).set_price(
+        &Asset::Other(eur(&f.env)),
+        &(EUR_USD * 97 / 100),
+        &T0,
+    );
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
 }
 
 #[test]
@@ -576,6 +616,32 @@ fn anyone_refreshes_the_reference_along_the_corridor() {
     );
 }
 
+/// Review finding H1: a feed publishing +floor at every ledger must not walk
+/// the reference away. It may only follow the model path.
+#[test]
+fn reference_cannot_be_ratcheted_by_a_faulty_feed() {
+    let (f, _) = ready();
+    let mut nav = NAV_EUR;
+    for _ in 0..700 {
+        advance(&f, 5);
+        nav = nav * 10_010 / 10_000;
+        publish_nav(&f, nav);
+        let _ = f.client.try_refresh_reference(&f.shares);
+    }
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    let path = math::model_path(NAV_EUR, T0, T0 + 3_500, 500).unwrap();
+    assert!(
+        state.reference_nav <= path,
+        "{} > {}",
+        state.reference_nav,
+        path
+    );
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+}
+
 #[test]
 fn refresh_cannot_follow_a_faulty_price() {
     let (f, _) = ready();
@@ -584,6 +650,14 @@ fn refresh_cannot_follow_a_faulty_price() {
         f.client.try_refresh_reference(&f.shares),
         Err(Ok(Error::PriceOutOfBand))
     );
+}
+
+#[test]
+fn steward_cannot_raise_the_reference() {
+    let (f, _) = ready();
+    advance(&f, HOUR);
+    publish_nav(&f, NAV_EUR + NAV_EUR / 1_000);
+    assert_eq!(f.client.reset_reference(&f.shares).price, NAV_EUR);
 }
 
 #[test]
@@ -964,6 +1038,81 @@ fn cross_currency_repo_opens_and_closes() {
     assert_eq!(balance(&f.env, &f.shares, &f.borrower), 10_000 * ONE);
 }
 
+/// Review finding M5: a revoked lender's offer stops lending.
+#[test]
+fn revoked_lender_offers_stop_lending() {
+    let (f, offer_id) = ready();
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &ONE,
+            &DAY
+        ),
+        Err(Ok(Error::LenderNotApproved))
+    );
+    // The lender can still take the stablecoins back.
+    f.client.withdraw_offer(&offer_id, &(100_000 * ONE));
+}
+
+/// Review finding M1: replacing a fund's configuration needs its current
+/// steward too, not only the governor and whoever the governor names.
+#[test]
+fn replacing_a_steward_needs_the_current_steward() {
+    let (f, _) = ready();
+    let mut config = fund_config(&f);
+    let successor = Address::generate(&f.env);
+    config.steward = successor.clone();
+    f.env.mock_auths(&[
+        MockAuth {
+            address: &f.governor,
+            invoke: &MockAuthInvoke {
+                contract: &f.contract_id,
+                fn_name: "set_fund",
+                args: (f.shares.clone(), config.clone()).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        },
+        MockAuth {
+            address: &successor,
+            invoke: &MockAuthInvoke {
+                contract: &f.contract_id,
+                fn_name: "set_fund",
+                args: (f.shares.clone(), config.clone()).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        },
+    ]);
+    assert!(f.client.try_set_fund(&f.shares, &config).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, f.steward);
+}
+
+/// Review finding M4: the currency cannot change under open repos.
+#[test]
+fn currency_cannot_change_while_repos_are_open() {
+    let (f, offer_id) = ready();
+    open(&f, offer_id);
+    let usd_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    MockOracleClient::new(&f.env, &usd_oracle).set_price(
+        &Asset::Stellar(f.shares.clone()),
+        &NAV_USD,
+        &T0,
+    );
+    let mut config = fund_config(&f);
+    config.oracle = usd_oracle;
+    config.currency = usd(&f.env);
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::CurrencyMismatch))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Repurchase
 // ---------------------------------------------------------------------------
@@ -982,21 +1131,40 @@ fn repurchase_after_a_weekend_pays_interest_to_the_lender() {
     let lender_before = balance(&f.env, &f.eurc, &f.lender);
     f.client.repurchase(&repo_id);
     assert_eq!(f.env.auths()[0].0, f.borrower);
-    assert_eq!(
-        balance(&f.env, &f.eurc, &f.lender),
-        lender_before + expected
-    );
+    // Nothing is pushed to the lender in the borrower's exit path.
+    assert_eq!(balance(&f.env, &f.eurc, &f.lender), lender_before);
     assert_eq!(balance(&f.env, &f.shares, &f.borrower), 1_000_000 * ONE);
     assert_eq!(balance(&f.env, &f.shares, &f.contract_id), 0);
     let repo = f.client.get_repo(&repo_id).unwrap();
     assert_eq!(repo.status, RepoStatus::Repurchased);
-    // The principal flows back into the offer.
+    // Principal and interest flow back into the offer; the lender withdraws.
     assert_eq!(
         f.client.get_offer(&offer_id).unwrap().available,
-        100_000 * ONE
+        100_000 * ONE + expected
+    );
+    f.client
+        .withdraw_offer(&offer_id, &(100_000 * ONE + expected));
+    assert_eq!(
+        balance(&f.env, &f.eurc, &f.lender),
+        lender_before + 100_000 * ONE + expected
     );
     assert_eq!(f.client.get_fund_state(&f.shares).unwrap().outstanding, 0);
     assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
+}
+
+#[test]
+fn interest_accrues_per_started_hour() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    advance(&f, 64 * HOUR + 1);
+    assert_eq!(
+        f.client.repo_due(&repo_id),
+        math::interest(10_000 * ONE, RATE_BPS, 65 * HOUR).unwrap()
+    );
+    // The amount a borrower signs for holds for the rest of the hour.
+    let signed = f.client.repo_due(&repo_id);
+    advance(&f, HOUR - 2);
+    assert_eq!(f.client.repo_due(&repo_id), signed);
 }
 
 #[test]
@@ -1314,4 +1482,214 @@ fn corridor_bounds() {
     // A year later the top grows by the maximum yield.
     let (_, high) = math::corridor(1_000_000, 0, 31_536_000, 10, 500).unwrap();
     assert_eq!(high, 1_051_000);
+}
+
+// ---------------------------------------------------------------------------
+// Integration with the demo contracts: the allowlisted share token and the
+// operator-fed SEP-40 feed, compiled natively.
+// ---------------------------------------------------------------------------
+
+mod integration {
+    use super::*;
+    use fund_token::{FundToken, FundTokenClient};
+    use nav_oracle::{Asset as FeedAsset, NavOracle, NavOracleClient};
+    use soroban_sdk::String;
+
+    struct Live {
+        f: Fixture,
+        token: FundTokenClient<'static>,
+        offer_id: u64,
+    }
+
+    /// Open Window with a permissioned share token whose NAV is published in
+    /// USD and crossed through a second feed publishing EUR in USD.
+    fn live(whitelist_contract: bool) -> Live {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(T0);
+        let governor = Address::generate(&env);
+        let steward = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let contract_id = env.register(OpenWindow, (governor.clone(),));
+        let client = OpenWindowClient::new(leak(env.clone()), leak(contract_id.clone()));
+
+        let shares = env.register(
+            FundToken,
+            (
+                steward.clone(),
+                7u32,
+                String::from_str(&env, "Test EU T-bill fund share"),
+                String::from_str(&env, "tEUTBL"),
+            ),
+        );
+        let token = FundTokenClient::new(leak(env.clone()), leak(shares.clone()));
+        for holder in [&borrower, &lender] {
+            token.set_whitelisted(holder, &true);
+        }
+        if whitelist_contract {
+            token.set_whitelisted(&contract_id, &true);
+        }
+        token.mint(&borrower, &(100_000 * ONE));
+
+        let usd = FeedAsset::Other(Symbol::new(&env, "USD"));
+        let nav_feed = env.register(
+            NavOracle,
+            (steward.clone(), usd.clone(), NAV_DECIMALS, 300u32),
+        );
+        NavOracleClient::new(&env, &nav_feed).publish(
+            &FeedAsset::Stellar(shares.clone()),
+            &NAV_USD,
+            &T0,
+        );
+        let fx_feed = env.register(NavOracle, (steward.clone(), usd, NAV_DECIMALS, 300u32));
+        NavOracleClient::new(&env, &fx_feed).publish(
+            &FeedAsset::Other(Symbol::new(&env, "EUR")),
+            &EUR_USD,
+            &T0,
+        );
+
+        let eurc = new_token(&env);
+        client.set_stablecoin(&eurc, &eur(&env));
+        client.set_currency_cap(&eur(&env), &(10_000_000 * ONE));
+        client.set_fund(
+            &shares,
+            &FundConfig {
+                oracle: nav_feed.clone(),
+                oracle_asset: Asset::Stellar(shares.clone()),
+                haircut_bps: 200,
+                steward: steward.clone(),
+                currency: eur(&env),
+                source: PriceSource::Cross(FxLeg {
+                    oracle: fx_feed,
+                    asset: Asset::Other(eur(&env)),
+                    haircut_bps: 200,
+                    max_age_secs: 3 * DAY,
+                    band_bps: 500,
+                }),
+                nav_max_age_secs: 26 * HOUR,
+                corridor_floor_bps: 10,
+                max_yield_bps: 500,
+                max_principal_per_repo: 500_000 * ONE,
+                max_outstanding: 5_000_000 * ONE,
+            },
+        );
+        client.approve_lender(&shares, &lender, &true);
+        mint(&env, &eurc, &lender, 100_000 * ONE);
+        mint(&env, &eurc, &borrower, 1_000 * ONE);
+        let offer_id = client.create_offer(
+            &lender,
+            &eurc,
+            &(100_000 * ONE),
+            &RATE_BPS,
+            &(7 * DAY),
+            &vec![&env, shares.clone()],
+        );
+        let oracle = MockOracleClient::new(leak(env.clone()), leak(nav_feed.clone()));
+        Live {
+            f: Fixture {
+                env,
+                contract_id,
+                client,
+                governor: governor.clone(),
+                guardian: governor,
+                steward,
+                lender,
+                borrower,
+                shares,
+                eurc,
+                nav_oracle: nav_feed,
+                oracle,
+            },
+            token,
+            offer_id,
+        }
+    }
+
+    #[test]
+    fn full_cycle_with_the_permissioned_share_token_and_live_feeds() {
+        let live = live(true);
+        let f = &live.f;
+        let quote = f.client.quote(&f.shares, &(10_000 * ONE), &f.eurc);
+        assert_eq!(quote.haircut_bps, 400);
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &live.offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &(64 * HOUR),
+        );
+        assert_eq!(live.token.balance(&f.contract_id), 10_000 * ONE);
+        advance(f, 64 * HOUR);
+        f.client.repurchase(&repo_id);
+        assert_eq!(live.token.balance(&f.borrower), 100_000 * ONE);
+        assert_eq!(live.token.balance(&f.contract_id), 0);
+    }
+
+    #[test]
+    fn seizure_delivers_permissioned_shares_to_the_whitelisted_lender() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &live.offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &(2 * HOUR),
+        );
+        advance(f, 2 * HOUR);
+        f.client.seize(&repo_id, &f.lender);
+        assert_eq!(live.token.balance(&f.lender), 10_000 * ONE);
+    }
+
+    #[test]
+    fn issuer_must_whitelist_the_contract_before_any_repo() {
+        let live = live(false);
+        let f = &live.f;
+        assert!(f
+            .client
+            .try_open_repo(
+                &f.borrower,
+                &live.offer_id,
+                &f.shares,
+                &(10_000 * ONE),
+                &(10_000 * ONE),
+                &DAY,
+            )
+            .is_err());
+        // Nothing moved: the whole transaction reverted.
+        assert_eq!(live.token.balance(&f.borrower), 100_000 * ONE);
+        assert_eq!(
+            f.client.get_offer(&live.offer_id).unwrap().available,
+            100_000 * ONE
+        );
+    }
+
+    #[test]
+    fn issuer_freezing_the_contract_blocks_the_exit_known_limit_s9() {
+        // Decision S9 (version 1.1): if the issuer freezes the contract's
+        // balance, the repurchase cannot return the shares and reverts. The
+        // borrower keeps the stablecoins; the lender can seize only once the
+        // issuer lifts the freeze. Documented, not yet handled on-chain.
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &live.offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &DAY,
+        );
+        live.token.set_frozen(&f.contract_id, &true);
+        assert!(f.client.try_repurchase(&repo_id).is_err());
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().status,
+            RepoStatus::Open
+        );
+        live.token.set_frozen(&f.contract_id, &false);
+        f.client.repurchase(&repo_id);
+    }
 }

@@ -1129,6 +1129,8 @@ dependencies = [
 name = "night-window"
 version = "0.0.0"
 dependencies = [
+ "fund-token",
+ "nav-oracle",
  "soroban-sdk",
 ]
 

@@ -9,7 +9,7 @@
 use soroban_sdk::{contractclient, Address, Env};
 
 use crate::error::Error;
-use crate::math::{corridor, Bps, Price};
+use crate::math::{corridor, model_path, within_band, Bps, Price};
 use crate::types::{Asset, FundConfig, FundState, PriceData, PriceSource};
 
 /// The subset of the SEP-40 interface this contract consumes.
@@ -80,6 +80,28 @@ pub fn check_corridor(config: &FundConfig, state: &FundState, nav: &Reading) -> 
     Ok(())
 }
 
+/// Next reference after a NAV passed the corridor: it never falls, and it
+/// rises at most along the model path. Returns `None` when the reading is not
+/// newer than the reference.
+pub fn next_reference(
+    config: &FundConfig,
+    state: &FundState,
+    nav: &Reading,
+) -> Result<Option<i128>, Error> {
+    if nav.timestamp <= state.reference_time {
+        return Ok(None);
+    }
+    let ceiling = model_path(
+        state.reference_nav,
+        state.reference_time,
+        nav.timestamp,
+        config.max_yield_bps,
+    )?;
+    Ok(Some(
+        nav.price.mantissa().min(ceiling).max(state.reference_nav),
+    ))
+}
+
 /// Values a fund's shares in its loan currency.
 pub fn value(env: &Env, config: &FundConfig, state: &FundState) -> Result<Valuation, Error> {
     let nav = read_fresh(
@@ -105,6 +127,9 @@ pub fn value(env: &Env, config: &FundConfig, state: &FundState) -> Result<Valuat
                 state.fx_decimals,
                 fx.max_age_secs,
             )?;
+            if !within_band(rate.price.mantissa(), state.reference_fx, fx.band_bps)? {
+                return Err(Error::PriceOutOfBand);
+            }
             Ok(Valuation {
                 nav,
                 price: nav.price.divided_by(rate.price)?,

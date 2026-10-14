@@ -6,7 +6,7 @@
 
 An on-chain repo contract on Stellar. Holders of tokenized money market funds borrow stablecoins against their shares at any hour, for a fixed term and a fixed price, when the fund's redemption window is closed.
 
-> **Status:** early development, specification being refined (October 2026). The contract is scaffolded and tested (administration, fund registry, upgrade path, SEP-40 price lookup); the repo lifecycle itself is declared and waits for the specification. Nothing is deployed on mainnet. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
+> **Status:** early development (October 2026). The full lifecycle is implemented and tested (offers, repos, repurchase, seizure, roles, price checks), and was reviewed for security; nothing is deployed on mainnet. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
 
 ## Why
 
@@ -56,23 +56,27 @@ sequenceDiagram
 
 ## Contract interface
 
-The contract lives in `contracts/night-window/src/lib.rs`; its tests in `src/test.rs`.
+The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 2.
 
-| Function | Who | Status |
+| Function | Who | What it does |
 |---|---|---|
-| `__constructor(admin)` | deployer | done |
-| `version()`, `admin()`, `set_admin(new_admin)`, `upgrade(new_wasm_hash)` | admin | done |
-| `max_term()`, `set_max_term(seconds)` | admin | done, default 7 days |
-| `set_fund(fund, config)`, `remove_fund(fund)`, `get_fund(fund)` | admin | done; `config` = SEP-40 oracle, oracle asset, haircut in basis points |
-| `fund_price(fund)` | anyone | done; reads `lastprice` on the fund's SEP-40 oracle, no staleness check yet |
-| `create_offer(lender, stablecoin, amount, rate_bps, max_term, funds)` | lender | declared, returns `NotImplemented` |
-| `withdraw_offer(offer_id, amount)` | lender | declared, returns `NotImplemented` |
-| `open_repo(borrower, offer_id, fund, shares, principal, term)` | borrower | declared, returns `NotImplemented` |
-| `repurchase(repo_id)` | borrower | declared, returns `NotImplemented` |
-| `seize(repo_id)` | lender | declared, returns `NotImplemented` |
-| `get_offer(offer_id)`, `get_repo(repo_id)` | anyone | done |
+| `__constructor(admin)` | deployer | Sets the governor, who is also the first guardian, and the default risk envelope |
+| `set_admin(new)`, `accept_admin()` | governor, then successor | Two-step governor handover |
+| `upgrade(wasm_hash)`, `set_max_term(secs)`, `set_envelope(envelope)`, `set_guardian(addr)` | governor | Code, term ceiling (1 hour to 30 days), risk envelope, guardian |
+| `set_stablecoin(token, currency)`, `remove_stablecoin(token)`, `set_currency_cap(currency, cap)` | governor | Stablecoin registry and per-currency caps (unset means no lending) |
+| `set_fund(fund, config)` | governor **and** steward | Two-key admission: checks the envelope and the oracles' currency, reads decimals, anchors the NAV (and FX) reference |
+| `remove_fund(fund)` | governor | Open repos keep their frozen terms |
+| `pause(caller)` / `unpause()` | guardian or governor / governor | Stops new offers and new repos; never exits |
+| `set_fund_limits(fund, haircut, per_repo, total)`, `approve_lender(fund, lender, bool)`, `freeze_fund(fund, bool)`, `reset_reference(fund)`, `set_sponsor(offer, fund, bool)` | the fund's steward | Tunes its own fund inside the envelope |
+| `refresh_reference(fund)` | anyone | Moves the NAV reference along the model path |
+| `quote(fund, shares, stablecoin)`, `fund_price(fund)`, `repo_due(repo)` | anyone | Read-only valuation, raw NAV, interest due now |
+| `create_offer(lender, stablecoin, amount, rate_bps, max_term, funds)` | approved lender | Deposits stablecoins with fixed terms |
+| `withdraw_offer(offer, amount)` | lender | Takes back what is not lent, including repaid principal and interest |
+| `open_repo(borrower, offer, fund, shares, principal, term)` | borrower | Locks shares and receives stablecoins in one transaction |
+| `repurchase(repo)` | borrower | Repays principal and interest, gets the shares back |
+| `seize(repo, to)` | lender, from maturity | Sends the shares to an approved address |
 
-The framing decisions for the lifecycle are recorded in [docs/securite.md](docs/securite.md) (section 6, S1 to S19): price freshness window and absolute price band per fund, interest formula and rounding, loan sizing from price, haircut and token decimals, MiCA-only stablecoin allowlist, pause limited to new entries, lenders restricted to holders allowlisted by the issuer (which settles seized shares), multisig administrator behind a time delay, minimum term, launch caps, first-loss buffer, sponsor offers. The functional specification turns them into states, functions, errors and tests.
+How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), and, when the NAV is not in the loan currency, crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/securite.md](docs/securite.md), section 6.
 
 ## Roadmap
 
@@ -80,10 +84,14 @@ The framing decisions for the lifecycle are recorded in [docs/securite.md](docs/
 - [x] Administration, upgrade path, fund registry, SEP-40 price lookup, tests
 - [x] Security baseline with threat model, invariants and the framing decisions S1 to S19 (October 2026)
 - [x] STRIDE threat model initiated with a first monitoring plan; CI green on GitHub (October 2026)
-- [ ] Specification of the repo lifecycle (states, functions, errors, tests)
-- [ ] Lifecycle: offers including sponsor offers, open, repurchase, seize, withdraw, with property tests on the invariants
+- [x] Specification of the repo lifecycle (states, functions, errors, tests)
+- [x] Lifecycle: offers including sponsor offers, open, repurchase, seize, withdraw, with property tests on the invariants
+- [x] Roles: governor (two-step handover), guardian, one steward per fund; two-key fund admission
+- [x] Model-based NAV corridor, cross price through an FX feed with its own band and haircut
+- [x] Independent security review; every finding fixed or recorded, with a test per fix
+- [x] Demo contracts: allowlisted fund share token (`fund-token`) and operator-fed SEP-40 feed (`nav-oracle`)
 - [ ] Monitoring plan rehearsed on testnet with at least one real trigger
-- [ ] Multisig administrator, time delay on upgrades and oracle changes, emergency pause
+- [ ] Multisig administrator and time delay on upgrades and oracle changes (the emergency pause is in place)
 - [ ] Testnet deployment with test fund tokens and a test oracle
 - [ ] Minimal web interface
 - [ ] Third-party audit before any mainnet deployment
@@ -105,7 +113,10 @@ The enforced part of the baseline:
 ```
 .
 ├── contracts/
-│   └── night-window/        # the repo contract (src/lib.rs) and its host-side tests (src/test.rs)
+│   ├── night-window/        # Open Window, the repo contract, and its host-side tests (src/test.rs)
+│   ├── fund-token/          # demo: SEP-41 share token restricted to an issuer allowlist
+│   └── nav-oracle/          # demo: SEP-40 feed an operator publishes a NAV to
+├── demo/                    # testnet demo runner (Node.js, @stellar/stellar-sdk)
 ├── docs/
 │   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S19 (French)
 │   ├── modele-menace-stride.md # STRIDE threat model and first monitoring plan (French)

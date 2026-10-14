@@ -57,6 +57,9 @@ pub const DEFAULT_MAX_TERM_SECS: u64 = 7 * 24 * 60 * 60;
 pub const MIN_TERM_SECS: u64 = 60 * 60;
 /// Most funds one offer may accept (decision S10).
 pub const MAX_FUNDS_PER_OFFER: u32 = 8;
+/// Highest ceiling the governor may set for a term: thirty days, well inside
+/// the 120 days of TTL every repo entry receives at each write.
+pub const MAX_TERM_CEILING_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Envelope at deployment. The governor may tighten or widen it.
 pub fn default_envelope() -> RiskEnvelope {
@@ -67,6 +70,7 @@ pub fn default_envelope() -> RiskEnvelope {
         max_yield_bps: 1_000,
         max_nav_age_secs: 3 * 24 * 60 * 60,
         max_fx_age_secs: 3 * 24 * 60 * 60,
+        max_fx_band_bps: 500,
     }
 }
 
@@ -97,16 +101,40 @@ impl OpenWindow {
         storage::governor(&env)
     }
 
-    /// Hands the governor role to `new_admin`. Requires the current governor.
+    /// Proposes `new_admin` as governor. Nothing changes until the proposed
+    /// address accepts (decision S7: a typo cannot lose the role). Requires
+    /// the current governor.
     pub fn set_admin(env: Env, new_admin: Address) {
-        let previous = storage::require_governor(&env);
-        storage::set_governor(&env, &new_admin);
+        let current = storage::require_governor(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        storage::bump_instance(&env);
+        AdminProposed {
+            current,
+            proposed: new_admin,
+        }
+        .publish(&env);
+    }
+
+    /// Completes a governor handover. Requires the proposed address.
+    pub fn accept_admin(env: Env) -> Result<(), Error> {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::Unauthorized)?;
+        pending.require_auth();
+        let previous = storage::governor(&env);
+        storage::set_governor(&env, &pending);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         storage::bump_instance(&env);
         AdminChanged {
             previous,
-            admin: new_admin,
+            admin: pending,
         }
         .publish(&env);
+        Ok(())
     }
 
     /// Replaces the contract code. The WASM must already be uploaded; storage
@@ -124,7 +152,7 @@ impl OpenWindow {
     /// Sets the ceiling for a repo term, in seconds. Requires the governor.
     pub fn set_max_term(env: Env, max_term: u64) -> Result<(), Error> {
         storage::require_governor(&env);
-        if max_term < MIN_TERM_SECS {
+        if !(MIN_TERM_SECS..=MAX_TERM_CEILING_SECS).contains(&max_term) {
             return Err(Error::InvalidTerm);
         }
         storage::set_max_term(&env, max_term);
@@ -156,6 +184,7 @@ impl OpenWindow {
         Bps::haircut(envelope.min_haircut_bps)?;
         Bps::haircut(envelope.min_fx_haircut_bps)?;
         Bps::haircut(envelope.max_corridor_floor_bps)?;
+        Bps::haircut(envelope.max_fx_band_bps)?;
         if envelope.max_yield_bps > BPS_DENOMINATOR {
             return Err(Error::OutsideEnvelope);
         }
@@ -217,13 +246,20 @@ impl OpenWindow {
     }
 
     /// Admits a fund, or replaces its configuration. Requires both the
-    /// governor and the fund's steward: a two-key admission. Checks the
-    /// configuration against the envelope, checks the oracles report in the
-    /// right currency, reads the decimals, and sets the NAV reference from a
-    /// fresh price. Open repos keep their frozen terms (invariant I9).
+    /// governor and the fund's steward: a two-key admission. A replacement
+    /// also requires the current steward, and cannot change the currency
+    /// while repos are open. Checks the configuration against the envelope,
+    /// checks the oracles report in the right currency, reads the decimals,
+    /// and sets the NAV and FX references from fresh prices. Open repos keep
+    /// their frozen terms (invariant I9).
     pub fn set_fund(env: Env, fund: Address, config: FundConfig) -> Result<(), Error> {
         storage::require_governor(&env);
         config.steward.require_auth();
+        if let Ok(current) = storage::fund(&env, &fund) {
+            if current.steward != config.steward {
+                current.steward.require_auth();
+            }
+        }
         check_fund_config(&env, &config)?;
 
         let nav_decimals = OracleClient::new(&env, &config.oracle).decimals();
@@ -238,7 +274,20 @@ impl OpenWindow {
             nav_decimals,
             config.nav_max_age_secs,
         )?;
+        let reference_fx = match &config.source {
+            PriceSource::Cross(fx) => {
+                oracle::read_fresh(&env, &fx.oracle, &fx.asset, fx_decimals, fx.max_age_secs)?
+                    .price
+                    .mantissa()
+            }
+            PriceSource::Direct => 0,
+        };
         let previous = storage::fund_state(&env, &fund).ok();
+        if let Some(previous) = &previous {
+            if previous.outstanding > 0 && previous.currency != config.currency {
+                return Err(Error::CurrencyMismatch);
+            }
+        }
         let state = FundState {
             currency: config.currency.clone(),
             share_decimals: token_io::decimals(&env, &fund),
@@ -246,6 +295,7 @@ impl OpenWindow {
             fx_decimals,
             reference_nav: nav.price.mantissa(),
             reference_time: nav.timestamp,
+            reference_fx,
             outstanding: previous.as_ref().map_or(0, |s| s.outstanding),
             frozen: previous.as_ref().is_some_and(|s| s.frozen),
         };
@@ -382,9 +432,10 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Re-anchors the NAV corridor on the oracle's current NAV, for instance
-    /// after a legitimate drop. Takes no price from the caller. Requires the
-    /// fund's steward.
+    /// Lowers the NAV reference to the oracle's current NAV, for instance after
+    /// a legitimate drop. It can only lower it: upward, the reference follows
+    /// the model path, so a steward who also runs the feed cannot inflate the
+    /// collateral. Takes no price from the caller. Requires the fund's steward.
     pub fn reset_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
@@ -396,13 +447,9 @@ impl OpenWindow {
             state.nav_decimals,
             config.nav_max_age_secs,
         )?;
-        Ok(set_reference(
-            &env,
-            &fund,
-            &mut state,
-            nav.price.mantissa(),
-            nav.timestamp,
-        ))
+        let lowered = nav.price.mantissa().min(state.reference_nav);
+        let timestamp = nav.timestamp.max(state.reference_time);
+        Ok(set_reference(&env, &fund, &mut state, lowered, timestamp))
     }
 
     /// Marks or unmarks an offer as its issuer's sponsor offer. The fund must
@@ -422,9 +469,10 @@ impl OpenWindow {
 
     // -- Anyone -------------------------------------------------------------
 
-    /// Moves a fund's NAV reference forward to the oracle's current NAV when
-    /// it is fresh, newer and inside the corridor. Anyone may call it, like
-    /// feeding a watchdog: it can only follow the predicted path.
+    /// Moves a fund's NAV reference forward when the oracle's NAV is fresh,
+    /// newer and inside the corridor. The reference never falls and rises at
+    /// most along the model path. Anyone may call it, like feeding a watchdog:
+    /// it cannot be made to follow a faulty feed.
     pub fn refresh_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         let mut state = storage::fund_state(&env, &fund)?;
@@ -436,14 +484,8 @@ impl OpenWindow {
             config.nav_max_age_secs,
         )?;
         oracle::check_corridor(&config, &state, &nav)?;
-        if nav.timestamp > state.reference_time {
-            return Ok(set_reference(
-                &env,
-                &fund,
-                &mut state,
-                nav.price.mantissa(),
-                nav.timestamp,
-            ));
+        if let Some(next) = oracle::next_reference(&config, &state, &nav)? {
+            return Ok(set_reference(&env, &fund, &mut state, next, nav.timestamp));
         }
         Ok(PriceData {
             price: state.reference_nav,
@@ -570,6 +612,7 @@ impl OpenWindow {
     pub fn withdraw_offer(env: Env, offer_id: u64, amount: i128) -> Result<(), Error> {
         let mut offer = storage::offer(&env, offer_id)?;
         offer.lender.require_auth();
+        storage::bump_instance(&env);
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -614,6 +657,11 @@ impl OpenWindow {
         let coin = storage::stablecoin(&env, &offer.stablecoin)?;
         if coin.currency != config.currency {
             return Err(Error::CurrencyMismatch);
+        }
+        // The steward may have revoked the lender since the offer was made:
+        // a seized position must always be deliverable (decision S8).
+        if !storage::lender_approved(&env, &fund, &offer.lender) {
+            return Err(Error::LenderNotApproved);
         }
         if shares <= 0 || principal <= 0 {
             return Err(Error::InvalidAmount);
@@ -661,9 +709,8 @@ impl OpenWindow {
             .ok_or(Error::ArithmeticOverflow)?;
         storage::set_offer(&env, offer_id, &offer);
         state.outstanding = fund_outstanding;
-        if valuation.nav.timestamp > state.reference_time {
-            // The NAV passed the corridor: move the reference along its path.
-            state.reference_nav = valuation.nav.price.mantissa();
+        if let Some(next) = oracle::next_reference(&config, &state, &valuation.nav)? {
+            state.reference_nav = next;
             state.reference_time = valuation.nav.timestamp;
         }
         storage::set_fund_state(&env, &fund, &state);
@@ -717,9 +764,10 @@ impl OpenWindow {
 
     /// Borrower repays principal and interest and gets the shares back.
     /// Allowed before and after maturity until the repo is seized, and while
-    /// paused. Interest runs at the repo rate until repayment, with a minimum
-    /// of one hour; the principal flows back into the offer and the interest
-    /// goes to the lender.
+    /// paused. Interest runs at the repo rate until repayment, per started
+    /// hour, with a minimum of one hour. Principal and interest both flow back
+    /// into the offer, where the lender withdraws them: nothing in the
+    /// borrower's exit depends on an address the lender controls.
     pub fn repurchase(env: Env, repo_id: u64) -> Result<(), Error> {
         let mut repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -728,26 +776,22 @@ impl OpenWindow {
         repo.borrower.require_auth();
         let interest = interest_due(&env, &repo)?;
 
+        let repayment = repo
+            .principal
+            .checked_add(interest)
+            .ok_or(Error::ArithmeticOverflow)?;
         let mut offer = storage::offer(&env, repo.offer_id)?;
         offer.available = offer
             .available
-            .checked_add(repo.principal)
+            .checked_add(repayment)
             .ok_or(Error::ArithmeticOverflow)?;
         storage::set_offer(&env, repo.offer_id, &offer);
         release_outstanding(&env, &repo)?;
         repo.status = RepoStatus::Repurchased;
         storage::set_repo(&env, repo_id, &repo);
+        storage::bump_instance(&env);
 
-        token_io::pull(&env, &repo.stablecoin, &repo.borrower, repo.principal)?;
-        if interest > 0 {
-            token_io::forward(
-                &env,
-                &repo.stablecoin,
-                &repo.borrower,
-                &repo.lender,
-                interest,
-            );
-        }
+        token_io::pull(&env, &repo.stablecoin, &repo.borrower, repayment)?;
         token_io::push(&env, &repo.fund, &repo.borrower, repo.shares);
 
         RepoRepurchased {
@@ -778,6 +822,7 @@ impl OpenWindow {
         release_outstanding(&env, &repo)?;
         repo.status = RepoStatus::Defaulted;
         storage::set_repo(&env, repo_id, &repo);
+        storage::bump_instance(&env);
         token_io::push(&env, &repo.fund, &to, repo.shares);
 
         RepoSeized {
@@ -834,6 +879,8 @@ fn check_fund_config(env: &Env, config: &FundConfig) -> Result<(), Error> {
             if fx_haircut.get() < envelope.min_fx_haircut_bps
                 || fx.max_age_secs == 0
                 || fx.max_age_secs > envelope.max_fx_age_secs
+                || fx.band_bps == 0
+                || fx.band_bps > envelope.max_fx_band_bps
             {
                 return Err(Error::OutsideEnvelope);
             }
@@ -875,7 +922,7 @@ fn interest_due(env: &Env, repo: &Repo) -> Result<i128, Error> {
         .timestamp()
         .saturating_sub(repo.opened_at)
         .max(MIN_TERM_SECS);
-    math::interest(repo.principal, repo.rate_bps, elapsed)
+    math::interest(repo.principal, repo.rate_bps, math::ceil_to_hour(elapsed)?)
 }
 
 /// Removes a repo's principal from the fund and currency totals. The fund

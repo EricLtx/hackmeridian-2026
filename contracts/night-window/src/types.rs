@@ -54,6 +54,8 @@ pub enum DataKey {
     CurrencyOutstanding(Symbol),
     /// Instance: cap on open principals in a currency. Unset means zero.
     CurrencyCap(Symbol),
+    /// Instance: governor proposed by `set_admin`, awaiting acceptance.
+    PendingAdmin,
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -68,6 +70,8 @@ pub struct RiskEnvelope {
     pub max_yield_bps: u32,
     pub max_nav_age_secs: u64,
     pub max_fx_age_secs: u64,
+    /// Widest band an FX rate may move from its reference.
+    pub max_fx_band_bps: u32,
 }
 
 /// Second leg of a cross price: the fund's NAV oracle reports in one base
@@ -82,6 +86,9 @@ pub struct FxLeg {
     /// Extra haircut covering a weekend gap of the exchange rate.
     pub haircut_bps: u32,
     pub max_age_secs: u64,
+    /// Band around the reference rate, both ways. The reference is set at
+    /// admission, which needs both the governor and the steward.
+    pub band_bps: u32,
 }
 
 /// Where a fund's price in the loan currency comes from.
@@ -139,6 +146,8 @@ pub struct FundState {
     /// Reference NAV of the corridor and its timestamp.
     pub reference_nav: i128,
     pub reference_time: u64,
+    /// Reference FX rate, 0 without FX leg.
+    pub reference_fx: i128,
     /// Sum of open principals on this fund.
     pub outstanding: i128,
     /// Set by the steward to suspend new repos on this fund.

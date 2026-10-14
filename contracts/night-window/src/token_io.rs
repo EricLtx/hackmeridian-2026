@@ -28,11 +28,6 @@ pub fn push(env: &Env, token: &Address, to: &Address, amount: i128) {
     TokenClient::new(env, token).transfer(&env.current_contract_address(), to, &amount);
 }
 
-/// Moves `amount` of `token` from `from` to `to`, outside the contract.
-pub fn forward(env: &Env, token: &Address, from: &Address, to: &Address, amount: i128) {
-    TokenClient::new(env, token).transfer(from, to, &amount);
-}
-
 pub fn decimals(env: &Env, token: &Address) -> u32 {
     TokenClient::new(env, token).decimals()
 }

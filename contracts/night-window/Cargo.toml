@@ -16,3 +16,6 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# Integration tests against the demo contracts, compiled natively.
+fund-token = { path = "../fund-token" }
+nav-oracle = { path = "../nav-oracle" }

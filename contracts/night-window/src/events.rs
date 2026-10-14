@@ -27,6 +27,13 @@ pub struct AdminChanged {
 }
 
 #[contractevent]
+pub struct AdminProposed {
+    #[topic]
+    pub current: Address,
+    pub proposed: Address,
+}
+
+#[contractevent]
 pub struct MaxTermChanged {
     pub max_term: u64,
 }
