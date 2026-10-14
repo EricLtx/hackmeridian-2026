@@ -100,7 +100,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 
 ## Security
 
-[docs/securite.md](docs/securite.md) (French) holds the threat model, the contract invariants, the vulnerability classes mapped to this contract, the controls already in place and the decisions taken for the specification (price freshness and absolute price band per fund, MiCA-only stablecoin allowlist, emergency pause limited to new entries, multisig administrator with a time delay, launch caps, first-loss buffer), and maps the contractual requirements an EU-regulated issuer must pass on to its ICT providers under DORA (Regulation (EU) 2022/2554, Article 30). [docs/modele-menace-stride.md](docs/modele-menace-stride.md) (French) is the STRIDE threat model with a first monitoring plan. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
+[docs/securite.md](docs/securite.md) (French) holds the threat model, the contract invariants, the vulnerability classes mapped to this contract, the controls already in place and the decisions taken for the specification (price freshness and a model-based NAV corridor per fund, MiCA-only stablecoin allowlist, emergency pause limited to new entries, multisig administrator with a time delay, launch caps, first-loss buffer), and maps the contractual requirements an EU-regulated issuer must pass on to its ICT providers under DORA (Regulation (EU) 2022/2554, Article 30). [docs/modele-menace-stride.md](docs/modele-menace-stride.md) (French) is the STRIDE threat model with a first monitoring plan. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
 
 The enforced part of the baseline:
 

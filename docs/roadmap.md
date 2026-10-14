@@ -65,7 +65,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 - a time delay on upgrades and oracle changes;
 - on-chain handling of an issuer freeze during an open repo, version 1.1;
 - a second NAV source or a fallback rule per fund;
-- a responsible disclosure policy (`SECURITY.md`);
+- a bug bounty sized to the value at stake, on top of the disclosure policy already published in `SECURITY.md`;
 - a third-party audit of the code that will run on mainnet.
 
 **Exit criteria:**

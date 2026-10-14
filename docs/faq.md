@@ -208,6 +208,10 @@ The demo runner is described in [demo/README.md](../demo/README.md). It never re
 
 Both are in French.
 
+### How do I report a vulnerability?
+
+Privately, as described in [SECURITY.md](../SECURITY.md): GitHub's private vulnerability reporting on this repository, never a public issue.
+
 ### Who can do what?
 
 | Role | Can | Cannot |

@@ -29,7 +29,10 @@ Out of scope:
 
 ## What the code already enforces
 
-- Every privileged function loads the administrator from storage and requires its authorization.
+- Every privileged function loads its role (governor, guardian, or the fund's steward) from storage and requires its authorization; a fund is admitted only with both the governor's and the steward's signatures.
+- Every function that consumes a party's authority requires that party's signature; repurchase and seizure load the parties from the stored repo, never from arguments.
+- The emergency pause blocks only new offers and new repos; repurchase, withdrawal and seizure always work.
+- Prices come only from the feeds fixed at a fund's admission, are refused when stale, and must lie inside a model-based corridor; caps per repo, per fund and per currency bound the exposure.
 - Arithmetic must be checked, and failure paths return typed errors; the lints that enforce this are denied at the workspace level.
 - Deadlines are stored values compared to the ledger timestamp, never inferred from storage TTLs.
 - CI runs formatting, Clippy with the security lints, the tests, the WASM build and a RustSec advisory check, with every third-party action pinned to a commit.
