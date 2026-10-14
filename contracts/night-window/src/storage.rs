@@ -29,6 +29,27 @@ fn put<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &DataKey,
     bump(env, key);
 }
 
+/// Reads a protocol-wide value kept in instance storage, such as a pending
+/// governance change.
+pub fn instance_value<V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+) -> Option<V> {
+    env.storage().instance().get(key)
+}
+
+pub fn set_instance<V: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &DataKey,
+    value: &V,
+) {
+    env.storage().instance().set(key, value);
+}
+
+pub fn remove_instance(env: &Env, key: &DataKey) {
+    env.storage().instance().remove(key);
+}
+
 // -- Roles -------------------------------------------------------------------
 
 pub fn governor(env: &Env) -> Address {

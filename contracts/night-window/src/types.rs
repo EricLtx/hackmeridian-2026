@@ -77,6 +77,12 @@ pub enum DataKey {
     FallbackDecimals(Address),
     /// Persistent: fallback NAV feed proposed for a fund, with its eta.
     PendingFallback(Address),
+    /// Instance: guardian proposed after the first admission, with its eta.
+    PendingGuardian,
+    /// Instance: increase of the term ceiling waiting for its delay.
+    PendingMaxTerm,
+    /// Instance: loosening of the risk envelope waiting for its delay.
+    PendingEnvelope,
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -292,6 +298,35 @@ pub struct FallbackFeed {
     /// Largest gap allowed between the two feeds when both are fresh, in
     /// basis points of the primary NAV.
     pub max_divergence_bps: u32,
+}
+
+/// A guardian appointment waiting for its time delay. The current guardian
+/// can cancel it, so a governor key alone cannot remove the veto in time.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingGuardianChange {
+    pub guardian: Address,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// An increase of the term ceiling waiting for its time delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingMaxTermChange {
+    pub max_term: u64,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// A risk envelope that loosens at least one bound, waiting for its time
+/// delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingEnvelopeChange {
+    pub envelope: RiskEnvelope,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
 }
 
 /// A fallback feed proposed for a fund, waiting for its time delay.

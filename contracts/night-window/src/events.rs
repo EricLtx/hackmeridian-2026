@@ -190,6 +190,42 @@ pub struct Upgraded {
 }
 
 #[contractevent]
+pub struct GuardianChangeProposed {
+    pub guardian: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct GuardianChangeCancelled {
+    pub guardian: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct MaxTermChangeProposed {
+    pub max_term: u64,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct MaxTermChangeCancelled {
+    pub max_term: u64,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct EnvelopeChangeProposed {
+    pub envelope: RiskEnvelope,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct EnvelopeChangeCancelled {
+    pub envelope: RiskEnvelope,
+    pub by: Address,
+}
+
+#[contractevent]
 pub struct FundChangeProposed {
     #[topic]
     pub fund: Address,

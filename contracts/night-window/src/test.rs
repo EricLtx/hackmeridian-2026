@@ -218,6 +218,25 @@ fn own_events(f: &Fixture) -> ContractEvents {
     f.env.events().all().filter_by_contract(&f.contract_id)
 }
 
+/// Appoints a guardian distinct from the governor. After the first
+/// admission the appointment goes through the time delay; the NAV is then
+/// republished so the fixture stays priced.
+fn appoint_guardian(f: &Fixture) -> Address {
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    if f.client.pending_guardian_change().is_some() {
+        advance(f, f.client.timelock_delay());
+        f.client.apply_guardian_change();
+        let reference = f
+            .client
+            .get_fund_state(&f.shares)
+            .map_or(NAV_EUR, |state| state.reference_nav);
+        publish_nav(f, reference);
+    }
+    assert_eq!(f.client.guardian(), guardian);
+    guardian
+}
+
 /// A contract error as raised by an entry point that returns no `Result`.
 fn raised(error: Error) -> soroban_sdk::Error {
     soroban_sdk::Error::from_contract_error(error as u32)
@@ -946,8 +965,7 @@ fn fallback_price_goes_through_the_corridor() {
 #[test]
 fn guardian_cancels_a_fallback_and_the_steward_removes_one_at_once() {
     let (f, _, _) = ready_with_fallback();
-    let guardian = Address::generate(&f.env);
-    f.client.set_guardian(&guardian);
+    let guardian = appoint_guardian(&f);
     let (oracle, _) = second_feed(&f, eur(&f.env));
     f.client
         .propose_fallback(&f.shares, &fallback_feed(&f, &oracle));
@@ -1762,8 +1780,7 @@ fn steward_cancels_a_fund_replacement_and_an_intruder_cannot() {
 #[test]
 fn guardian_cancels_a_fund_replacement() {
     let (f, _) = ready();
-    let guardian = Address::generate(&f.env);
-    f.client.set_guardian(&guardian);
+    let guardian = appoint_guardian(&f);
     f.client.set_fund(&f.shares, &replacement(&f));
     f.client.cancel_fund_change(&f.shares, &guardian);
     assert_eq!(f.env.auths()[0].0, guardian);
@@ -1790,7 +1807,11 @@ fn fund_change_is_checked_again_when_applied() {
         f.client.try_apply_fund_change(&f.shares),
         Err(Ok(Error::OutsideEnvelope))
     );
+    // Loosening it back waits for its own delay.
     f.client.set_envelope(&default_envelope());
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.apply_envelope_change();
+    publish_nav(&f, NAV_EUR);
     f.client.apply_fund_change(&f.shares);
     assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 300);
 }
@@ -1822,6 +1843,7 @@ fn currency_rule_is_checked_again_when_applied() {
 #[test]
 fn removing_a_fund_drops_its_pending_change_and_its_readmission_waits() {
     let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
     f.client.set_fund(&f.shares, &replacement(&f));
     f.client.remove_fund(&f.shares);
     assert_eq!(
@@ -1844,10 +1866,420 @@ fn removing_a_fund_drops_its_pending_change_and_its_readmission_waits() {
     assert_eq!(f.client.get_fund(&f.shares), None);
     assert!(f.client.pending_fund_change(&f.shares).is_some());
     // With no steward in place, the guardian holds the veto.
-    let guardian = Address::generate(&f.env);
-    f.client.set_guardian(&guardian);
     f.client.cancel_fund_change(&f.shares, &guardian);
     assert_eq!(f.client.pending_fund_change(&f.shares), None);
+}
+
+// -- Guardian, term ceiling and envelope behind the same delay --------------
+
+#[test]
+fn guardian_is_appointed_at_once_before_the_first_admission() {
+    let f = bare();
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianChanged {
+            guardian: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.guardian(), guardian);
+    assert_eq!(f.client.pending_guardian_change(), None);
+}
+
+#[test]
+fn guardian_change_waits_after_the_first_admission_then_anyone_applies_it() {
+    let (f, _) = ready();
+    let successor = Address::generate(&f.env);
+    f.client.set_guardian(&successor);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianChangeProposed {
+            guardian: successor.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_guardian_change(),
+        Some(PendingGuardianChange {
+            guardian: successor.clone(),
+            eta
+        })
+    );
+    assert_eq!(f.client.guardian(), f.governor);
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, 1);
+    f.env.set_auths(&[]);
+    f.client.apply_guardian_change();
+    assert!(f.env.auths().is_empty());
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianChanged {
+            guardian: successor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.guardian(), successor);
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn current_guardian_or_governor_cancels_a_guardian_change() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let successor = Address::generate(&f.env);
+    f.client.set_guardian(&successor);
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_guardian_change(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    // The proposed guardian holds no role until the change applies.
+    assert_eq!(
+        f.client.try_cancel_guardian_change(&successor),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_guardian_change(&guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianChangeCancelled {
+            guardian: successor.clone(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(
+        f.client.try_cancel_guardian_change(&guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    f.client.set_guardian(&successor);
+    f.client.cancel_guardian_change(&f.governor);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(f.client.guardian(), guardian);
+}
+
+#[test]
+fn intruder_cannot_replace_the_guardian() {
+    let (f, _) = ready();
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_guardian",
+            args: (intruder.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_set_guardian(&intruder).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(f.client.guardian(), f.governor);
+}
+
+/// The bypass this delay closes: with the governor key alone, an attacker
+/// proposes a malicious upgrade and, to stop the guardian from vetoing it,
+/// a guardian of their own. Both wait for the same delay, and the current
+/// guardian cancels the guardian change first, then the upgrade.
+#[test]
+fn governor_key_alone_cannot_remove_the_veto_within_one_window() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let accomplice = Address::generate(&f.env);
+    let malicious = wasm_hash(&f.env, 66);
+    f.client.propose_upgrade(&malicious);
+    f.client.set_guardian(&accomplice);
+    // Inside the window, the accomplice is not the guardian yet.
+    assert_eq!(
+        f.client.try_cancel_upgrade(&accomplice),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    f.client.cancel_guardian_change(&guardian);
+    f.client.cancel_upgrade(&guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    advance(&f, 1);
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::NotProposed))
+    );
+    assert_eq!(
+        f.client.try_upgrade(&malicious),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+    assert_eq!(f.client.guardian(), guardian);
+}
+
+#[test]
+fn max_term_moves_freely_before_the_first_admission() {
+    let f = bare();
+    f.client.set_max_term(&(10 * DAY));
+    assert_eq!(
+        own_events(&f),
+        std::vec![MaxTermChanged { max_term: 10 * DAY }.to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.max_term(), 10 * DAY);
+    assert_eq!(f.client.pending_max_term_change(), None);
+}
+
+#[test]
+fn max_term_decrease_is_immediate_and_an_increase_waits() {
+    let (f, _) = ready();
+    f.client.set_max_term(&(3 * DAY));
+    assert_eq!(
+        own_events(&f),
+        std::vec![MaxTermChanged { max_term: 3 * DAY }.to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.max_term(), 3 * DAY);
+    f.client.set_max_term(&(10 * DAY));
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![MaxTermChangeProposed {
+            max_term: 10 * DAY,
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_max_term_change(),
+        Some(PendingMaxTermChange {
+            max_term: 10 * DAY,
+            eta
+        })
+    );
+    assert_eq!(f.client.max_term(), 3 * DAY);
+    assert_eq!(
+        f.client.try_set_max_term(&(MAX_TERM_CEILING_SECS + 1)),
+        Err(Ok(Error::InvalidTerm))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    assert_eq!(
+        f.client.try_apply_max_term_change(),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, 1);
+    f.env.set_auths(&[]);
+    f.client.apply_max_term_change();
+    assert!(f.env.auths().is_empty());
+    assert_eq!(
+        own_events(&f),
+        std::vec![MaxTermChanged { max_term: 10 * DAY }.to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.max_term(), 10 * DAY);
+    assert_eq!(f.client.pending_max_term_change(), None);
+    assert_eq!(
+        f.client.try_apply_max_term_change(),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn guardian_or_governor_cancels_a_max_term_increase() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    f.client.set_max_term(&(10 * DAY));
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_max_term_change(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_max_term_change(&guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![MaxTermChangeCancelled {
+            max_term: 10 * DAY,
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_max_term_change(), None);
+    assert_eq!(
+        f.client.try_cancel_max_term_change(&guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    f.client.set_max_term(&(10 * DAY));
+    f.client.cancel_max_term_change(&f.governor);
+    assert_eq!(f.client.pending_max_term_change(), None);
+    assert_eq!(f.client.max_term(), DEFAULT_MAX_TERM_SECS);
+}
+
+#[test]
+fn intruder_cannot_change_the_max_term() {
+    let (f, _) = ready();
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_max_term",
+            args: (10 * DAY,).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_set_max_term(&(10 * DAY)).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.pending_max_term_change(), None);
+}
+
+/// The default envelope with a faster maximum yield: a loosening.
+fn looser_envelope() -> RiskEnvelope {
+    let mut envelope = default_envelope();
+    envelope.max_yield_bps = 2_000;
+    envelope
+}
+
+#[test]
+fn envelope_moves_freely_before_the_first_admission() {
+    let f = bare();
+    f.client.set_envelope(&looser_envelope());
+    assert_eq!(
+        own_events(&f),
+        std::vec![EnvelopeChanged {
+            envelope: looser_envelope()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.envelope(), looser_envelope());
+    assert_eq!(f.client.pending_envelope_change(), None);
+}
+
+#[test]
+fn envelope_tightening_is_immediate_and_any_loosening_waits() {
+    let (f, _) = ready();
+    let mut tighter = default_envelope();
+    tighter.min_haircut_bps = 150;
+    tighter.max_nav_age_secs = 2 * DAY;
+    f.client.set_envelope(&tighter);
+    assert_eq!(
+        own_events(&f),
+        std::vec![EnvelopeChanged {
+            envelope: tighter.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.envelope(), tighter);
+    // One bound tighter and one looser is still a loosening.
+    let mut mixed = tighter.clone();
+    mixed.min_fx_haircut_bps = 300;
+    mixed.max_fx_band_bps = 600;
+    f.client.set_envelope(&mixed);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![EnvelopeChangeProposed {
+            envelope: mixed.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_envelope_change(),
+        Some(PendingEnvelopeChange {
+            envelope: mixed.clone(),
+            eta
+        })
+    );
+    assert_eq!(f.client.envelope(), tighter);
+    // An invalid envelope is refused at once, queued or not.
+    let mut invalid = looser_envelope();
+    invalid.min_haircut_bps = 10_000;
+    assert_eq!(
+        f.client.try_set_envelope(&invalid),
+        Err(Ok(Error::InvalidHaircut))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    assert_eq!(
+        f.client.try_apply_envelope_change(),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, 1);
+    f.env.set_auths(&[]);
+    f.client.apply_envelope_change();
+    assert!(f.env.auths().is_empty());
+    assert_eq!(
+        own_events(&f),
+        std::vec![EnvelopeChanged {
+            envelope: mixed.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.envelope(), mixed);
+    assert_eq!(f.client.pending_envelope_change(), None);
+    assert_eq!(
+        f.client.try_apply_envelope_change(),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn guardian_or_governor_cancels_an_envelope_loosening() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    f.client.set_envelope(&looser_envelope());
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_envelope_change(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_envelope_change(&guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![EnvelopeChangeCancelled {
+            envelope: looser_envelope(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_envelope_change(), None);
+    assert_eq!(
+        f.client.try_cancel_envelope_change(&guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    f.client.set_envelope(&looser_envelope());
+    f.client.cancel_envelope_change(&f.governor);
+    assert_eq!(f.client.pending_envelope_change(), None);
+    assert_eq!(f.client.envelope(), default_envelope());
+}
+
+#[test]
+fn intruder_cannot_change_the_envelope() {
+    let (f, _) = ready();
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_envelope",
+            args: (looser_envelope(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_set_envelope(&looser_envelope()).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.pending_envelope_change(), None);
+    assert_eq!(f.client.envelope(), default_envelope());
 }
 
 // ---------------------------------------------------------------------------
@@ -2445,8 +2877,7 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
     let closed_repo = open(&f, first_offer);
     advance(&f, HOUR);
     f.client.repurchase(&closed_repo);
-    let guardian = Address::generate(&f.env);
-    f.client.set_guardian(&guardian);
+    let guardian = appoint_guardian(&f);
     f.client.set_max_term(&(5 * DAY));
     f.client.pause(&guardian);
 

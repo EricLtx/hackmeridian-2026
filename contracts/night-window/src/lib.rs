@@ -39,9 +39,10 @@ mod types;
 pub use error::Error;
 pub use oracle::{OracleClient, Sep40Oracle};
 pub use types::{
-    Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg, Offer, PendingFallback,
-    PendingFundChange, PendingRelease, PendingUpgrade, PriceData, PriceSource, Quote, Repo,
-    RepoStatus, RiskEnvelope, StablecoinConfig,
+    Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg, Offer, PendingEnvelopeChange,
+    PendingFallback, PendingFundChange, PendingGuardianChange, PendingMaxTermChange,
+    PendingRelease, PendingUpgrade, PriceData, PriceSource, Quote, Repo, RepoStatus, RiskEnvelope,
+    StablecoinConfig,
 };
 
 use events::*;
@@ -240,49 +241,192 @@ impl OpenWindow {
         storage::max_term(&env, DEFAULT_MAX_TERM_SECS)
     }
 
-    /// Sets the ceiling for a repo term, in seconds. Requires the governor.
+    /// Sets the ceiling for a repo term, in seconds. A decrease applies at
+    /// once: it only tightens. After the first admission, an increase
+    /// lengthens the exposure of every offer, so it waits for the time delay
+    /// and applies through `apply_max_term_change` (decision S7). Requires
+    /// the governor.
     pub fn set_max_term(env: Env, max_term: u64) -> Result<(), Error> {
         storage::require_governor(&env);
         if !(MIN_TERM_SECS..=MAX_TERM_CEILING_SECS).contains(&max_term) {
             return Err(Error::InvalidTerm);
         }
-        storage::set_max_term(&env, max_term);
-        storage::bump_instance(&env);
-        MaxTermChanged { max_term }.publish(&env);
+        if storage::past_bootstrap(&env) && max_term > Self::max_term(env.clone()) {
+            let eta = eta(&env)?;
+            storage::set_instance(
+                &env,
+                &DataKey::PendingMaxTerm,
+                &PendingMaxTermChange { max_term, eta },
+            );
+            storage::bump_instance(&env);
+            MaxTermChangeProposed { max_term, eta }.publish(&env);
+            return Ok(());
+        }
+        install_max_term(&env, max_term);
         Ok(())
+    }
+
+    /// Applies a queued increase of the term ceiling once its delay has
+    /// elapsed. Anyone may call it.
+    pub fn apply_max_term_change(env: Env) -> Result<(), Error> {
+        let pending: PendingMaxTermChange =
+            storage::instance_value(&env, &DataKey::PendingMaxTerm).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        storage::remove_instance(&env, &DataKey::PendingMaxTerm);
+        install_max_term(&env, pending.max_term);
+        Ok(())
+    }
+
+    /// Withdraws a queued increase of the term ceiling. `caller` must be the
+    /// governor or the guardian.
+    pub fn cancel_max_term_change(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        let pending: PendingMaxTermChange =
+            storage::instance_value(&env, &DataKey::PendingMaxTerm).ok_or(Error::NotProposed)?;
+        storage::remove_instance(&env, &DataKey::PendingMaxTerm);
+        storage::bump_instance(&env);
+        MaxTermChangeCancelled {
+            max_term: pending.max_term,
+            by: caller,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn pending_max_term_change(env: Env) -> Option<PendingMaxTermChange> {
+        storage::instance_value(&env, &DataKey::PendingMaxTerm)
     }
 
     pub fn guardian(env: Env) -> Address {
         storage::guardian(&env)
     }
 
-    /// Appoints the guardian. Requires the governor.
+    /// Appoints the guardian. Before the first admission it applies at once.
+    /// Afterwards it waits for the time delay and applies through
+    /// `apply_guardian_change`, and the current guardian can cancel it: a
+    /// governor key alone cannot remove the veto inside the window in which
+    /// that veto is needed (decision S7). Requires the governor. The
+    /// signature is the one of version 2, so failures are raised as typed
+    /// contract errors.
     pub fn set_guardian(env: Env, guardian: Address) {
         storage::require_governor(&env);
-        storage::set_guardian(&env, &guardian);
+        if !storage::past_bootstrap(&env) {
+            install_guardian(&env, guardian);
+            return;
+        }
+        let eta = eta(&env).unwrap_or_else(|error| panic_with_error!(&env, error));
+        storage::set_instance(
+            &env,
+            &DataKey::PendingGuardian,
+            &PendingGuardianChange {
+                guardian: guardian.clone(),
+                eta,
+            },
+        );
         storage::bump_instance(&env);
-        GuardianChanged { guardian }.publish(&env);
+        GuardianChangeProposed { guardian, eta }.publish(&env);
+    }
+
+    /// Appoints the proposed guardian once the delay has elapsed. Anyone may
+    /// call it.
+    pub fn apply_guardian_change(env: Env) -> Result<(), Error> {
+        let pending: PendingGuardianChange =
+            storage::instance_value(&env, &DataKey::PendingGuardian).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        storage::remove_instance(&env, &DataKey::PendingGuardian);
+        install_guardian(&env, pending.guardian);
+        Ok(())
+    }
+
+    /// Withdraws a proposed guardian change. `caller` must be the governor
+    /// or the current guardian.
+    pub fn cancel_guardian_change(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        let pending: PendingGuardianChange =
+            storage::instance_value(&env, &DataKey::PendingGuardian).ok_or(Error::NotProposed)?;
+        storage::remove_instance(&env, &DataKey::PendingGuardian);
+        storage::bump_instance(&env);
+        GuardianChangeCancelled {
+            guardian: pending.guardian,
+            by: caller,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn pending_guardian_change(env: Env) -> Option<PendingGuardianChange> {
+        storage::instance_value(&env, &DataKey::PendingGuardian)
     }
 
     pub fn envelope(env: Env) -> RiskEnvelope {
         storage::envelope(&env)
     }
 
-    /// Sets the risk envelope. Applies to fund settings made afterwards.
-    /// Requires the governor.
+    /// Sets the risk envelope. Applies to fund settings made afterwards. An
+    /// envelope that only tightens (every minimum at least the current one,
+    /// every maximum at most the current one) applies at once. After the
+    /// first admission, any loosening waits for the time delay and applies
+    /// through `apply_envelope_change` (decision S7). Requires the governor.
     pub fn set_envelope(env: Env, envelope: RiskEnvelope) -> Result<(), Error> {
         storage::require_governor(&env);
-        Bps::haircut(envelope.min_haircut_bps)?;
-        Bps::haircut(envelope.min_fx_haircut_bps)?;
-        Bps::haircut(envelope.max_corridor_floor_bps)?;
-        Bps::haircut(envelope.max_fx_band_bps)?;
-        if envelope.max_yield_bps > BPS_DENOMINATOR {
-            return Err(Error::OutsideEnvelope);
+        check_envelope(&envelope)?;
+        if storage::past_bootstrap(&env) && !tightens(&envelope, &storage::envelope(&env)) {
+            let eta = eta(&env)?;
+            storage::set_instance(
+                &env,
+                &DataKey::PendingEnvelope,
+                &PendingEnvelopeChange {
+                    envelope: envelope.clone(),
+                    eta,
+                },
+            );
+            storage::bump_instance(&env);
+            EnvelopeChangeProposed { envelope, eta }.publish(&env);
+            return Ok(());
         }
-        storage::set_envelope(&env, &envelope);
-        storage::bump_instance(&env);
-        EnvelopeChanged { envelope }.publish(&env);
+        install_envelope(&env, envelope);
         Ok(())
+    }
+
+    /// Applies a queued envelope once its delay has elapsed. Anyone may call
+    /// it.
+    pub fn apply_envelope_change(env: Env) -> Result<(), Error> {
+        let pending: PendingEnvelopeChange =
+            storage::instance_value(&env, &DataKey::PendingEnvelope).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        check_envelope(&pending.envelope)?;
+        storage::remove_instance(&env, &DataKey::PendingEnvelope);
+        install_envelope(&env, pending.envelope);
+        Ok(())
+    }
+
+    /// Withdraws a queued envelope. `caller` must be the governor or the
+    /// guardian.
+    pub fn cancel_envelope_change(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        let pending: PendingEnvelopeChange =
+            storage::instance_value(&env, &DataKey::PendingEnvelope).ok_or(Error::NotProposed)?;
+        storage::remove_instance(&env, &DataKey::PendingEnvelope);
+        storage::bump_instance(&env);
+        EnvelopeChangeCancelled {
+            envelope: pending.envelope,
+            by: caller,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn pending_envelope_change(env: Env) -> Option<PendingEnvelopeChange> {
+        storage::instance_value(&env, &DataKey::PendingEnvelope)
     }
 
     /// Registers a stablecoin for a currency; its decimals are read from the
@@ -1078,6 +1222,49 @@ impl OpenWindow {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn install_max_term(env: &Env, max_term: u64) {
+    storage::set_max_term(env, max_term);
+    storage::bump_instance(env);
+    MaxTermChanged { max_term }.publish(env);
+}
+
+fn install_guardian(env: &Env, guardian: Address) {
+    storage::set_guardian(env, &guardian);
+    storage::bump_instance(env);
+    GuardianChanged { guardian }.publish(env);
+}
+
+fn install_envelope(env: &Env, envelope: RiskEnvelope) {
+    storage::set_envelope(env, &envelope);
+    storage::bump_instance(env);
+    EnvelopeChanged { envelope }.publish(env);
+}
+
+/// Checks that every bound of an envelope is a valid quantity.
+fn check_envelope(envelope: &RiskEnvelope) -> Result<(), Error> {
+    Bps::haircut(envelope.min_haircut_bps)?;
+    Bps::haircut(envelope.min_fx_haircut_bps)?;
+    Bps::haircut(envelope.max_corridor_floor_bps)?;
+    Bps::haircut(envelope.max_fx_band_bps)?;
+    if envelope.max_yield_bps > BPS_DENOMINATOR {
+        return Err(Error::OutsideEnvelope);
+    }
+    Ok(())
+}
+
+/// Whether `next` is at least as strict as `current` on every bound: no
+/// minimum lowered, no maximum raised. Such a change cannot let a fund
+/// setting through that the current envelope refuses.
+fn tightens(next: &RiskEnvelope, current: &RiskEnvelope) -> bool {
+    next.min_haircut_bps >= current.min_haircut_bps
+        && next.min_fx_haircut_bps >= current.min_fx_haircut_bps
+        && next.max_corridor_floor_bps <= current.max_corridor_floor_bps
+        && next.max_yield_bps <= current.max_yield_bps
+        && next.max_nav_age_secs <= current.max_nav_age_secs
+        && next.max_fx_age_secs <= current.max_fx_age_secs
+        && next.max_fx_band_bps <= current.max_fx_band_bps
+}
 
 fn is_governor_or_guardian(env: &Env, caller: &Address) -> bool {
     *caller == storage::governor(env) || *caller == storage::guardian(env)
