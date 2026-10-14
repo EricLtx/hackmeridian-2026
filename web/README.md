@@ -24,7 +24,7 @@ npm run preview    # serves dist/
    cd demo && npm run onboard -- G...ADDRESS --role=lender  # lender
    ```
 
-4. Borrow, follow the position, repurchase. Lenders create and withdraw offers.
+4. Borrow, follow the position, repurchase. Lenders create offers, withdraw any part of what they hold, and follow the repos on their offers: once a repo is past its term and unpaid, "Take the shares" calls `seize` to the lender's own address (which the fund issuer must still approve).
 
 ## How it works
 
@@ -41,4 +41,4 @@ OW_TESTNET=1 npm test                      # plus the full cycle on testnet
 OW_TESTNET=1 OW_DEMO_DIR=/path/to/demo npm test
 ```
 
-The testnet test creates fresh keypairs, funds them with Friendbot, adds the trustline, runs the demo's onboarding script (which needs the git-ignored demo state, found in `../demo` or `OW_DEMO_DIR`), then opens, finds and repurchases a repo, and creates and withdraws an offer, all through `src/chain.js` with a Keypair in place of Freighter.
+The testnet test creates fresh keypairs, funds them with Friendbot, adds the trustline, runs the demo's onboarding script (which needs the git-ignored demo state, found in `../demo` or `OW_DEMO_DIR`), then opens, finds and repurchases a repo, all through `src/chain.js` with a Keypair in place of Freighter. The lender test has a test borrower open a one-hour repo on the test lender's offer, checks that `seize` before maturity is refused with `NotMatured` before anything is signed, repays, and withdraws the offer in two parts. The shortest term is one hour, so the test does not wait for its own repo to mature: it checks the matured path by simulating `seize` on any open repo on testnet already past its term (to its lender: accepted; to an unapproved address: `LenderNotApproved`), and the button logic by unit test.

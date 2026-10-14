@@ -828,6 +828,26 @@ input[aria-invalid="true"] {
   padding-top: 28px;
 }
 
+.withdraw {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.input-small input {
+  min-height: 34px;
+  padding: 4px 8px;
+  width: 9.5rem;
+  text-align: right;
+}
+
+.input-small .unit {
+  padding: 0 8px;
+  font-size: 0.8rem;
+}
+
 /* Transaction status */
 
 .tx:empty {

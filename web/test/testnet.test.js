@@ -17,9 +17,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Keypair } from "@stellar/stellar-sdk";
 
-import { Chain, keypairSigner } from "../src/chain.js";
+import { Chain, keypairSigner, sv } from "../src/chain.js";
 import { ContractError } from "../src/errors.js";
-import { defaultPrincipal, interest, pickOffer } from "../src/terms.js";
+import { defaultPrincipal, interest, pickOffer, seizeState } from "../src/terms.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const WEB = path.resolve(here, "..");
@@ -119,25 +119,75 @@ test("borrower: quote, open, find the position, repurchase", { skip, timeout: 90
   await assert.rejects(chain.repoDue(opened.repoId), (e) => e.name === "RepoNotOpen");
 });
 
-test("lender: create an offer, find it, withdraw it", { skip, timeout: 900_000 }, async () => {
+// The shortest term is one hour, so a test cannot wait for its own repo to
+// mature. It checks the early refusal on its own repo, and the matured path
+// by simulation on any open repo already past its term.
+test("lender: offer, a repo on it, the default path, partial withdrawals", { skip, timeout: 900_000 }, async () => {
   const chain = new Chain(deployment);
-  const signer = await freshWallet(chain);
-  console.log(`    lender ${signer.address}`);
-  assert.equal(await chain.isLenderApproved(signer.address), false);
-  onboard(signer.address, "lender");
-  assert.equal(await chain.isLenderApproved(signer.address), true);
+  const lender = await freshWallet(chain);
+  console.log(`    lender ${lender.address}`);
+  assert.equal(await chain.isLenderApproved(lender.address), false);
+  onboard(lender.address, "lender");
+  assert.equal(await chain.isLenderApproved(lender.address), true);
 
-  const start = (await chain.balances(signer.address)).stablecoin;
+  const start = (await chain.balances(lender.address)).stablecoin;
   const amount = 100n * ONE;
-  const created = await chain.createOffer(signer, { amount, rateBps: 300, maxTerm: 86_400 }, log("create_offer"));
+  const created = await chain.createOffer(lender, { amount, rateBps: 300, maxTerm: 86_400 }, log("create_offer"));
   const offer = (await chain.offers()).find((o) => o.id === created.offerId);
-  assert.equal(offer.lender, signer.address);
+  assert.equal(offer.lender, lender.address);
   assert.equal(offer.available, amount);
   assert.equal(offer.rate_bps, 300);
   assert.equal(offer.sponsor, false);
 
-  await chain.withdrawOffer(signer, created.offerId, amount, log("withdraw_offer"));
-  const after = (await chain.offers()).find((o) => o.id === created.offerId);
-  assert.equal(after.available, 0n);
-  assert.equal((await chain.balances(signer.address)).stablecoin, start);
+  // A borrower takes the lender's offer for the minimum term.
+  const borrower = await freshWallet(chain);
+  console.log(`    borrower ${borrower.address}`);
+  onboard(borrower.address);
+  const shares = 100n * ONE;
+  const principal = 50n * ONE;
+  assert.ok(BigInt((await chain.quote(shares)).max_principal) >= principal);
+  const opened = await chain.openRepo(borrower, { offerId: created.offerId, shares, principal, term: 3600 }, log("open_repo"));
+
+  // The lender finds it by the get_repo scan.
+  const lent = (await chain.repos()).filter((r) => r.lender === lender.address);
+  assert.deepEqual(lent.map((r) => r.id), [opened.repoId]);
+  const repo = lent[0];
+  assert.equal(repo.borrower, borrower.address);
+
+  // Before maturity: the button stays disabled, and the contract agrees.
+  const early = seizeState(repo, await chain.ledgerTime());
+  assert.equal(early.allowed, false);
+  assert.equal(early.reason, "early");
+  assert.ok(early.wait > 3000 && early.wait <= 3600, `wait ${early.wait}`);
+  const signed = lender.count;
+  await assert.rejects(chain.seize(lender, opened.repoId), (e) => e instanceof ContractError && e.name === "NotMatured");
+  assert.equal(lender.count, signed, "a refused seize must not be signed");
+
+  // Past maturity, by simulation on any open repo already past its term.
+  const t = await chain.ledgerTime();
+  const matured = (await chain.repos()).find((r) => r.status === "Open" && seizeState(r, t).allowed);
+  if (matured) {
+    assert.equal(await chain.probe("seize", [sv.u64(matured.id), sv.address(matured.lender)]), null, "seize to the lender should pass");
+    const wrongTo = await chain.probe("seize", [sv.u64(matured.id), sv.address(borrower.address)]);
+    assert.equal(wrongTo?.name, "LenderNotApproved");
+    console.log(`    matured repo #${matured.id}: seize to its lender passes simulation, to an unapproved address is LenderNotApproved`);
+  } else {
+    console.log("    no open repo past its term on testnet: matured path not probed");
+  }
+
+  // The borrower repays: principal and interest flow back into the offer.
+  const due = await chain.repoDue(opened.repoId);
+  await chain.repurchase(borrower, opened.repoId, log("repurchase"));
+  assert.equal((await chain.probe("seize", [sv.u64(opened.repoId), sv.address(lender.address)]))?.name, "RepoNotOpen");
+  assert.equal(seizeState(await chain.repo(opened.repoId), t + 7200).allowed, false);
+  const refilled = (await chain.offers()).find((o) => o.id === created.offerId);
+  assert.equal(refilled.available, amount + due);
+
+  // Partial withdrawal, then the rest.
+  const part = 40n * ONE;
+  await chain.withdrawOffer(lender, created.offerId, part, log("withdraw_offer partial"));
+  assert.equal((await chain.offers()).find((o) => o.id === created.offerId).available, amount + due - part);
+  await chain.withdrawOffer(lender, created.offerId, amount + due - part, log("withdraw_offer rest"));
+  assert.equal((await chain.offers()).find((o) => o.id === created.offerId).available, 0n);
+  assert.equal((await chain.balances(lender.address)).stablecoin, start + due, "the lender keeps the interest");
 });

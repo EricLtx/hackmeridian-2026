@@ -1,6 +1,9 @@
 // Contract errors, decoded and told in plain words. Error codes are public
 // ABI (contracts/night-window/src/error.rs): appended, never renumbered, so
 // these tables stay valid across contract upgrades.
+//
+// The error tables, `ContractError` and `decodeSimulationError` are adapted
+// from demo/lib.mjs (same repository, Apache-2.0).
 
 /** Open Window error codes. */
 export const ERRORS = {
@@ -118,10 +121,15 @@ const SENTENCES = {
     InsufficientOffer: (c) => `The offer does not hold enough for this amount.${c.available ? ` It holds ${c.available}.` : ""}`,
     RepoNotFound: () => "This position does not exist.",
     RepoNotOpen: () => "This position is already closed.",
-    NotMatured: () => "This position has not reached its maturity yet.",
+    NotMatured: (c) => `This position has not reached its term yet.${c.when ? ` You can take the shares from ${c.when}.` : ""}`,
     CapExceeded: () => "This loan would go over a limit: per loan, per fund or for the whole currency. Try a smaller amount.",
     TooManyFunds: () => "An offer must list between one and eight different funds.",
-    LenderNotApproved: () => "The lender is not approved by the fund issuer.",
+    LenderNotApproved: (c) =>
+      c.action === "seize"
+        ? "Seized shares can only go to a lender the fund issuer approves, and your address is not approved for this fund any more. Ask the issuer to approve it again, then retry."
+        : c.action === "create_offer"
+          ? "Your address is not an approved lender for this fund. The fund issuer approves lenders."
+          : "The lender of this offer is no longer approved by the fund issuer. Pick another offer.",
     TransferMismatch: () => "A token transfer did not move the exact amount expected.",
     FundNotInOffer: () => "This offer does not accept these fund shares.",
     InvalidRate: () => "The rate must be between 0 % and 100 % a year.",

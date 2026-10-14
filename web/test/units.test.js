@@ -3,7 +3,18 @@ import { test } from "node:test";
 
 import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError, describeError } from "../src/errors.js";
 import { formatAge, formatAmount, formatCountdown, formatDuration, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
-import { chargedHours, defaultPrincipal, interest, maxTermFor, nextInterestStep, pickOffer, sortOffers, WEEKEND_SECS } from "../src/terms.js";
+import {
+  chargedHours,
+  defaultPrincipal,
+  interest,
+  maxTermFor,
+  nextInterestStep,
+  pickOffer,
+  seizeState,
+  sortOffers,
+  WEEKEND_SECS,
+  withdrawalAmount,
+} from "../src/terms.js";
 
 const ONE = 10_000_000n;
 
@@ -132,4 +143,33 @@ test("errors read as sentences with their name", () => {
   assert.equal(describeError(new WalletError("You declined the request in your wallet.")).name, "Wallet");
   assert.match(describeError(new TransactionError("TxExpired", "x")).text, /Nothing changed/);
   assert.equal(describeError(new TypeError("Failed to fetch")).name, "Network");
+});
+
+test("take the shares: disabled before maturity, enabled from it, never on a closed repo", () => {
+  const repo = { status: "Open", maturity: 10_000n };
+  assert.deepEqual(seizeState(repo, 6_400), { allowed: false, reason: "early", wait: 3_600 });
+  assert.deepEqual(seizeState(repo, 9_999), { allowed: false, reason: "early", wait: 1 });
+  // The contract refuses only when timestamp < maturity: equal is allowed.
+  assert.deepEqual(seizeState(repo, 10_000), { allowed: true, reason: "matured", wait: 0 });
+  assert.equal(seizeState(repo, 99_999).allowed, true);
+  assert.equal(seizeState({ ...repo, status: "Repurchased" }, 99_999).reason, "closed");
+  assert.equal(seizeState({ ...repo, status: "Defaulted" }, 99_999).allowed, false);
+});
+
+test("partial withdrawal: any amount from one unit to what the offer holds", () => {
+  assert.deepEqual(withdrawalAmount(40n * ONE, 100n * ONE), { amount: 40n * ONE });
+  assert.deepEqual(withdrawalAmount(100n * ONE, 100n * ONE), { amount: 100n * ONE });
+  assert.deepEqual(withdrawalAmount(1n, 100n * ONE), { amount: 1n });
+  assert.ok(withdrawalAmount(100n * ONE + 1n, 100n * ONE).error);
+  assert.ok(withdrawalAmount(0n, 100n * ONE).error);
+  assert.ok(withdrawalAmount(null, 100n * ONE).error);
+  assert.equal(withdrawalAmount(toUnits("12.5", 7), 100n * ONE).amount, 125_000_000n);
+});
+
+test("seize refusals read in plain words", () => {
+  const notApproved = describeError(new ContractError(21, "open-window"), { action: "seize" });
+  assert.match(notApproved.text, /only go to a lender the fund issuer approves/);
+  assert.equal(notApproved.name, "LenderNotApproved");
+  assert.match(describeError(new ContractError(21, "open-window"), { action: "create_offer" }).text, /not an approved lender/);
+  assert.match(describeError(new ContractError(18, "open-window"), { when: "Sat 17 Oct, 15:28" }).text, /from Sat 17 Oct, 15:28\.$/);
 });

@@ -54,6 +54,29 @@ export function maxTermFor(offer, contractMaxTerm) {
 }
 
 /**
+ * Whether a lender may take the shares of a repo at `now` (ledger seconds).
+ * The contract allows `seize` on an open repo from its maturity on
+ * (`timestamp < maturity` is refused with NotMatured). Returns
+ * `{ allowed, reason, wait }`, `reason` being "closed", "early" or "matured".
+ */
+export function seizeState(repo, now) {
+  if (repo.status !== "Open") return { allowed: false, reason: "closed", wait: 0 };
+  const wait = Number(repo.maturity) - Number(now);
+  return wait > 0 ? { allowed: false, reason: "early", wait } : { allowed: true, reason: "matured", wait: 0 };
+}
+
+/**
+ * Checks a withdrawal amount against what the offer holds. Returns the
+ * amount in units, or a sentence explaining what is wrong.
+ */
+export function withdrawalAmount(units, available) {
+  if (units === null || units === undefined) return { error: "Enter an amount." };
+  if (units <= 0n) return { error: "The amount must be greater than zero." };
+  if (units > BigInt(available)) return { error: "The offer does not hold that much." };
+  return { amount: units };
+}
+
+/**
  * Suggested principal: 90 % of what the shares secure, never above the
  * quote itself nor any of the extra `limits` (offer liquidity, caps).
  */

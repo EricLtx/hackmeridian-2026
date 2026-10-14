@@ -11,6 +11,9 @@
 // Submission reports failure only when it is definitive: the transaction
 // failed, or the ledger closed past its validity window without it. A lost
 // response or a busy queue is settled by looking the transaction up by hash.
+//
+// Adapted from demo/lib.mjs (same repository, Apache-2.0): `submit`, the
+// retry rule of `net`, `sv`, `friendbot`, `resultCode` and `feeCharged`.
 
 import {
   Account,
@@ -472,5 +475,23 @@ export class Chain {
 
   withdrawOffer(signer, offerId, amount, onStatus) {
     return this.invoke(signer, "withdraw_offer", [sv.u64(offerId), sv.i128(amount)], onStatus);
+  }
+
+  /**
+   * Lender takes the shares of an unpaid repo from its maturity on. `to`
+   * must be a lender the fund's steward approved; by default the lender.
+   */
+  seize(signer, repoId, onStatus, to = signer.address) {
+    return this.invoke(signer, "seize", [sv.u64(repoId), sv.address(to)], onStatus);
+  }
+
+  /**
+   * Simulates `fn` without a wallet and returns the contract error it would
+   * hit, or null. Simulation records authorizations without checking them,
+   * so this probes the contract's other rules only, never who may call.
+   */
+  async probe(fn, args) {
+    const { error } = await this.settle(this.contracts.openWindow, fn, args);
+    return error ?? null;
   }
 }

@@ -16,7 +16,18 @@ import {
   toUnits,
   unitsToInput,
 } from "./format.js";
-import { HOUR, WEEKEND_SECS, defaultPrincipal, interest, maxTermFor, nextInterestStep, pickOffer, sortOffers } from "./terms.js";
+import {
+  HOUR,
+  WEEKEND_SECS,
+  defaultPrincipal,
+  interest,
+  maxTermFor,
+  nextInterestStep,
+  pickOffer,
+  seizeState,
+  sortOffers,
+  withdrawalAmount,
+} from "./terms.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 
 const REFRESH_MS = 15_000;
@@ -39,7 +50,8 @@ const S = {
   stopWatch: null,
   balances: null,
   approved: false,
-  mine: new Map(), // my repos by id
+  mine: new Map(), // repos I borrowed, by id
+  lent: new Map(), // repos on my offers, by id
   nextRepo: 1, // first repo id not scanned yet
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
@@ -401,6 +413,7 @@ function adoptWallet(wallet) {
   S.balances = null;
   S.approved = false;
   S.mine = new Map();
+  S.lent = new Map();
   S.nextRepo = 1;
   S.dues = new Map();
   S.openings = new Map();
@@ -426,6 +439,7 @@ function disconnect(reason = null) {
   S.walletProblem = reason;
   S.balances = null;
   S.mine = new Map();
+  S.lent = new Map();
   try {
     localStorage.removeItem(REMEMBER_KEY);
   } catch {
@@ -646,17 +660,22 @@ async function refreshPositions() {
   if (!address) return;
   const fresh = await S.chain.repos(S.nextRepo);
   if (S.wallet?.address !== address) return;
-  for (const repo of fresh) {
+  const keep = (repo) => {
     if (repo.borrower === address) S.mine.set(repo.id, repo);
+    if (repo.lender === address) S.lent.set(repo.id, repo);
+  };
+  for (const repo of fresh) {
+    keep(repo);
     S.nextRepo = Math.max(S.nextRepo, repo.id + 1);
   }
-  // Closed repos never change; open ones can be seized by the lender.
+  // Closed repos never change; open ones close by repurchase or seizure.
   const freshIds = new Set(fresh.map((r) => r.id));
-  const recheck = [...S.mine.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
+  const tracked = new Map([...S.mine, ...S.lent]);
+  const recheck = [...tracked.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
   for (const repo of await Promise.all(recheck.map((r) => S.chain.repo(r.id)))) {
-    if (repo) S.mine.set(repo.id, repo);
+    if (repo) keep(repo);
   }
-  const open = [...S.mine.values()].filter((r) => r.status === "Open");
+  const open = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status === "Open");
   await Promise.all(
     open.map(async (r) => {
       try {
@@ -740,6 +759,7 @@ function renderPositions() {
      ${history.length ? `<h3 class="sub">Closed</h3><ul class="history">${history.join("")}</ul>` : ""}`,
   );
   syncWriteButtons();
+  renderLent();
   tick();
 }
 
@@ -764,6 +784,7 @@ function renderLend() {
     setHTML(gate, `<p class="muted">${S.wallet ? "Reading your balances…" : "Connect a wallet to lend."}</p>`);
     form.hidden = true;
     setHTML($("my-offers"), "");
+    renderLent();
     return;
   }
   if (!S.approved) {
@@ -783,6 +804,7 @@ function renderLend() {
     setHelp("l-term-help", maxHours ? `1 to ${maxHours} hours, the contract's limit.` : "");
   }
   renderMyOffers();
+  renderLent();
 }
 
 function renderMyOffers() {
@@ -799,16 +821,22 @@ function renderMyOffers() {
         <td data-label="Available" class="num">${esc(money(o.available))}</td>
         <td data-label="Rate" class="num">${esc(formatRate(o.rate_bps))}</td>
         <td data-label="Longest term" class="num">${esc(formatTerm(o.max_term))}</td>
-        <td data-label="" class="num"><button type="button" class="btn btn-secondary btn-small" data-write data-withdraw="${o.id}" ${
-          o.available > 0n ? "" : `data-blocked="1"`
-        }>Withdraw ${esc(money(o.available))}</button></td>
+        <td data-label="Withdraw" class="num">${
+          o.available > 0n
+            ? `<div class="withdraw"><label class="sr-only" for="w-amount-${o.id}">Amount to withdraw from offer #${o.id}</label>
+                <div class="input-unit input-small"><input id="w-amount-${o.id}" inputmode="decimal" autocomplete="off" value="${esc(
+                  unitsToInput(o.available, SD()),
+                )}" /><span class="unit">${esc(code())}</span></div>
+                <button type="button" class="btn btn-secondary btn-small" data-write data-withdraw="${o.id}">Withdraw</button></div>`
+            : `<span class="muted small">Nothing to withdraw</span>`
+        }</td>
       </tr>`,
     )
     .join("");
   setHTML(
     $("my-offers"),
     `<h3 class="sub">Your offers</h3><table class="table"><caption class="sr-only">Your offers</caption>
-      <thead><tr><th scope="col">Offer</th><th scope="col" class="num">Available</th><th scope="col" class="num">Rate</th><th scope="col" class="num">Longest term</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead>
+      <thead><tr><th scope="col">Offer</th><th scope="col" class="num">Available</th><th scope="col" class="num">Rate</th><th scope="col" class="num">Longest term</th><th scope="col" class="num">Withdraw</th></tr></thead>
       <tbody>${rows}</tbody></table>`,
   );
   syncWriteButtons();
@@ -841,21 +869,93 @@ function submitLend(event) {
   if (!valid) return;
   runTx(
     $("lend-tx"),
-    { code: code(), term: `1 to ${maxHours} hours` },
+    { code: code(), term: `1 to ${maxHours} hours`, action: "create_offer" },
     (onStatus) => S.chain.createOffer(S.wallet, { amount, rateBps: Number(rate), maxTerm: hours * HOUR }, onStatus),
     (result) => `Offer #${result.offerId} created with ${money(amount)} at ${formatRate(Number(rate))}.`,
   );
 }
 
+function showProblem(el, text) {
+  el.className = "tx tx-error";
+  el.innerHTML = `<span class="icon" aria-hidden="true">!</span><span>${esc(text)}</span>`;
+}
+
 function onWithdraw(id) {
   const offer = S.offers.find((o) => o.id === id);
   if (!offer || offer.available <= 0n) return;
-  const amount = offer.available;
+  const input = $(`w-amount-${id}`);
+  const checked = withdrawalAmount(toUnits(input?.value ?? "", SD()), offer.available);
+  input?.setAttribute("aria-invalid", checked.error ? "true" : "false");
+  if (checked.error) {
+    return showProblem($("lend-tx"), `Offer #${id}: ${checked.error} It holds ${money(offer.available)}.`);
+  }
+  const amount = checked.amount;
   runTx(
     $("lend-tx"),
     { code: code(), available: money(amount) },
     (onStatus) => S.chain.withdrawOffer(S.wallet, id, amount, onStatus),
     () => `${money(amount)} withdrawn from offer #${id}.`,
+  );
+}
+
+/** Repos funded by my offers: what borrowers owe me, and the default path. */
+function renderLent() {
+  const box = $("lent");
+  if (!S.wallet || !S.lent.size) return setHTML(box, "");
+  const t = now();
+  const repos = [...S.lent.values()].sort((a, b) => b.id - a.id);
+  const open = repos.filter((r) => r.status === "Open");
+  const closed = repos.filter((r) => r.status !== "Open").slice(0, 10);
+  const cards = open.map((r) => {
+    const state = seizeState(r, t);
+    const due = S.dues.get(r.id);
+    return `<article class="position${state.allowed ? " position-late" : ""}" aria-labelledby="lent-${r.id}">
+      <header><h3 id="lent-${r.id}">Repo #${r.id}</h3><span class="pill ${state.allowed ? "pill-danger" : "pill-ok"}">${
+        state.allowed ? "Past term, unpaid" : "Open"
+      }</span></header>
+      <dl class="facts">
+        <div><dt>Borrower</dt><dd class="mono">${link(S.chain.explorerAccount(r.borrower), shortAddress(r.borrower))}</dd></div>
+        <div><dt>Lent</dt><dd class="num">${esc(money(r.principal))} at ${esc(formatRate(r.rate_bps))}, offer #${r.offer_id}</dd></div>
+        <div><dt>Owed now</dt><dd class="num">${due === undefined ? "—" : esc(money(BigInt(r.principal) + due, "ceil"))}</dd></div>
+        <div><dt>Collateral</dt><dd class="num">${esc(shareAmount(r.shares))}</dd></div>
+        <div><dt>Term ends</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="passed"></span></dd></div>
+      </dl>
+      <p class="muted small">${
+        state.allowed
+          ? "The borrower has not repurchased by the term. You may take the shares now; the borrower can still repurchase until you do."
+          : "If the borrower has not repurchased by the term, you may take the shares. Until then they stay locked in the contract."
+      }</p>
+      <div class="actions">
+        <button type="button" class="btn ${state.allowed ? "btn-primary" : "btn-secondary"}" data-write data-seize="${r.id}" ${
+          state.allowed ? "" : `data-blocked="1" aria-describedby="lent-wait-${r.id}"`
+        }>Take the shares</button>
+        ${state.allowed ? "" : `<span class="muted small" id="lent-wait-${r.id}">Available <span data-until="${r.maturity}" data-after="now"></span></span>`}
+      </div>
+    </article>`;
+  });
+  const history = closed.map(
+    (r) =>
+      `<li><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
+        r.status === "Repurchased" ? "Repaid" : "Shares taken"
+      }</span> <span class="num">${esc(money(r.principal))}</span></li>`,
+  );
+  setHTML(
+    box,
+    `<h3 class="sub">Repos on your offers</h3>${cards.join("") || `<p class="muted">No open repo on your offers.</p>`}
+     ${history.length ? `<ul class="history">${history.join("")}</ul>` : ""}`,
+  );
+  syncWriteButtons();
+  tick();
+}
+
+function onSeize(id) {
+  const repo = S.lent.get(id);
+  if (!repo || !seizeState(repo, now()).allowed) return;
+  runTx(
+    $("lend-tx"),
+    { action: "seize", when: formatDateTime(repo.maturity) },
+    (onStatus) => S.chain.seize(S.wallet, id, onStatus),
+    () => `Repo #${id} closed: ${shareAmount(repo.shares)} sent to your wallet.`,
   );
 }
 
@@ -942,6 +1042,7 @@ function wire() {
     if (target.disabled) return;
     if (target.dataset.repurchase) return onRepurchase(Number(target.dataset.repurchase));
     if (target.dataset.withdraw) return onWithdraw(Number(target.dataset.withdraw));
+    if (target.dataset.seize) return onSeize(Number(target.dataset.seize));
     if (target.dataset.trust !== undefined) {
       return runTx($("wallet-tx"), { code: code() }, (onStatus) => S.chain.addTrustline(S.wallet, onStatus), () => `${code()} added to your wallet.`);
     }
