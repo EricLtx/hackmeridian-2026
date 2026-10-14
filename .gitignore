@@ -21,3 +21,4 @@ target
 # Web interface: dependencies and build output
 /web/node_modules/
 /web/dist/
+/.claude/worktrees/
