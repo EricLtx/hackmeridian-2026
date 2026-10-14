@@ -82,59 +82,100 @@ fn check_fresh(
     })
 }
 
+/// Like [`read_fresh`], but a feed whose call traps counts as silent
+/// (`NoPrice`) instead of reverting the caller.
+fn read_fresh_or_silent(
+    env: &Env,
+    oracle: &Address,
+    asset: &Asset,
+    from_decimals: u32,
+    to_decimals: u32,
+    max_age: u64,
+) -> Result<Reading, Error> {
+    let data = match OracleClient::new(env, oracle).try_lastprice(asset) {
+        Ok(Ok(Some(data))) => data,
+        _ => return Err(Error::NoPrice),
+    };
+    check_fresh(env, &data, from_decimals, to_decimals, max_age)
+}
+
+/// Oldest acceptable fallback price: its own limit, never beyond the fund's
+/// limit for the primary feed.
+pub fn fallback_max_age(config: &FundConfig, feed: &FallbackFeed) -> u64 {
+    feed.max_age_secs.min(config.nav_max_age_secs)
+}
+
 /// Reads a fallback feed, expressed with the primary feed's decimals. A
 /// fallback that traps is treated as silent: a broken backup must not take
 /// the primary feed down with it.
 pub fn read_fallback(
     env: &Env,
+    config: &FundConfig,
     feed: &FallbackFeed,
     decimals: u32,
     nav_decimals: u32,
 ) -> Result<Reading, Error> {
-    let data = match OracleClient::new(env, &feed.oracle).try_lastprice(&feed.asset) {
-        Ok(Ok(Some(data))) => data,
-        _ => return Err(Error::NoPrice),
-    };
-    check_fresh(env, &data, decimals, nav_decimals, feed.max_age_secs)
+    read_fresh_or_silent(
+        env,
+        &feed.oracle,
+        &feed.asset,
+        decimals,
+        nav_decimals,
+        fallback_max_age(config, feed),
+    )
 }
 
 /// The fund's NAV, from the primary feed or its fallback, like a redundant
 /// sensor pair: the primary is used whenever it is fresh, and a fresh
 /// fallback must then agree with it within `max_divergence_bps`, otherwise
-/// neither is trusted. When the primary is stale or silent, a fresh fallback
-/// stands in; when both are, the primary's error is returned, as without a
-/// fallback. A primary that publishes an invalid price is not replaced: that
-/// is a faulty feed to investigate, not an outage.
+/// neither is trusted. A fallback that publishes a fresh but unusable price
+/// (not positive, in the future, out of range once rescaled) fails closed in
+/// the same way; one that is stale or silent is ignored. When the primary is
+/// stale or silent (with a fallback, a primary that traps counts as silent),
+/// a fresh fallback stands in; when both are, the primary's error is
+/// returned, as without a fallback. A primary that publishes an invalid
+/// price is not replaced: that is a faulty feed to investigate, not an
+/// outage.
 pub fn read_nav(
     env: &Env,
     config: &FundConfig,
     state: &FundState,
     fallback: Option<&(FallbackFeed, u32)>,
 ) -> Result<Reading, Error> {
-    let primary = read_fresh(
+    let Some((feed, decimals)) = fallback else {
+        return read_fresh(
+            env,
+            &config.oracle,
+            &config.oracle_asset,
+            state.nav_decimals,
+            config.nav_max_age_secs,
+        );
+    };
+    let primary = read_fresh_or_silent(
         env,
         &config.oracle,
         &config.oracle_asset,
         state.nav_decimals,
+        state.nav_decimals,
         config.nav_max_age_secs,
     );
-    let Some((feed, decimals)) = fallback else {
-        return primary;
-    };
-    let backup = read_fallback(env, feed, *decimals, state.nav_decimals);
+    let backup = read_fallback(env, config, feed, *decimals, state.nav_decimals);
     match primary {
-        Ok(nav) => {
-            if let Ok(backup) = backup {
-                if !within_band(
+        Ok(nav) => match backup {
+            Ok(backup) => {
+                if within_band(
                     backup.price.mantissa(),
                     nav.price.mantissa(),
                     feed.max_divergence_bps,
                 )? {
-                    return Err(Error::PriceDivergence);
+                    Ok(nav)
+                } else {
+                    Err(Error::PriceDivergence)
                 }
             }
-            Ok(nav)
-        }
+            Err(Error::StalePrice | Error::NoPrice) => Ok(nav),
+            Err(_) => Err(Error::PriceDivergence),
+        },
         Err(error @ (Error::StalePrice | Error::NoPrice)) => backup.map_err(|_| error),
         Err(error) => Err(error),
     }

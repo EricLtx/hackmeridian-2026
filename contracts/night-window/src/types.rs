@@ -83,6 +83,19 @@ pub enum DataKey {
     PendingMaxTerm,
     /// Instance: loosening of the risk envelope waiting for its delay.
     PendingEnvelope,
+    /// Persistent: the steward of a fund's last installed configuration.
+    /// Never removed, so that a removed fund cannot be re-admitted without
+    /// its issuer.
+    LastSteward(Address),
+    /// Persistent: loosening of a fund's limits waiting for its delay.
+    PendingFundLimits(Address),
+    /// Instance: currency cap increases waiting for their delay, by currency.
+    PendingCurrencyCaps,
+    /// Instance: guardian imposed by the governor alone, after the longest
+    /// delay.
+    PendingForcedGuardian,
+    /// Instance: number of funds with an active fallback feed.
+    FallbackCount,
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -325,6 +338,27 @@ pub struct PendingMaxTermChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingEnvelopeChange {
     pub envelope: RiskEnvelope,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// A loosening of a fund's limits by its steward (lower haircut, higher
+/// caps), waiting for its time delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingFundLimitsChange {
+    pub haircut_bps: u32,
+    pub max_principal_per_repo: i128,
+    pub max_outstanding: i128,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// An increase of a currency cap, waiting for its time delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingCurrencyCapChange {
+    pub cap: i128,
     /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }

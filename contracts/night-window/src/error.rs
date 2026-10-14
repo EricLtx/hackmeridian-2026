@@ -75,8 +75,9 @@ pub enum Error {
     NotProposed = 32,
     /// The proposal exists but its time delay has not elapsed yet.
     TimelockPending = 33,
-    /// The share token still refuses to deliver the shares held for a closed
-    /// repo (issuer freeze, allowlist, clawback). The record is kept.
+    /// Reserved: a draft of version 3 returned it from `release`, which now
+    /// reports a refused delivery as `false` so that the record's TTL
+    /// extension is kept. No longer returned.
     ReleaseBlocked = 34,
     /// The fund's NAV feed and its fallback feed disagree by more than the
     /// tolerance set for the fallback.
@@ -85,4 +86,10 @@ pub enum Error {
     NothingToRelease = 36,
     /// The fund has no fallback NAV feed.
     NoFallback = 37,
+    /// The proposal was not applied within its grace period after the eta;
+    /// it is treated as gone and must be proposed again.
+    ProposalExpired = 38,
+    /// A bounded list kept in instance storage is full: funds with a
+    /// fallback feed, or currencies with a pending cap increase.
+    LimitReached = 39,
 }

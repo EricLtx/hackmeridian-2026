@@ -225,6 +225,52 @@ pub struct EnvelopeChangeCancelled {
     pub by: Address,
 }
 
+/// The governor imposes a guardian without the current one, after the
+/// longest delay.
+#[contractevent]
+pub struct GuardianChangeForced {
+    pub guardian: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct ForcedGuardianChangeCancelled {
+    pub guardian: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct FundLimitsChangeProposed {
+    #[topic]
+    pub fund: Address,
+    pub haircut_bps: u32,
+    pub max_principal_per_repo: i128,
+    pub max_outstanding: i128,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct FundLimitsChangeCancelled {
+    #[topic]
+    pub fund: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct CurrencyCapChangeProposed {
+    #[topic]
+    pub currency: Symbol,
+    pub cap: i128,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct CurrencyCapChangeCancelled {
+    #[topic]
+    pub currency: Symbol,
+    pub by: Address,
+}
+
 #[contractevent]
 pub struct FundChangeProposed {
     #[topic]
@@ -278,6 +324,13 @@ pub struct ReleaseDeferred {
     pub repo_id: u64,
     pub to: Address,
     pub shares: i128,
+}
+
+#[contractevent]
+pub struct ReleaseRedirected {
+    #[topic]
+    pub repo_id: u64,
+    pub to: Address,
 }
 
 #[contractevent]

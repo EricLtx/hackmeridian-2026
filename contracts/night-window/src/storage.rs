@@ -2,12 +2,13 @@
 //! privileged path extends the instance TTL (not the code: see `bump_instance`).
 //! Deadlines never derive from TTLs.
 
-use soroban_sdk::{panic_with_error, Address, Env, Symbol};
+use soroban_sdk::{panic_with_error, Address, Env, Map, Symbol};
 
 use crate::error::Error;
 use crate::types::{
-    DataKey, FallbackFeed, FundConfig, FundState, Offer, PendingFallback, PendingFundChange,
-    PendingRelease, PendingUpgrade, Repo, RiskEnvelope, StablecoinConfig,
+    DataKey, FallbackFeed, FundConfig, FundState, Offer, PendingCurrencyCapChange, PendingFallback,
+    PendingFundChange, PendingFundLimitsChange, PendingRelease, PendingUpgrade, Repo, RiskEnvelope,
+    StablecoinConfig,
 };
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
@@ -362,20 +363,117 @@ pub fn fallback(env: &Env, fund: &Address) -> Option<(FallbackFeed, u32)> {
     Some((feed, decimals))
 }
 
-pub fn set_fallback(env: &Env, fund: &Address, feed: &FallbackFeed, decimals: u32) {
-    put(env, &DataKey::Fallback(fund.clone()), feed);
+/// The active fallback feed, read to price the fund. Extends the entry's
+/// TTL: the fallback is read by operations that may never write it again,
+/// and an archived fallback would silently stop backing up the primary.
+pub fn fallback_for_pricing(env: &Env, fund: &Address) -> Option<(FallbackFeed, u32)> {
+    let active = fallback(env, fund)?;
+    bump(env, &DataKey::Fallback(fund.clone()));
+    Some(active)
+}
+
+pub fn fallback_count(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .set(&DataKey::FallbackDecimals(fund.clone()), &decimals);
+        .get(&DataKey::FallbackCount)
+        .unwrap_or(0)
+}
+
+/// Activates or replaces a fund's fallback. The decimals live in instance
+/// storage, which every invocation loads: at most `max` funds may have one.
+pub fn set_fallback(
+    env: &Env,
+    fund: &Address,
+    feed: &FallbackFeed,
+    decimals: u32,
+    max: u32,
+) -> Result<(), Error> {
+    let flag = DataKey::FallbackDecimals(fund.clone());
+    if !env.storage().instance().has(&flag) {
+        let count = fallback_count(env);
+        if count >= max {
+            return Err(Error::LimitReached);
+        }
+        let next = count.checked_add(1).ok_or(Error::ArithmeticOverflow)?;
+        env.storage().instance().set(&DataKey::FallbackCount, &next);
+    }
+    put(env, &DataKey::Fallback(fund.clone()), feed);
+    env.storage().instance().set(&flag, &decimals);
+    Ok(())
 }
 
 pub fn remove_fallback(env: &Env, fund: &Address) {
+    let flag = DataKey::FallbackDecimals(fund.clone());
+    if env.storage().instance().has(&flag) {
+        let count = fallback_count(env).saturating_sub(1);
+        env.storage()
+            .instance()
+            .set(&DataKey::FallbackCount, &count);
+    }
     env.storage()
         .persistent()
         .remove(&DataKey::Fallback(fund.clone()));
+    env.storage().instance().remove(&flag);
+}
+
+// -- Stewards, fund limits and currency caps -----------------------------------
+
+/// The steward on record for a fund: the current configuration's, or after a
+/// removal the last installed one's.
+pub fn steward_on_record(env: &Env, fund: &Address) -> Option<Address> {
+    if let Ok(config) = self::fund(env, fund) {
+        return Some(config.steward);
+    }
+    env.storage()
+        .persistent()
+        .get(&DataKey::LastSteward(fund.clone()))
+}
+
+pub fn set_last_steward(env: &Env, fund: &Address, steward: &Address) {
+    put(env, &DataKey::LastSteward(fund.clone()), steward);
+}
+
+pub fn pending_fund_limits(env: &Env, fund: &Address) -> Option<PendingFundLimitsChange> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingFundLimits(fund.clone()))
+}
+
+pub fn set_pending_fund_limits(env: &Env, fund: &Address, pending: &PendingFundLimitsChange) {
+    put(env, &DataKey::PendingFundLimits(fund.clone()), pending);
+}
+
+pub fn remove_pending_fund_limits(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingFundLimits(fund.clone()));
+}
+
+/// Pending currency cap increases, by currency. One instance entry, so that
+/// a governor handover can clear them all.
+pub fn pending_currency_caps(env: &Env) -> Map<Symbol, PendingCurrencyCapChange> {
     env.storage()
         .instance()
-        .remove(&DataKey::FallbackDecimals(fund.clone()));
+        .get(&DataKey::PendingCurrencyCaps)
+        .unwrap_or_else(|| Map::new(env))
+}
+
+pub fn set_pending_currency_caps(env: &Env, pending: &Map<Symbol, PendingCurrencyCapChange>) {
+    if pending.is_empty() {
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingCurrencyCaps);
+    } else {
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingCurrencyCaps, pending);
+    }
+}
+
+/// Extends the TTL of a pending release whose delivery was refused: the
+/// record may wait a long time for the issuer.
+pub fn bump_pending_release(env: &Env, repo_id: u64) {
+    bump(env, &DataKey::PendingRelease(repo_id));
 }
 
 pub fn pending_fallback(env: &Env, fund: &Address) -> Option<PendingFallback> {

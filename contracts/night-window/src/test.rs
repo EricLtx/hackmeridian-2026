@@ -29,6 +29,7 @@ enum MockKey {
     Base,
     Decimals,
     Price(Asset),
+    Broken,
 }
 
 #[contract]
@@ -56,7 +57,26 @@ impl MockOracle {
     }
 
     pub fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
+        if env.storage().instance().has(&MockKey::Broken) {
+            panic!("feed down");
+        }
         env.storage().instance().get(&MockKey::Price(asset))
+    }
+
+    /// Makes `lastprice` trap, like a feed whose contract is broken.
+    pub fn set_broken(env: Env, broken: bool) {
+        if broken {
+            env.storage().instance().set(&MockKey::Broken, &true);
+        } else {
+            env.storage().instance().remove(&MockKey::Broken);
+        }
+    }
+
+    /// Keeps the feed's instance live for 200 days of ledgers.
+    pub fn keep_alive(env: Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(200 * 17_280, 200 * 17_280);
     }
 }
 
@@ -235,6 +255,26 @@ fn appoint_guardian(f: &Fixture) -> Address {
     }
     assert_eq!(f.client.guardian(), guardian);
     guardian
+}
+
+/// TTL the contract gives a persistent entry when it extends it: 120 days.
+const BUMP_TO_LEDGERS: u32 = 120 * 17_280;
+/// Below this TTL (30 days) the contract extends an entry it touches.
+const BUMP_THRESHOLD_LEDGERS: u32 = 30 * 17_280;
+
+/// Lets 91 days of ledgers pass without touching anything: an entry written
+/// just before is left with 29 days, under the extension threshold, while
+/// every entry written during the test stays live.
+fn age_ledgers(f: &Fixture) {
+    f.env
+        .ledger()
+        .with_mut(|ledger| ledger.sequence_number += 91 * 17_280);
+}
+
+fn entry_ttl(f: &Fixture, key: &DataKey) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
+    f.env
+        .as_contract(&f.contract_id, || f.env.storage().persistent().get_ttl(key))
 }
 
 /// A contract error as raised by an entry point that returns no `Result`.
@@ -471,6 +511,8 @@ fn cross_fund() -> (Fixture, Address) {
         band_bps: 500,
     });
     f.client.set_stablecoin(&f.eurc, &eur(&f.env));
+    // Raised before the first admission: afterwards an increase waits.
+    f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
     f.client.set_fund(&f.shares, &config);
     (f, fx_oracle)
 }
@@ -829,6 +871,9 @@ fn fallback_proposal_checks() {
     let outside = Err(Ok(Error::OutsideEnvelope));
     assert_eq!(with(|feed| feed.max_age_secs = 0), outside);
     assert_eq!(with(|feed| feed.max_age_secs = 3 * DAY + 1), outside);
+    // Review finding L4: never older than the fund allows its primary feed
+    // (26 hours here), even inside the envelope's 3 days.
+    assert_eq!(with(|feed| feed.max_age_secs = 26 * HOUR + 1), outside);
     assert_eq!(with(|feed| feed.max_divergence_bps = 0), outside);
     assert_eq!(with(|feed| feed.max_divergence_bps = 51), outside);
     let unknown = new_token(&f.env);
@@ -990,24 +1035,21 @@ fn guardian_cancels_a_fallback_and_the_steward_removes_one_at_once() {
         Err(Ok(Error::NotProposed))
     );
 
-    // Removal is immediate, for the governor or the steward only.
-    assert_eq!(
-        f.client.try_remove_fallback(&f.shares, &guardian),
-        Err(Ok(Error::Unauthorized))
-    );
-    f.client.remove_fallback(&f.shares, &f.steward);
-    assert_eq!(f.env.auths()[0].0, f.steward);
+    // Removal is immediate, and the guardian may do it alone.
+    f.client.remove_fallback(&f.shares, &guardian);
+    assert_eq!(f.env.auths().len(), 1);
+    assert_eq!(f.env.auths()[0].0, guardian);
     assert_eq!(
         own_events(&f),
         std::vec![FallbackRemoved {
             fund: f.shares.clone(),
-            by: f.steward.clone()
+            by: guardian.clone()
         }
         .to_xdr(&f.env, &f.contract_id)]
     );
     assert_eq!(f.client.get_fallback(&f.shares), None);
     assert_eq!(
-        f.client.try_remove_fallback(&f.shares, &f.governor),
+        f.client.try_remove_fallback(&f.shares, &guardian),
         Err(Ok(Error::NoFallback))
     );
     // Without the fallback, a stale primary stops valuation again.
@@ -1018,6 +1060,95 @@ fn guardian_cancels_a_fallback_and_the_steward_removes_one_at_once() {
     );
 }
 
+/// Review finding L2: with a fallback, a primary feed whose contract traps
+/// counts as silent, and the fallback stands in.
+#[test]
+fn a_reverting_primary_falls_back() {
+    let (f, _, _) = ready_with_fallback();
+    f.oracle.set_broken(&true);
+    let quote = f.client.quote(&f.shares, &ONE, &f.eurc);
+    assert_eq!(quote.price, NAV_EUR);
+    // Without the fallback, the same failure reverts the valuation.
+    f.client.remove_fallback(&f.shares, &f.governor);
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_err());
+}
+
+/// Review finding L3: a fresh but unusable fallback price fails closed; a
+/// stale or reverting fallback is ignored.
+#[test]
+fn a_fresh_but_invalid_fallback_fails_closed() {
+    let (f, _, feed) = ready_with_fallback();
+    publish_on(&f, &feed, 0);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceDivergence))
+    );
+    let now = f.env.ledger().timestamp();
+    feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_EUR_8, &(now + 60));
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceDivergence))
+    );
+    // A backup that traps is silent, not invalid: the primary is used.
+    feed.set_broken(&true);
+    assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).price, NAV_EUR);
+}
+
+/// Review finding L6: the fallback entry is read by operations that never
+/// write it; reading it to price the fund extends its TTL.
+#[test]
+fn pricing_extends_the_fallback_entry() {
+    let (f, _, feed) = ready_with_fallback();
+    f.oracle.keep_alive();
+    feed.keep_alive();
+    let key = DataKey::Fallback(f.shares.clone());
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.env.set_auths(&[]);
+    f.client.refresh_reference(&f.shares);
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
+}
+
+/// Review finding L7: the fallback decimals live in instance storage, so the
+/// number of funds with a fallback is capped.
+#[test]
+fn fallbacks_are_capped() {
+    let (f, _) = ready();
+    let count = |f: &Fixture| -> u32 {
+        f.env.as_contract(&f.contract_id, || {
+            f.env
+                .storage()
+                .instance()
+                .get(&DataKey::FallbackCount)
+                .unwrap_or(0)
+        })
+    };
+    f.env.as_contract(&f.contract_id, || {
+        f.env
+            .storage()
+            .instance()
+            .set(&DataKey::FallbackCount, &MAX_FALLBACKS);
+    });
+    let (oracle, _) = second_feed(&f, eur(&f.env));
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &oracle)),
+        Err(Ok(Error::LimitReached))
+    );
+    f.env.as_contract(&f.contract_id, || {
+        f.env
+            .storage()
+            .instance()
+            .set(&DataKey::FallbackCount, &0u32);
+    });
+    let (f, _, _) = ready_with_fallback();
+    assert_eq!(count(&f), 1);
+    f.client.remove_fallback(&f.shares, &f.governor);
+    assert_eq!(count(&f), 0);
+}
+
 #[test]
 fn removing_a_fund_removes_its_fallback() {
     let (f, _, _) = ready_with_fallback();
@@ -1025,8 +1156,11 @@ fn removing_a_fund_removes_its_fallback() {
     assert_eq!(f.client.get_fallback(&f.shares), None);
 }
 
+/// A NAV feed in another base cannot replace the primary: first the active
+/// fallback is in the way, then the new NAV, in other units, does not lie
+/// on the fund's path (review finding H1).
 #[test]
-fn fund_change_to_an_oracle_in_another_base_needs_the_fallback_removed() {
+fn fund_change_to_an_oracle_in_another_base_is_refused() {
     let (f, _, _) = ready_with_fallback();
     let (usd_oracle, usd_feed) = second_feed(&f, usd(&f.env));
     publish_on(&f, &usd_feed, NAV_USD / 1_000_000);
@@ -1050,8 +1184,52 @@ fn fund_change_to_an_oracle_in_another_base_needs_the_fallback_removed() {
         Err(Ok(Error::CurrencyMismatch))
     );
     f.client.remove_fallback(&f.shares, &f.governor);
-    f.client.set_fund(&f.shares, &config);
-    assert!(f.client.pending_fund_change(&f.shares).is_some());
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+}
+
+/// Review finding L1: a single governor or steward key cannot remove a
+/// fallback; both together can, and so can the guardian alone.
+#[test]
+fn removing_a_fallback_takes_the_guardian_or_both_governor_and_steward() {
+    let (f, _, _) = ready_with_fallback();
+    // While the governor is also the guardian, its key alone is the
+    // guardian's: appoint a separate one.
+    appoint_guardian(&f);
+    for (alone, caller) in [(&f.governor, &f.governor), (&f.steward, &f.steward)] {
+        f.env.mock_auths(&[MockAuth {
+            address: alone,
+            invoke: &MockAuthInvoke {
+                contract: &f.contract_id,
+                fn_name: "remove_fallback",
+                args: (f.shares.clone(), caller.clone()).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(f.client.try_remove_fallback(&f.shares, caller).is_err());
+    }
+    f.env.mock_all_auths();
+    assert!(f.client.get_fallback(&f.shares).is_some());
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_remove_fallback(&f.shares, &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.remove_fallback(&f.shares, &f.governor);
+    let signers: std::vec::Vec<Address> = f.env.auths().into_iter().map(|a| a.0).collect();
+    assert_eq!(signers, std::vec![f.governor.clone(), f.steward.clone()]);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FallbackRemoved {
+            fund: f.shares.clone(),
+            by: f.governor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.get_fallback(&f.shares), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,7 +1570,6 @@ fn open_with_a_removed_stablecoin_is_refused() {
 #[test]
 fn cross_currency_repo_opens_and_closes() {
     let (f, _) = cross_fund();
-    f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
     f.client.approve_lender(&f.shares, &f.lender, &true);
     mint(&f.env, &f.eurc, &f.lender, 100_000 * ONE);
     mint(&f.env, &f.shares, &f.borrower, 10_000 * ONE);
@@ -1719,7 +1896,8 @@ fn fund_replacement_waits_for_the_delay_then_anyone_applies_it() {
         Err(Ok(Error::TimelockPending))
     );
     advance(&f, 1);
-    publish_nav(&f, NAV_EUR);
+    // Whoever applies picks the moment, here one with a higher spot NAV.
+    publish_nav(&f, NAV_EUR * 10_005 / 10_000);
     f.env.set_auths(&[]);
     f.client.apply_fund_change(&f.shares);
     assert!(f.env.auths().is_empty());
@@ -1734,11 +1912,10 @@ fn fund_replacement_waits_for_the_delay_then_anyone_applies_it() {
     );
     assert_eq!(f.client.get_fund(&f.shares), Some(config));
     assert_eq!(f.client.pending_fund_change(&f.shares), None);
-    // References are anchored at application, as at admission.
-    assert_eq!(
-        f.client.get_fund_state(&f.shares).unwrap().reference_time,
-        eta
-    );
+    // Review finding H1: same feed, so the references carry over; the spot
+    // price at the moment of the apply anchors nothing.
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (NAV_EUR, T0));
     assert_eq!(
         f.client.try_apply_fund_change(&f.shares),
         Err(Ok(Error::NotProposed))
@@ -1823,7 +2000,9 @@ fn currency_rule_is_checked_again_when_applied() {
         .env
         .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
     let usd_feed = MockOracleClient::new(&f.env, &usd_oracle);
-    usd_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &T0);
+    // The new feed publishes a value on the fund's current path, so that it
+    // passes the corridor and only the currency rule is at stake.
+    usd_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_EUR, &T0);
     let mut config = fund_config(&f);
     config.oracle = usd_oracle;
     config.currency = usd(&f.env);
@@ -1832,7 +2011,7 @@ fn currency_rule_is_checked_again_when_applied() {
     open(&f, offer_id);
     advance(&f, DEFAULT_TIMELOCK_SECS);
     let now = f.env.ledger().timestamp();
-    usd_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
+    usd_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_EUR, &now);
     assert_eq!(
         f.client.try_apply_fund_change(&f.shares),
         Err(Ok(Error::CurrencyMismatch))
@@ -2282,6 +2461,594 @@ fn intruder_cannot_change_the_envelope() {
     assert_eq!(f.client.envelope(), default_envelope());
 }
 
+// -- Review of version 3: references, expiry, issuer, limits, guardian -----
+
+/// Review finding H1: a new NAV feed must agree with the reference the fund
+/// has followed, at the proposal and again at the apply; the reference
+/// carries over in the new feed's decimals.
+#[test]
+fn a_new_nav_feed_must_lie_on_the_funds_path() {
+    let (f, _) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    let mut config = fund_config(&f);
+    config.oracle = oracle;
+    // 2 % above the reference in a day: outside the corridor.
+    publish_on(&f, &feed, NAV_EUR_8 * 102 / 100);
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    // The applier picks a moment when the new feed is off the path: refused,
+    // and the proposal waits.
+    publish_on(&f, &feed, NAV_EUR_8 * 102 / 100);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!(state.nav_decimals, FALLBACK_DECIMALS);
+    assert_eq!((state.reference_nav, state.reference_time), (NAV_EUR_8, T0));
+}
+
+/// Review finding H1, FX leg: a new FX feed must lie within the current band
+/// around the current reference rate, which carries over.
+#[test]
+fn a_new_fx_feed_must_lie_within_the_current_band() {
+    let (f, _) = cross_fund();
+    let mut config = f.client.get_fund(&f.shares).unwrap();
+    let nav_feed = MockOracleClient::new(&f.env, &config.oracle);
+    let fx_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let fx_feed = MockOracleClient::new(&f.env, &fx_oracle);
+    let PriceSource::Cross(mut leg) = config.source.clone() else {
+        panic!("cross fund");
+    };
+    leg.oracle = fx_oracle;
+    config.source = PriceSource::Cross(leg);
+    let publish = |rate: i128| {
+        let now = f.env.ledger().timestamp();
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
+    };
+    // 6 % away from the reference rate, for a band of 5 %.
+    publish(EUR_USD * 94 / 100);
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish(EUR_USD * 97 / 100);
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish(EUR_USD * 94 / 100);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish(EUR_USD * 97 / 100);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().reference_fx,
+        EUR_USD
+    );
+}
+
+/// Review findings H1b and M3: a proposal applies from its eta to the end of
+/// its seven-day grace period, then it is gone.
+#[test]
+fn proposals_expire_after_their_grace_period() {
+    let (f, _) = ready();
+    f.client.set_fund(&f.shares, &replacement(&f));
+    let hash = wasm_hash(&f.env, 7);
+    f.client.propose_upgrade(&hash);
+    advance(&f, DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS);
+    publish_nav(&f, NAV_EUR);
+    // The last second of the grace period still counts.
+    assert!(f.client.pending_upgrade().is_some());
+    f.client.apply_fund_change(&f.shares);
+    advance(&f, 1);
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::ProposalExpired)))
+    );
+    f.client.set_max_term(&(10 * DAY));
+    advance(&f, DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_max_term_change(), None);
+    assert_eq!(
+        f.client.try_apply_max_term_change(),
+        Err(Ok(Error::ProposalExpired))
+    );
+    // A new proposal replaces the expired one.
+    f.client.set_max_term(&(10 * DAY));
+    assert!(f.client.pending_max_term_change().is_some());
+}
+
+/// Review finding H2: after a removal, re-admitting the fund under another
+/// steward still needs the last one, who also keeps the right to cancel.
+#[test]
+fn readmission_after_removal_needs_the_last_steward() {
+    let (f, _) = ready();
+    f.client.remove_fund(&f.shares);
+    let newcomer = Address::generate(&f.env);
+    let mut config = fund_config(&f);
+    config.steward = newcomer.clone();
+    let signs = |address: &Address| MockAuth {
+        address: leak(address.clone()),
+        invoke: leak(MockAuthInvoke {
+            contract: leak(f.contract_id.clone()),
+            fn_name: "set_fund",
+            args: (f.shares.clone(), config.clone()).into_val(&f.env),
+            sub_invokes: &[],
+        }),
+    };
+    f.env.mock_auths(&[signs(&f.governor), signs(&newcomer)]);
+    assert!(f.client.try_set_fund(&f.shares, &config).is_err());
+    f.env
+        .mock_auths(&[signs(&f.governor), signs(&newcomer), signs(&f.steward)]);
+    f.client.set_fund(&f.shares, &config);
+    f.env.mock_all_auths();
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+    f.client.cancel_fund_change(&f.shares, &f.steward);
+    assert_eq!(f.env.auths()[0].0, f.steward);
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+}
+
+#[test]
+fn fund_limits_tighten_at_once_and_loosen_after_the_delay() {
+    let (f, _) = ready();
+    f.client
+        .set_fund_limits(&f.shares, &300, &(400_000 * ONE), &(4_000_000 * ONE));
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundLimitsSet {
+            fund: f.shares.clone(),
+            haircut_bps: 300,
+            max_principal_per_repo: 400_000 * ONE,
+            max_outstanding: 4_000_000 * ONE
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    // A lower haircut is a loosening, even with the caps unchanged.
+    f.client
+        .set_fund_limits(&f.shares, &200, &(400_000 * ONE), &(4_000_000 * ONE));
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundLimitsChangeProposed {
+            fund: f.shares.clone(),
+            haircut_bps: 200,
+            max_principal_per_repo: 400_000 * ONE,
+            max_outstanding: 4_000_000 * ONE,
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_fund_limits_change(&f.shares),
+        Some(PendingFundLimitsChange {
+            haircut_bps: 200,
+            max_principal_per_repo: 400_000 * ONE,
+            max_outstanding: 4_000_000 * ONE,
+            eta
+        })
+    );
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 300);
+    assert_eq!(
+        f.client.try_apply_fund_limits_change(&f.shares),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.env.set_auths(&[]);
+    f.client.apply_fund_limits_change(&f.shares);
+    assert!(f.env.auths().is_empty());
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 200);
+    assert_eq!(f.client.pending_fund_limits_change(&f.shares), None);
+    assert_eq!(
+        f.client.try_apply_fund_limits_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn fund_limits_loosening_is_cancelled_by_the_right_roles_or_a_tightening() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let loosen = || {
+        f.client
+            .set_fund_limits(&f.shares, &200, &(600_000 * ONE), &(5_000_000 * ONE))
+    };
+    loosen();
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_fund_limits_change(&f.shares, &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_fund_limits_change(&f.shares, &guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundLimitsChangeCancelled {
+            fund: f.shares.clone(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    loosen();
+    f.client.cancel_fund_limits_change(&f.shares, &f.governor);
+    assert_eq!(f.client.pending_fund_limits_change(&f.shares), None);
+    loosen();
+    // Review finding M3: a direct tightening drops the pending loosening.
+    f.client
+        .set_fund_limits(&f.shares, &250, &(500_000 * ONE), &(5_000_000 * ONE));
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FundLimitsChangeCancelled {
+                fund: f.shares.clone(),
+                by: f.steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundLimitsSet {
+                fund: f.shares.clone(),
+                haircut_bps: 250,
+                max_principal_per_repo: 500_000 * ONE,
+                max_outstanding: 5_000_000 * ONE
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_fund_limits_change(&f.shares), None);
+    // An intruder cannot touch the limits at all.
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_fund_limits",
+            args: (f.shares.clone(), 200u32, 600_000 * ONE, 5_000_000 * ONE).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f
+        .client
+        .try_set_fund_limits(&f.shares, &200, &(600_000 * ONE), &(5_000_000 * ONE))
+        .is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.pending_fund_limits_change(&f.shares), None);
+}
+
+#[test]
+fn currency_cap_moves_freely_before_the_first_admission() {
+    let f = bare();
+    f.client.set_currency_cap(&eur(&f.env), &(10 * ONE));
+    assert_eq!(f.client.currency_cap(&eur(&f.env)), 10 * ONE);
+    assert_eq!(f.client.pending_currency_cap_change(&eur(&f.env)), None);
+}
+
+#[test]
+fn currency_cap_decrease_is_immediate_and_an_increase_waits() {
+    let (f, _) = ready();
+    let cap = |amount: i128| f.client.set_currency_cap(&eur(&f.env), &amount);
+    cap(5_000_000 * ONE);
+    assert_eq!(
+        own_events(&f),
+        std::vec![CurrencyCapSet {
+            currency: eur(&f.env),
+            cap: 5_000_000 * ONE
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    cap(20_000_000 * ONE);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![CurrencyCapChangeProposed {
+            currency: eur(&f.env),
+            cap: 20_000_000 * ONE,
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_currency_cap_change(&eur(&f.env)),
+        Some(PendingCurrencyCapChange {
+            cap: 20_000_000 * ONE,
+            eta
+        })
+    );
+    assert_eq!(f.client.currency_cap(&eur(&f.env)), 5_000_000 * ONE);
+    assert_eq!(
+        f.client.try_apply_currency_cap_change(&eur(&f.env)),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.env.set_auths(&[]);
+    f.client.apply_currency_cap_change(&eur(&f.env));
+    assert!(f.env.auths().is_empty());
+    assert_eq!(f.client.currency_cap(&eur(&f.env)), 20_000_000 * ONE);
+    assert_eq!(
+        f.client.try_apply_currency_cap_change(&eur(&f.env)),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+#[test]
+fn currency_cap_increase_is_cancelled_by_the_right_roles_or_a_decrease() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let raise = || f.client.set_currency_cap(&eur(&f.env), &(20_000_000 * ONE));
+    raise();
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client
+            .try_cancel_currency_cap_change(&eur(&f.env), &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_currency_cap_change(&eur(&f.env), &guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![CurrencyCapChangeCancelled {
+            currency: eur(&f.env),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    raise();
+    f.client
+        .cancel_currency_cap_change(&eur(&f.env), &f.governor);
+    raise();
+    f.client.set_currency_cap(&eur(&f.env), &(1_000 * ONE));
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            CurrencyCapChangeCancelled {
+                currency: eur(&f.env),
+                by: f.governor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            CurrencyCapSet {
+                currency: eur(&f.env),
+                cap: 1_000 * ONE
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_currency_cap_change(&eur(&f.env)), None);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_currency_cap",
+            args: (eur(&f.env), 2_000 * ONE).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f
+        .client
+        .try_set_currency_cap(&eur(&f.env), &(2_000 * ONE))
+        .is_err());
+    f.env.mock_all_auths();
+    // At most eight currencies wait at once.
+    for i in 0..MAX_PENDING_CURRENCY_CAPS {
+        let currency = Symbol::new(&f.env, &std::format!("C{i}"));
+        f.client.set_currency_cap(&currency, &ONE);
+    }
+    assert_eq!(
+        f.client.try_set_currency_cap(&usd(&f.env), &ONE),
+        Err(Ok(Error::LimitReached))
+    );
+}
+
+/// Review finding M2: the current guardian can always hand its role over.
+#[test]
+fn guardian_hands_over_its_role_at_once() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let successor = Address::generate(&f.env);
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "hand_over_guardian",
+            args: (intruder.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_hand_over_guardian(&intruder).is_err());
+    f.env.mock_all_auths();
+    f.client.hand_over_guardian(&successor);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianChanged {
+            guardian: successor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.guardian(), successor);
+}
+
+/// Review finding M2: a lost or hostile guardian cannot freeze governance.
+/// The governor forces a new one after thirty days, and the guardian it
+/// replaces cannot cancel that.
+#[test]
+fn governor_forces_a_guardian_change_after_thirty_days() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let successor = Address::generate(&f.env);
+    f.client.force_guardian_change(&successor);
+    let eta = f.env.ledger().timestamp() + MAX_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianChangeForced {
+            guardian: successor.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_forced_guardian_change(),
+        Some(PendingGuardianChange {
+            guardian: successor.clone(),
+            eta
+        })
+    );
+    // The guardian's veto covers ordinary changes, not this one.
+    assert_eq!(
+        f.client.try_cancel_guardian_change(&guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    f.env.mock_auths(&[MockAuth {
+        address: &guardian,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "cancel_forced_guardian_change",
+            args: ().into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_cancel_forced_guardian_change().is_err());
+    f.env.mock_all_auths();
+    advance(&f, MAX_TIMELOCK_SECS - 1);
+    assert_eq!(
+        f.client.try_apply_forced_guardian_change(),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, 1);
+    f.env.set_auths(&[]);
+    f.client.apply_forced_guardian_change();
+    f.env.mock_all_auths();
+    assert_eq!(f.client.guardian(), successor);
+
+    // The governor may withdraw its own forced change.
+    f.client.force_guardian_change(&guardian);
+    f.client.cancel_forced_guardian_change();
+    assert_eq!(
+        own_events(&f),
+        std::vec![ForcedGuardianChangeCancelled {
+            guardian: guardian.clone(),
+            by: f.governor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+}
+
+/// Review finding M3: a direct tightening drops the pending loosening of
+/// the same setting.
+#[test]
+fn a_direct_tightening_drops_the_pending_loosening() {
+    let (f, _) = ready();
+    f.client.set_max_term(&(10 * DAY));
+    f.client.set_max_term(&(3 * DAY));
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            MaxTermChangeCancelled {
+                max_term: 10 * DAY,
+                by: f.governor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            MaxTermChanged { max_term: 3 * DAY }.to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_max_term_change(), None);
+    f.client.set_envelope(&looser_envelope());
+    let mut tighter = default_envelope();
+    tighter.min_haircut_bps = 150;
+    f.client.set_envelope(&tighter);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            EnvelopeChangeCancelled {
+                envelope: looser_envelope(),
+                by: f.governor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            EnvelopeChanged {
+                envelope: tighter.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_envelope_change(), None);
+}
+
+/// Review finding M3: a new governor starts with none of the previous
+/// governor's own proposals; those a steward signed stay.
+#[test]
+fn governor_handover_drops_the_governors_proposals() {
+    let (f, _) = ready();
+    let hash = wasm_hash(&f.env, 7);
+    let pending_guardian = Address::generate(&f.env);
+    let forced_guardian = Address::generate(&f.env);
+    f.client.propose_upgrade(&hash);
+    f.client.set_guardian(&pending_guardian);
+    f.client.force_guardian_change(&forced_guardian);
+    f.client.set_max_term(&(10 * DAY));
+    f.client.set_envelope(&looser_envelope());
+    f.client.set_currency_cap(&eur(&f.env), &(20_000_000 * ONE));
+    f.client.set_fund(&f.shares, &replacement(&f));
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    f.client.accept_admin();
+    let by = successor.clone();
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            UpgradeCancelled {
+                wasm_hash: hash,
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            GuardianChangeCancelled {
+                guardian: pending_guardian,
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            ForcedGuardianChangeCancelled {
+                guardian: forced_guardian,
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            MaxTermChangeCancelled {
+                max_term: 10 * DAY,
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            EnvelopeChangeCancelled {
+                envelope: looser_envelope(),
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            CurrencyCapChangeCancelled {
+                currency: eur(&f.env),
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            AdminChanged {
+                previous: f.governor.clone(),
+                admin: successor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+    assert_eq!(f.client.pending_max_term_change(), None);
+    assert_eq!(f.client.pending_envelope_change(), None);
+    assert_eq!(f.client.pending_currency_cap_change(&eur(&f.env)), None);
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Repurchase
 // ---------------------------------------------------------------------------
@@ -2586,9 +3353,10 @@ fn invariants_hold_over_random_sequences() {
 fn opening_a_repo_touches_a_constant_number_of_entries() {
     let (f, offer_id) = ready();
     let (read, written) = constant_open_footprint(&f, offer_id, "no fallback");
-    // Version 2 read 17 entries and wrote 9: the fallback check costs a fund
-    // without fallback nothing.
-    assert_eq!((read, written), (17, 9));
+    // Version 2 read 17 entries and wrote 9. Extending the instance alone
+    // (`storage::bump_instance`) no longer reads the code entry: 16. The
+    // fallback check costs a fund without fallback nothing.
+    assert_eq!((read, written), (16, 9));
 }
 
 /// The same with a fallback feed: the footprint grows by the fallback's own
@@ -2599,8 +3367,8 @@ fn opening_a_repo_with_a_fallback_touches_a_constant_number_of_entries() {
     // The fallback must be fresh, or it is not read beyond its first entry.
     publish_on(&f, &feed, NAV_EUR_8);
     let (read, written) = constant_open_footprint(&f, offer_id, "with a fallback");
-    assert!(read > 17, "{read}");
-    assert_eq!(written, 9);
+    // The fallback's entry and its oracle's instance.
+    assert_eq!((read, written), (18, 9));
 }
 
 /// Opens 152 repos and checks the second and the last touch the same number
@@ -3238,8 +4006,8 @@ mod integration {
     }
 
     /// Checks the debt side settled, the shares stayed in the contract and
-    /// are recorded for `to`, and `release` is refused while the token still
-    /// refuses.
+    /// are recorded for `to`, and `release` reports a refusal while the token
+    /// still refuses, keeping the record.
     fn assert_deferred(live: &Live, repo_id: u64, to: &Address) {
         let f = &live.f;
         assert_eq!(
@@ -3253,19 +4021,32 @@ mod integration {
         assert_eq!(f.client.get_fund_state(&f.shares).unwrap().outstanding, 0);
         assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
         f.env.set_auths(&[]);
-        assert_eq!(
-            f.client.try_release(&repo_id),
-            Err(Ok(Error::ReleaseBlocked))
-        );
+        assert!(!f.client.release(&repo_id));
         f.env.mock_all_auths();
         assert!(f.client.pending_release(&repo_id).is_some());
+    }
+
+    /// Review finding L6: a record may wait months for the issuer; each
+    /// refused attempt extends its TTL.
+    #[test]
+    fn a_refused_release_extends_the_record() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, DAY);
+        live.token.set_frozen(&f.contract_id, &true);
+        f.client.repurchase(&repo_id);
+        let key = DataKey::PendingRelease(repo_id);
+        age_ledgers(f);
+        assert!(entry_ttl(f, &key) < BUMP_THRESHOLD_LEDGERS);
+        assert!(!f.client.release(&repo_id));
+        assert_eq!(entry_ttl(f, &key), BUMP_TO_LEDGERS);
     }
 
     /// Anyone retries the release once the token accepts again.
     fn assert_released(live: &Live, repo_id: u64, to: &Address, before: i128) {
         let f = &live.f;
         f.env.set_auths(&[]);
-        f.client.release(&repo_id);
+        assert!(f.client.release(&repo_id));
         assert!(f.env.auths().is_empty());
         assert_eq!(
             own_events(f),
@@ -3421,6 +4202,64 @@ mod integration {
             f.client.get_fund_state(&f.shares).unwrap().outstanding,
             10_000 * ONE
         );
+    }
+
+    /// Review finding L8: after a repurchase, the borrower may send its
+    /// deferred shares to another address; nobody else can.
+    #[test]
+    fn borrower_redirects_a_deferred_release() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, DAY);
+        live.token.set_whitelisted(&f.borrower, &false);
+        f.client.repurchase(&repo_id);
+        let custodian = Address::generate(&f.env);
+        live.token.set_whitelisted(&custodian, &true);
+        f.env.mock_auths(&[MockAuth {
+            address: &f.lender,
+            invoke: &MockAuthInvoke {
+                contract: &f.contract_id,
+                fn_name: "redirect_release",
+                args: (repo_id, custodian.clone()).into_val(&f.env),
+                sub_invokes: &[],
+            },
+        }]);
+        assert!(f.client.try_redirect_release(&repo_id, &custodian).is_err());
+        f.env.mock_all_auths();
+        f.client.redirect_release(&repo_id, &custodian);
+        assert_eq!(f.env.auths()[0].0, f.borrower);
+        assert_eq!(
+            own_events(f),
+            std::vec![ReleaseRedirected {
+                repo_id,
+                to: custodian.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)]
+        );
+        assert_released(&live, repo_id, &custodian, 0);
+    }
+
+    /// Review finding L8: after a seizure, the lender may redirect its
+    /// deferred shares, but only to an address the steward approved.
+    #[test]
+    fn lender_redirects_a_seized_release_to_an_approved_lender() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, 2 * HOUR);
+        advance(f, 2 * HOUR);
+        live.token.set_whitelisted(&f.lender, &false);
+        f.client.seize(&repo_id, &f.lender);
+        assert_deferred(&live, repo_id, &f.lender);
+        let other = Address::generate(&f.env);
+        live.token.set_whitelisted(&other, &true);
+        assert_eq!(
+            f.client.try_redirect_release(&repo_id, &other),
+            Err(Ok(Error::LenderNotApproved))
+        );
+        f.client.approve_lender(&f.shares, &other, &true);
+        f.client.redirect_release(&repo_id, &other);
+        assert_eq!(f.env.auths()[0].0, f.lender);
+        assert_released(&live, repo_id, &other, 0);
     }
 
     #[test]
