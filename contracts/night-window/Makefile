@@ -2,8 +2,9 @@ default: build
 
 all: lint test
 
-# Same gates as CI (.github/workflows/ci.yml).
-lint:
+# Same gates as CI (.github/workflows/ci.yml). The WASM is built first: the
+# upgrade test uploads it, and `clippy --all-targets` compiles that test.
+lint: build
 	cargo fmt --all --check
 	cargo clippy --all-targets -- -D warnings
 

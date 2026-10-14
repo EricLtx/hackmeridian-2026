@@ -1438,6 +1438,333 @@ fn opening_a_repo_touches_a_constant_number_of_entries() {
     );
 }
 
+/// Ledger entries an invocation read and wrote, and its instructions (test
+/// host), from the same metering as the test above.
+fn footprint(env: &Env) -> (u32, u32, i64) {
+    let resources = env.cost_estimate().resources();
+    (
+        resources.disk_read_entries + resources.memory_read_entries,
+        resources.write_entries,
+        resources.instructions,
+    )
+}
+
+/// Load test (roadmap step 1, review gate "avant le testnet public"): 200
+/// repos over four offers from two lenders and five borrowers, then all
+/// repurchased. Every `open_repo` and every `repurchase` touches the same
+/// number of ledger entries, whether it is the first or the last: nothing in
+/// the contract walks the open positions. The invariants hold at the peak and
+/// at the end.
+#[test]
+fn many_repos_keep_a_constant_footprint_per_operation() {
+    const REPOS: usize = 200;
+    let (f, first_offer) = ready();
+    let second_lender = Address::generate(&f.env);
+    f.client.approve_lender(&f.shares, &second_lender, &true);
+    mint(&f.env, &f.eurc, &second_lender, 1_000_000 * ONE);
+    let mut offers = std::vec![first_offer];
+    for (lender, rate_bps) in [
+        (&f.lender, 250),
+        (&second_lender, 300),
+        (&second_lender, 400),
+    ] {
+        offers.push(f.client.create_offer(
+            lender,
+            &f.eurc,
+            &(100_000 * ONE),
+            &rate_bps,
+            &(7 * DAY),
+            &vec![&f.env, f.shares.clone()],
+        ));
+    }
+    let borrowers: std::vec::Vec<Address> = (0..5)
+        .map(|_| {
+            let borrower = Address::generate(&f.env);
+            mint(&f.env, &f.shares, &borrower, 1_000 * ONE);
+            mint(&f.env, &f.eurc, &borrower, 1_000 * ONE);
+            borrower
+        })
+        .collect();
+
+    // Five borrowers and four offers: the 200 repos cover every pair.
+    let mut repos = std::vec::Vec::with_capacity(REPOS);
+    let mut opens = std::vec::Vec::with_capacity(REPOS);
+    for i in 0..REPOS {
+        repos.push(f.client.open_repo(
+            &borrowers[i % borrowers.len()],
+            &offers[i % offers.len()],
+            &f.shares,
+            &(20 * ONE),
+            &(10 * ONE),
+            &DAY,
+        ));
+        opens.push(footprint(&f.env));
+    }
+    check_invariants(&f, &offers, &repos);
+    assert_eq!(
+        f.client.currency_outstanding(&eur(&f.env)),
+        REPOS as i128 * 10 * ONE
+    );
+
+    advance(&f, HOUR);
+    let mut repurchases = std::vec::Vec::with_capacity(REPOS);
+    for repo_id in &repos {
+        f.client.repurchase(repo_id);
+        repurchases.push(footprint(&f.env));
+    }
+    check_invariants(&f, &offers, &repos);
+    assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
+    assert_eq!(balance(&f.env, &f.shares, &f.contract_id), 0);
+
+    // The very first repo creates the contract's share balance entry; from
+    // the second on, the footprint must not move.
+    let entries = |m: &(u32, u32, i64)| (m.0, m.1);
+    let first_open = opens[1];
+    let last_open = opens[REPOS - 1];
+    for (i, measured) in opens.iter().enumerate().skip(1) {
+        assert_eq!(
+            entries(measured),
+            entries(&first_open),
+            "open_repo #{}",
+            i + 1
+        );
+    }
+    let first_repurchase = repurchases[0];
+    let last_repurchase = repurchases[REPOS - 1];
+    for (i, measured) in repurchases.iter().enumerate() {
+        assert_eq!(
+            entries(measured),
+            entries(&first_repurchase),
+            "repurchase #{}",
+            i + 1
+        );
+    }
+    std::println!(
+        "load test, {} repos: open_repo {} entries read, {} written (2nd and last); \
+         instructions {} -> {} (test host)",
+        REPOS,
+        last_open.0,
+        last_open.1,
+        first_open.2,
+        last_open.2
+    );
+    std::println!(
+        "load test, {} repos: repurchase {} entries read, {} written (first and last); \
+         instructions {} -> {} (test host)",
+        REPOS,
+        last_repurchase.0,
+        last_repurchase.1,
+        first_repurchase.2,
+        last_repurchase.2
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade to the WASM built by `stellar contract build`
+// ---------------------------------------------------------------------------
+
+#[cfg(not(night_window_wasm))]
+compile_error!(
+    "the upgrade test needs target/wasm32v1-none/release/night_window.wasm: \
+     run `stellar contract build` before `cargo test` or `cargo clippy --all-targets` \
+     (see contracts/night-window/build.rs)"
+);
+
+/// The release WASM produced by `stellar contract build`, located by build.rs.
+#[cfg(night_window_wasm)]
+const NIGHT_WINDOW_WASM: &[u8] = include_bytes!(env!("NIGHT_WINDOW_WASM"));
+
+/// The WASM hash the ledger holds as `contract`'s executable, read from its
+/// instance entry. A natively compiled test contract has a pseudo hash here.
+#[cfg(night_window_wasm)]
+fn executable_hash(env: &Env, contract: &Address) -> Option<[u8; 32]> {
+    use soroban_sdk::xdr::{
+        ContractExecutable as XdrExecutable, LedgerEntryData, ScAddress, ScVal,
+    };
+    let address = ScAddress::from(contract);
+    env.to_ledger_snapshot()
+        .ledger_entries
+        .iter()
+        .find_map(|(_, (entry, _))| match &entry.data {
+            LedgerEntryData::ContractData(data)
+                if data.contract == address && data.key == ScVal::LedgerKeyContractInstance =>
+            {
+                match &data.val {
+                    ScVal::ContractInstance(instance) => match &instance.executable {
+                        XdrExecutable::Wasm(hash) => Some(hash.0),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+}
+
+/// Everything the upgrade must keep, read through the public interface.
+#[cfg(night_window_wasm)]
+#[derive(Debug, PartialEq)]
+struct Snapshot {
+    admin: Address,
+    guardian: Address,
+    paused: bool,
+    max_term: u64,
+    envelope: RiskEnvelope,
+    stablecoin: Option<StablecoinConfig>,
+    currency_cap: i128,
+    currency_outstanding: i128,
+    fund: Option<FundConfig>,
+    fund_state: Option<FundState>,
+    lender_approved: bool,
+    offers: std::vec::Vec<Option<Offer>>,
+    repos: std::vec::Vec<Option<Repo>>,
+    stablecoins_held: i128,
+    shares_held: i128,
+}
+
+#[cfg(night_window_wasm)]
+fn snapshot(f: &Fixture, offers: &[u64], repos: &[u64]) -> Snapshot {
+    Snapshot {
+        admin: f.client.admin(),
+        guardian: f.client.guardian(),
+        paused: f.client.is_paused(),
+        max_term: f.client.max_term(),
+        envelope: f.client.envelope(),
+        stablecoin: f.client.get_stablecoin(&f.eurc),
+        currency_cap: f.client.currency_cap(&eur(&f.env)),
+        currency_outstanding: f.client.currency_outstanding(&eur(&f.env)),
+        fund: f.client.get_fund(&f.shares),
+        fund_state: f.client.get_fund_state(&f.shares),
+        lender_approved: f.client.is_lender_approved(&f.shares, &f.lender),
+        offers: offers.iter().map(|id| f.client.get_offer(id)).collect(),
+        repos: repos.iter().map(|id| f.client.get_repo(id)).collect(),
+        stablecoins_held: balance(&f.env, &f.eurc, &f.contract_id),
+        shares_held: balance(&f.env, &f.shares, &f.contract_id),
+    }
+}
+
+/// Roadmap step 1 and review gate "avant le testnet public": the nominal
+/// upgrade path with a really uploaded WASM. The contract starts as the
+/// natively compiled code, holds offers, open repos and a closed one, a
+/// separate guardian, a changed term ceiling and the pause flag; the governor
+/// switches it to the release WASM. Every value survives, and the WASM, now
+/// running in the VM, still serves the open repos, opens new ones and refuses
+/// an intruder's upgrade.
+#[cfg(night_window_wasm)]
+#[test]
+fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
+    let (f, first_offer) = ready();
+    let second_offer = f.client.create_offer(
+        &f.lender,
+        &f.eurc,
+        &(50_000 * ONE),
+        &500,
+        &(3 * DAY),
+        &vec![&f.env, f.shares.clone()],
+    );
+    f.client.set_sponsor(&second_offer, &f.shares, &true);
+    let long_repo = open(&f, first_offer);
+    let short_repo = f.client.open_repo(
+        &f.borrower,
+        &second_offer,
+        &f.shares,
+        &(4_000 * ONE),
+        &(3_000 * ONE),
+        &(2 * DAY),
+    );
+    let closed_repo = open(&f, first_offer);
+    advance(&f, HOUR);
+    f.client.repurchase(&closed_repo);
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    f.client.set_max_term(&(5 * DAY));
+    f.client.pause(&guardian);
+
+    let offers = [first_offer, second_offer];
+    let repos = [long_repo, short_repo, closed_repo];
+    let before = snapshot(&f, &offers, &repos);
+    assert!(before.paused);
+    assert_eq!(
+        before.repos[2].as_ref().unwrap().status,
+        RepoStatus::Repurchased
+    );
+
+    let hash = f.env.deployer().upload_contract_wasm(NIGHT_WINDOW_WASM);
+    let native = executable_hash(&f.env, &f.contract_id);
+    assert!(native.is_some());
+    assert_ne!(native, Some(hash.to_array()));
+    f.client.upgrade(&hash);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        executable_hash(&f.env, &f.contract_id),
+        Some(hash.to_array())
+    );
+
+    // From here on, every call runs the uploaded WASM in the VM.
+    assert_eq!(snapshot(&f, &offers, &repos), before);
+    assert_eq!(f.client.version(), 2);
+    check_invariants(&f, &offers, &repos);
+
+    // The pause survived: entries stay closed, exits stay open.
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &first_offer,
+            &f.shares,
+            &(20 * ONE),
+            &(10 * ONE),
+            &DAY
+        ),
+        Err(Ok(Error::Paused))
+    );
+    advance(&f, HOUR);
+    let due = f.client.repo_due(&long_repo);
+    f.client.repurchase(&long_repo);
+    assert_eq!(f.env.auths()[0].0, f.borrower);
+    assert_eq!(
+        f.client.get_offer(&first_offer).unwrap().available,
+        before.offers[0].as_ref().unwrap().available + 10_000 * ONE + due
+    );
+
+    // The governor lifts the pause and a new repo opens on the old offer.
+    f.client.unpause();
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    let new_repo = f.client.open_repo(
+        &f.borrower,
+        &first_offer,
+        &f.shares,
+        &(2_000 * ONE),
+        &(1_000 * ONE),
+        &DAY,
+    );
+    assert_eq!(new_repo, closed_repo + 1);
+    let all_repos = [long_repo, short_repo, closed_repo, new_repo];
+    check_invariants(&f, &offers, &all_repos);
+    f.client.repurchase(&short_repo);
+    f.client.repurchase(&new_repo);
+    check_invariants(&f, &offers, &all_repos);
+    assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
+
+    // The upgraded contract still refuses an intruder's upgrade.
+    let intruder = Address::generate(&f.env);
+    let other = soroban_sdk::BytesN::from_array(&f.env, &[7u8; 32]);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "upgrade",
+            args: (hash.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_upgrade(&hash).is_err());
+    assert!(f.client.try_upgrade(&other).is_err());
+    assert_eq!(
+        executable_hash(&f.env, &f.contract_id),
+        Some(hash.to_array())
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Arithmetic
 // ---------------------------------------------------------------------------

@@ -152,9 +152,9 @@ Check with `stellar --version`. The workspace is tested with 28.1.0.
 ### 2. Compile and test
 
 ```sh
-cargo test                                      # unit tests, run off-chain
-cargo clippy --all-targets -- -D warnings       # security lints
 stellar contract build                          # → target/wasm32v1-none/release/night_window.wasm
+cargo clippy --all-targets -- -D warnings       # security lints
+cargo test                                      # unit tests, run off-chain (the upgrade test needs the WASM)
 ```
 
 ### 3. Deploy to testnet

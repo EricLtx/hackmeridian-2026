@@ -26,12 +26,14 @@ jobs:
           version: 28.1.0
       - name: Format
         run: cargo fmt --all --check
+      # Built before lint and test: the upgrade test uploads this WASM, and
+      # `clippy --all-targets` compiles that test (contracts/night-window/build.rs).
+      - name: Build WASM
+        run: stellar contract build
       - name: Lint (security lints are denied in Cargo.toml)
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
-      - name: Build WASM
-        run: stellar contract build
 
   audit:
     runs-on: ubuntu-latest

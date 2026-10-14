@@ -190,8 +190,8 @@ An integration module runs the full cycle with the real share token and NAV feed
 ### How do I run it?
 
 ```sh
-cargo test                 # host tests
 stellar contract build     # WASM in target/wasm32v1-none/release/
+cargo test                 # host tests (the upgrade test uploads that WASM)
 cd demo && npm install && npm run setup && npm run demo   # live on testnet
 ```
 

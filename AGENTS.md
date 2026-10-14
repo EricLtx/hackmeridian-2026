@@ -30,13 +30,14 @@ Read `docs/securite.md` before changing the contract. The enforced rules:
 - Every privileged function loads the admin from storage and calls `require_auth` on it. Every `Address` argument whose authority a function consumes gets its own `require_auth` in that function.
 - Deadlines live in stored values and are compared to the ledger timestamp, never inferred from a TTL.
 - Error codes and exported types are append-only.
-- Before finishing a change, run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and `stellar contract build`. CI runs the same, plus a RustSec advisory check.
+- Before finishing a change, run `cargo fmt --all --check`, `stellar contract build`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, in that order. CI runs the same, plus a RustSec advisory check.
 
 ## Test
 
-Host tests run with the normal Cargo test harness (not on-chain):
+Host tests run with the normal Cargo test harness (not on-chain). Build the WASM first: the upgrade test of `night-window` uploads `target/wasm32v1-none/release/night_window.wasm`, and the test crate does not compile without it (`contracts/night-window/build.rs`).
 
 ```sh
+stellar contract build
 cargo test
 ```
 
