@@ -32,6 +32,7 @@ import {
   read,
   saveState,
   sv,
+  writeDeployment,
 } from "./lib.mjs";
 import { FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, OFFERS, navAt } from "./config.mjs";
 
@@ -325,6 +326,8 @@ async function main() {
     },
   );
 
+  writeDeployment(state);
+  console.log("\n  Public addresses written to web/public/deployment.testnet.json for the web interface.");
   console.log("\nSetup complete. Run `npm run demo` from one hour after now.");
 }
 

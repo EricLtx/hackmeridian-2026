@@ -1,0 +1,30 @@
+{
+  "network": "testnet",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "explorer": "https://stellar.expert/explorer/testnet",
+  "contracts": {
+    "openWindow": "CBVSCT2WPGYBP23BQKI5LCQQT4AWVT3WB36GUYJBS7OENEJCS3A6IKA7",
+    "fundShares": "CARS3Z3J5UENOZO4IYXOCYP2ZGLVTG2OYM7DKFPCLQVKDSM2QZSFGNUZ",
+    "navFeed": "CA2QLT6ICYXMGMFA5FQOSN4V5U67INWMMGSGJWOPL5Z5TEPN74RTOVFP",
+    "stablecoin": "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX",
+    "fxFeed": "CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W"
+  },
+  "stablecoin": {
+    "code": "tEUR",
+    "issuer": "GAQWD2X7DREQP6KBAZGRKSEESC3DBHS5XZR6NPEKXU5L7YI7GLHZFJZF",
+    "currency": "EUR",
+    "decimals": 7
+  },
+  "fund": {
+    "symbol": "tMMF",
+    "name": "Test US T-bill fund share",
+    "decimals": 7,
+    "navCurrency": "USD"
+  },
+  "offers": {
+    "sponsor": 1,
+    "market": 2
+  },
+  "updatedAt": "2026-10-14T20:47:24.829Z"
+}

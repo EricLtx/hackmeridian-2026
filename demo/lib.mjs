@@ -18,6 +18,7 @@ import {
   Keypair,
   Networks,
   Operation,
+  StrKey,
   TransactionBuilder,
   authorizeEntry,
   nativeToScVal,
@@ -480,4 +481,33 @@ export async function deploySac(state, sourceRole, classicAsset) {
   return id;
 }
 
-export { Asset, Operation, Keypair };
+export { Asset, Operation, Keypair, StrKey };
+
+/**
+ * Writes the public facts of the deployment for the web interface:
+ * network, contract addresses, offer ids. No key, no secret.
+ */
+export function writeDeployment(state) {
+  const pub = (role) => keypair(state, role).publicKey();
+  const deployment = {
+    network: "testnet",
+    rpcUrl: RPC_URL,
+    networkPassphrase: PASSPHRASE,
+    explorer: "https://stellar.expert/explorer/testnet",
+    contracts: {
+      openWindow: state.contracts.openWindow,
+      fundShares: state.contracts.shares,
+      navFeed: state.contracts.navOracle,
+      stablecoin: state.contracts.euro,
+      fxFeed: state.fxSource === "local" ? state.contracts.navOracle : REFLECTOR_FX_TESTNET,
+    },
+    stablecoin: { code: "tEUR", issuer: pub("euroIssuer"), currency: "EUR", decimals: 7 },
+    fund: { symbol: "tMMF", name: "Test US T-bill fund share", decimals: 7, navCurrency: "USD" },
+    offers: { sponsor: state.ids.sponsorOffer ?? null, market: state.ids.marketOffer ?? null },
+    updatedAt: new Date().toISOString(),
+  };
+  const dir = path.join(ROOT, "web", "public");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "deployment.testnet.json"), `${JSON.stringify(deployment, null, 2)}\n`);
+  return deployment;
+}

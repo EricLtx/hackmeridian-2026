@@ -7,7 +7,8 @@
   "scripts": {
     "setup": "node setup.mjs",
     "demo": "node run.mjs",
-    "status": "node run.mjs --status"
+    "status": "node run.mjs --status",
+    "onboard": "node onboard.mjs"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
