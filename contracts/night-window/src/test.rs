@@ -3096,7 +3096,7 @@ fn a_replacement_drops_proposals_made_against_the_old_configuration() {
     f.client.set_fund(&f.shares, &replacement(&f));
     f.client
         .set_fund_limits(&f.shares, &200, &(600_000 * ONE), &(5_000_000 * ONE));
-    f.client.propose_reanchor(&f.shares);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
     advance(&f, DEFAULT_TIMELOCK_SECS);
     publish_nav(&f, NAV_EUR);
     f.client.apply_fund_change(&f.shares);
@@ -3206,13 +3206,16 @@ fn reanchor_installs_the_readings_of_the_proposal() {
         invoke: &MockAuthInvoke {
             contract: &f.contract_id,
             fn_name: "propose_reanchor",
-            args: (f.shares.clone(),).into_val(&f.env),
+            args: (f.shares.clone(), dropped, 0i128).into_val(&f.env),
             sub_invokes: &[],
         },
     }]);
-    assert!(f.client.try_propose_reanchor(&f.shares).is_err());
+    assert!(f
+        .client
+        .try_propose_reanchor(&f.shares, &dropped, &0)
+        .is_err());
     f.env.mock_all_auths();
-    f.client.propose_reanchor(&f.shares);
+    f.client.propose_reanchor(&f.shares, &dropped, &0);
     let signers: std::vec::Vec<Address> = f.env.auths().into_iter().map(|a| a.0).collect();
     assert_eq!(signers, std::vec![f.governor.clone(), f.steward.clone()]);
     let eta = T0 + DEFAULT_TIMELOCK_SECS;
@@ -3230,11 +3233,12 @@ fn reanchor_installs_the_readings_of_the_proposal() {
     assert_eq!(
         f.client.pending_reanchor(&f.shares),
         Some(PendingReanchor {
+            nav_oracle: f.nav_oracle.clone(),
+            nav_asset: Asset::Stellar(f.shares.clone()),
             nav: dropped,
             nav_time: T0,
             nav_decimals: NAV_DECIMALS,
-            fx: 0,
-            fx_decimals: 0,
+            fx: AnchorFx::Direct,
             eta
         })
     );
@@ -3243,15 +3247,22 @@ fn reanchor_installs_the_readings_of_the_proposal() {
         Err(Ok(Error::TimelockPending))
     );
     advance(&f, DEFAULT_TIMELOCK_SECS);
-    // The feed moved 0.2 % from the proposal: more than the 0.1 % floor.
-    publish_nav(&f, dropped * 1_002 / 1_000);
-    assert_eq!(
-        f.client.try_apply_reanchor(&f.shares),
-        Err(Ok(Error::PriceOutOfBand))
-    );
+    // Review of the re-anchor round, item 3: the apply follows the model
+    // from the proposed NAV. 0.2 % up in two days is faster than the
+    // corridor (0.1 % floor plus 5 % a year), 0.15 % down is below its
+    // floor: both refused.
+    for moved in [dropped * 1_002 / 1_000, dropped * 9_985 / 10_000] {
+        publish_nav(&f, moved);
+        assert_eq!(
+            f.client.try_apply_reanchor(&f.shares),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+    }
     assert!(f.client.pending_reanchor(&f.shares).is_some());
-    // 0.05 % away: the proposal's readings are installed, not the spot.
-    publish_nav(&f, dropped * 10_005 / 10_000);
+    // 0.12 % up: more than the 0.1 % floor, but on the model path, which a
+    // symmetric band would wrongly refuse. The proposal's readings are
+    // installed, not the spot.
+    publish_nav(&f, dropped * 10_012 / 10_000);
     f.env.set_auths(&[]);
     f.client.apply_reanchor(&f.shares);
     assert!(f.env.auths().is_empty());
@@ -3283,7 +3294,7 @@ fn reanchor_installs_the_readings_of_the_proposal() {
 fn reanchor_is_cancelled_by_the_right_roles() {
     let (f, _) = ready();
     let guardian = appoint_guardian(&f);
-    f.client.propose_reanchor(&f.shares);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
     let intruder = Address::generate(&f.env);
     assert_eq!(
         f.client.try_cancel_reanchor(&f.shares, &intruder),
@@ -3303,7 +3314,7 @@ fn reanchor_is_cancelled_by_the_right_roles() {
         Err(Ok(Error::NotProposed))
     );
     for caller in [&f.steward, &f.governor] {
-        f.client.propose_reanchor(&f.shares);
+        f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
         f.client.cancel_reanchor(&f.shares, caller);
         assert_eq!(f.env.auths()[0].0, *caller);
     }
@@ -3320,7 +3331,7 @@ fn readmission_off_the_path_goes_through_a_reanchor() {
     publish_nav(&f, dropped);
     // The proposal of a removed fund's re-admission defers the path check.
     f.client.set_fund(&f.shares, &fund_config(&f));
-    f.client.propose_reanchor(&f.shares);
+    f.client.propose_reanchor(&f.shares, &dropped, &0);
     advance(&f, DEFAULT_TIMELOCK_SECS);
     publish_nav(&f, dropped);
     assert_eq!(
@@ -3332,6 +3343,130 @@ fn readmission_off_the_path_goes_through_a_reanchor() {
     let state = f.client.get_fund_state(&f.shares).unwrap();
     assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
     assert!(f.client.get_fund(&f.shares).is_some());
+}
+
+/// Re-anchor round, item 1: the signers sign the values. Readings away from
+/// them, a rate expected for a directly priced fund, or a value too large
+/// for the apply's arithmetic are refused at the proposal.
+#[test]
+fn reanchor_signers_sign_the_values() {
+    let (f, _) = ready();
+    // 0.2 % away from the expected NAV, for a 0.1 % floor.
+    assert_eq!(
+        f.client
+            .try_propose_reanchor(&f.shares, &(NAV_EUR * 1_002 / 1_000), &0),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &NAV_EUR, &EUR_USD),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let huge = i128::MAX / 2;
+    publish_nav(&f, huge);
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &huge, &0),
+        Err(Ok(Error::ArithmeticOverflow))
+    );
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+}
+
+/// Re-anchor round, item 1, cross price: the expected rate is checked
+/// against the leg's band, and the rate is bound to its feed.
+#[test]
+fn reanchor_of_a_cross_fund_checks_the_expected_rate() {
+    let (f, _) = cross_fund();
+    let config = f.client.get_fund(&f.shares).unwrap();
+    let PriceSource::Cross(leg) = config.source.clone() else {
+        panic!("cross fund");
+    };
+    // 6 % away from the rate, for a band of 5 %.
+    assert_eq!(
+        f.client
+            .try_propose_reanchor(&f.shares, &NAV_USD, &(EUR_USD * 106 / 100)),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    f.client.propose_reanchor(&f.shares, &NAV_USD, &EUR_USD);
+    let pending = f.client.pending_reanchor(&f.shares).unwrap();
+    assert_eq!(
+        pending.fx,
+        AnchorFx::Cross(AnchorRate {
+            oracle: leg.oracle,
+            asset: leg.asset,
+            rate: EUR_USD,
+            decimals: NAV_DECIMALS
+        })
+    );
+}
+
+/// Re-anchor round, item 2: a re-anchor is bound to the feeds it read. A
+/// fund priced by other feeds at the apply refuses it, and the removed
+/// fund's re-anchor goes with the re-admission it was read from.
+#[test]
+fn reanchor_is_bound_to_the_feeds_it_read() {
+    let (f, _) = ready();
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    // Simulate a fund now priced by another NAV feed than the proposal's.
+    f.env.as_contract(&f.contract_id, || {
+        let key = DataKey::PendingReanchor(f.shares.clone());
+        let mut pending: PendingReanchor = f.env.storage().persistent().get(&key).unwrap();
+        pending.nav_oracle = Address::generate(&f.env);
+        f.env.storage().persistent().set(&key, &pending);
+    });
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+
+    // Removed fund: overwriting or cancelling the re-admission drops the
+    // re-anchor read from it.
+    f.client.cancel_reanchor(&f.shares, &f.governor);
+    f.client.remove_fund(&f.shares);
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    f.client.set_fund(&f.shares, &replacement(&f));
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    f.client.cancel_fund_change(&f.shares, &f.steward);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            ReanchorCancelled {
+                fund: f.shares.clone(),
+                by: f.steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundChangeCancelled {
+                fund: f.shares.clone(),
+                by: f.steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+}
+
+/// Re-anchor round, item 4: the NAV for a re-anchor follows the pricing
+/// rule. A fresh fallback that disagrees blocks it, and a fallback cannot
+/// stand in for a stale primary.
+#[test]
+fn reanchor_reads_the_nav_under_the_pricing_rule() {
+    let (f, _, feed) = ready_with_fallback();
+    let dropped = NAV_EUR * 98 / 100;
+    publish_nav(&f, dropped);
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &dropped, &0),
+        Err(Ok(Error::PriceDivergence))
+    );
+    advance(&f, 26 * HOUR + 1);
+    publish_on(&f, &feed, NAV_EUR_8 * 98 / 100);
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &dropped, &0),
+        Err(Ok(Error::StalePrice))
+    );
+    publish_nav(&f, dropped);
+    f.client.propose_reanchor(&f.shares, &dropped, &0);
 }
 
 /// Second review, L1: a replacement that gives a directly priced fund its

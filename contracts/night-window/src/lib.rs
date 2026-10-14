@@ -39,10 +39,11 @@ mod types;
 pub use error::Error;
 pub use oracle::{OracleClient, Sep40Oracle};
 pub use types::{
-    Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg, Offer, PendingCurrencyCapChange,
-    PendingEnvelopeChange, PendingFallback, PendingFundChange, PendingFundLimitsChange,
-    PendingGuardianChange, PendingMaxTermChange, PendingReanchor, PendingRelease, PendingUpgrade,
-    PriceData, PriceSource, Quote, Repo, RepoStatus, RiskEnvelope, StablecoinConfig,
+    AnchorFx, AnchorRate, Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg, Offer,
+    PendingCurrencyCapChange, PendingEnvelopeChange, PendingFallback, PendingFundChange,
+    PendingFundLimitsChange, PendingGuardianChange, PendingMaxTermChange, PendingReanchor,
+    PendingRelease, PendingUpgrade, PriceData, PriceSource, Quote, Repo, RepoStatus, RiskEnvelope,
+    StablecoinConfig,
 };
 
 use events::*;
@@ -677,6 +678,11 @@ impl OpenWindow {
             } else {
                 0
             };
+            if !admitted && storage::pending_fund_change(&env, &fund).is_some() {
+                // A removed fund's re-anchor was read from the re-admission
+                // this proposal replaces.
+                drop_pending_reanchor(&env, &fund, &storage::governor(&env));
+            }
             let eta = eta(&env)?;
             storage::set_pending_fund_change(
                 &env,
@@ -724,6 +730,12 @@ impl OpenWindow {
             return Err(Error::NotProposed);
         }
         storage::remove_pending_fund_change(&env, &fund);
+        // A removed fund's re-anchor was read from the re-admission being
+        // cancelled. An admitted fund's re-anchor was read from its current
+        // feeds, which this cancellation does not touch, and stays.
+        if !storage::has_fund(&env, &fund) {
+            drop_pending_reanchor(&env, &fund, &caller);
+        }
         storage::bump_instance(&env);
         FundChangeCancelled { fund, by: caller }.publish(&env);
         Ok(())
@@ -778,24 +790,70 @@ impl OpenWindow {
     /// no longer lies on the old path. The fresh readings of the feed are
     /// taken now and stored; they are what the apply installs, so whoever
     /// applies cannot choose the anchor. The feed is the fund's current one,
-    /// or for a removed fund the one of its pending re-admission. Replaces an
-    /// earlier proposal. Requires the governor and the fund's steward on
-    /// record.
-    pub fn propose_reanchor(env: Env, fund: Address) -> Result<(), Error> {
+    /// or for a removed fund the one of its pending re-admission, and the NAV
+    /// is read under the pricing rule: the primary feed must be fresh, and a
+    /// fresh fallback must agree with it.
+    ///
+    /// The signers sign numbers, not just a moment: `expected_nav` and
+    /// `expected_fx` (0 for a fund priced directly) are the values they
+    /// agreed on, and the readings must lie within the fund's corridor floor
+    /// (NAV) and the leg's band (FX) of them, or the proposal is refused.
+    /// Replaces an earlier proposal. Requires the governor and the fund's
+    /// steward on record.
+    pub fn propose_reanchor(
+        env: Env,
+        fund: Address,
+        expected_nav: i128,
+        expected_fx: i128,
+    ) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         let steward = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
         if steward != governor {
             steward.require_auth();
         }
         let config = pricing_config(&env, &fund)?;
-        let (nav, fx) = read_anchor(&env, &config)?;
+        let (nav, fx) = read_anchor(&env, &fund, &config)?;
+        let nav_value = nav.price.mantissa();
+        // Values the apply will compute with must not overflow there: try
+        // the same arithmetic on them now.
+        math::within_band(nav_value, nav_value, config.corridor_floor_bps)?;
+        math::corridor(
+            nav_value,
+            nav.timestamp,
+            nav.timestamp,
+            config.corridor_floor_bps,
+            config.max_yield_bps,
+        )?;
+        if !math::within_band(nav_value, expected_nav, config.corridor_floor_bps)? {
+            return Err(Error::PriceOutOfBand);
+        }
+        let fx = match (&config.source, fx) {
+            (PriceSource::Cross(leg), Some(rate)) => {
+                let value = rate.price.mantissa();
+                math::within_band(value, value, leg.band_bps)?;
+                if !math::within_band(value, expected_fx, leg.band_bps)? {
+                    return Err(Error::PriceOutOfBand);
+                }
+                AnchorFx::Cross(AnchorRate {
+                    oracle: leg.oracle.clone(),
+                    asset: leg.asset.clone(),
+                    rate: value,
+                    decimals: rate.price.decimals(),
+                })
+            }
+            // A fund priced directly has no rate: any other expectation
+            // means the signers looked at another configuration.
+            _ if expected_fx != 0 => return Err(Error::PriceOutOfBand),
+            _ => AnchorFx::Direct,
+        };
         let eta = eta(&env)?;
         let pending = PendingReanchor {
-            nav: nav.price.mantissa(),
+            nav_oracle: config.oracle.clone(),
+            nav_asset: config.oracle_asset.clone(),
+            nav: nav_value,
             nav_time: nav.timestamp,
             nav_decimals: nav.price.decimals(),
-            fx: fx.map_or(0, |rate| rate.price.mantissa()),
-            fx_decimals: fx.map_or(0, |rate| rate.price.decimals()),
+            fx,
             eta,
         };
         storage::set_pending_reanchor(&env, &fund, &pending);
@@ -804,7 +862,7 @@ impl OpenWindow {
             fund,
             nav: pending.nav,
             nav_time: pending.nav_time,
-            fx: pending.fx,
+            fx: pending.fx.rate().map_or(0, |anchor| anchor.rate),
             eta,
         }
         .publish(&env);
@@ -812,26 +870,53 @@ impl OpenWindow {
     }
 
     /// Installs a proposed re-anchor once its delay has elapsed, within its
-    /// grace period. Anyone may call it. The feed must still agree with the
-    /// proposal: today's NAV within the fund's corridor floor of the proposed
-    /// one, today's FX rate within the leg's band of the proposed rate. The
+    /// grace period. Anyone may call it. The fund must still be priced by
+    /// the feeds the proposal read, and they must still agree with it:
+    /// today's NAV within the corridor that starts at the proposed NAV (the
+    /// model path, so a fund that accrued during the delay still passes),
+    /// today's FX rate within the leg's band of the proposed rate. The
     /// references become the proposed readings, not today's.
     pub fn apply_reanchor(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_reanchor(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
         let config = pricing_config(&env, &fund)?;
-        let (nav, fx) = read_anchor(&env, &config)?;
-        // A feed in other units than the proposal's cannot be compared.
+        let same_feeds = config.oracle == pending.nav_oracle
+            && config.oracle_asset == pending.nav_asset
+            && match (&config.source, pending.fx.rate()) {
+                (PriceSource::Direct, None) => true,
+                (PriceSource::Cross(leg), Some(anchor)) => {
+                    leg.oracle == anchor.oracle && leg.asset == anchor.asset
+                }
+                _ => false,
+            };
+        if !same_feeds {
+            return Err(Error::NotProposed);
+        }
+        let (nav, fx) = read_anchor(&env, &fund, &config)?;
+        // A SEP-40 feed keeps its decimals for life, so this only trips on a
+        // broken feed; readings in other units than the proposal's cannot be
+        // compared, which is the mismatch `CurrencyMismatch` reports.
+        let fx_decimals = fx.map(|rate| rate.price.decimals());
         if nav.price.decimals() != pending.nav_decimals
-            || fx.map_or(0, |rate| rate.price.decimals()) != pending.fx_decimals
+            || fx_decimals != pending.fx.rate().map(|anchor| anchor.decimals)
         {
             return Err(Error::CurrencyMismatch);
         }
-        if !math::within_band(nav.price.mantissa(), pending.nav, config.corridor_floor_bps)? {
+        let (low, high) = math::corridor(
+            pending.nav,
+            pending.nav_time,
+            nav.timestamp,
+            config.corridor_floor_bps,
+            config.max_yield_bps,
+        )?;
+        let value = nav.price.mantissa();
+        if value < low || value > high {
             return Err(Error::PriceOutOfBand);
         }
-        if let (PriceSource::Cross(leg), Some(rate)) = (&config.source, fx) {
-            if !math::within_band(rate.price.mantissa(), pending.fx, leg.band_bps)? {
+        if let (PriceSource::Cross(leg), Some(rate), Some(anchor)) =
+            (&config.source, fx, pending.fx.rate())
+        {
+            if !math::within_band(rate.price.mantissa(), anchor.rate, leg.band_bps)? {
                 return Err(Error::PriceOutOfBand);
             }
         }
@@ -839,8 +924,8 @@ impl OpenWindow {
         state.reference_nav = pending.nav;
         state.reference_time = pending.nav_time;
         state.nav_decimals = pending.nav_decimals;
-        state.reference_fx = pending.fx;
-        state.fx_decimals = pending.fx_decimals;
+        state.reference_fx = pending.fx.rate().map_or(0, |anchor| anchor.rate);
+        state.fx_decimals = pending.fx.rate().map_or(0, |anchor| anchor.decimals);
         storage::set_fund_state(&env, &fund, &state);
         storage::remove_pending_reanchor(&env, &fund);
         storage::bump_instance(&env);
@@ -848,7 +933,7 @@ impl OpenWindow {
             fund,
             nav: pending.nav,
             nav_time: pending.nav_time,
-            fx: pending.fx,
+            fx: state.reference_fx,
         }
         .publish(&env);
         Ok(())
@@ -1854,17 +1939,19 @@ fn pricing_config(env: &Env, fund: &Address) -> Result<FundConfig, Error> {
 }
 
 /// Fresh readings of a configuration's NAV feed and, for a cross price, its
-/// FX feed, each with the feed's own decimals.
+/// FX feed, each with the feed's own decimals. The NAV follows the pricing
+/// rule: fresh primary, checked against an active fallback.
 fn read_anchor(
     env: &Env,
+    fund: &Address,
     config: &FundConfig,
 ) -> Result<(oracle::Reading, Option<oracle::Reading>), Error> {
-    let nav = oracle::read_fresh(
+    let fallback = storage::fallback_for_pricing(env, fund);
+    let nav = oracle::read_primary_checked(
         env,
-        &config.oracle,
-        &config.oracle_asset,
+        config,
         OracleClient::new(env, &config.oracle).decimals(),
-        config.nav_max_age_secs,
+        fallback.as_ref(),
     )?;
     let fx = match &config.source {
         PriceSource::Cross(leg) => Some(oracle::read_fresh(

@@ -298,16 +298,49 @@ pub struct PendingFundChange {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingReanchor {
+    /// The NAV feed the readings come from; the apply requires the fund to
+    /// be priced by the same one.
+    pub nav_oracle: Address,
+    pub nav_asset: Asset,
     /// NAV read at the proposal, with `nav_decimals` digits, and its time.
     pub nav: i128,
     pub nav_time: u64,
     pub nav_decimals: u32,
-    /// FX rate read at the proposal, with `fx_decimals` digits; 0 without
-    /// FX leg.
-    pub fx: i128,
-    pub fx_decimals: u32,
+    /// The FX rate read at the proposal, for a cross price.
+    pub fx: AnchorFx,
     /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
+}
+
+/// The FX side of a re-anchor: none for a fund priced directly, or the rate
+/// read for a cross price. An enum, like `PriceSource`, rather than a zero
+/// rate with zero decimals that could pass for a reading.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AnchorFx {
+    Direct,
+    Cross(AnchorRate),
+}
+
+impl AnchorFx {
+    /// The rate, for a cross price.
+    pub fn rate(&self) -> Option<&AnchorRate> {
+        match self {
+            AnchorFx::Direct => None,
+            AnchorFx::Cross(rate) => Some(rate),
+        }
+    }
+}
+
+/// An FX rate read for a re-anchor, with the feed it comes from.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnchorRate {
+    pub oracle: Address,
+    pub asset: Asset,
+    /// The rate, with `decimals` digits.
+    pub rate: i128,
+    pub decimals: u32,
 }
 
 /// Shares a closed repo owes but the share token refused to deliver: the

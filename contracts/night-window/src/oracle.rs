@@ -161,24 +161,58 @@ pub fn read_nav(
     );
     let backup = read_fallback(env, config, feed, *decimals, state.nav_decimals);
     match primary {
-        Ok(nav) => match backup {
-            Ok(backup) => {
-                if within_band(
-                    backup.price.mantissa(),
-                    nav.price.mantissa(),
-                    feed.max_divergence_bps,
-                )? {
-                    Ok(nav)
-                } else {
-                    Err(Error::PriceDivergence)
-                }
-            }
-            Err(Error::StalePrice | Error::NoPrice) => Ok(nav),
-            Err(_) => Err(Error::PriceDivergence),
-        },
+        Ok(nav) => agree(nav, backup, feed),
         Err(error @ (Error::StalePrice | Error::NoPrice)) => backup.map_err(|_| error),
         Err(error) => Err(error),
     }
+}
+
+/// A fresh primary reading, checked against the fallback reading as
+/// `read_nav` does: a fresh fallback must agree within its tolerance, a
+/// fresh but unusable one fails closed, a stale or silent one is ignored.
+fn agree(
+    nav: Reading,
+    backup: Result<Reading, Error>,
+    feed: &FallbackFeed,
+) -> Result<Reading, Error> {
+    match backup {
+        Ok(backup) => {
+            if within_band(
+                backup.price.mantissa(),
+                nav.price.mantissa(),
+                feed.max_divergence_bps,
+            )? {
+                Ok(nav)
+            } else {
+                Err(Error::PriceDivergence)
+            }
+        }
+        Err(Error::StalePrice | Error::NoPrice) => Ok(nav),
+        Err(_) => Err(Error::PriceDivergence),
+    }
+}
+
+/// The primary NAV, which must be fresh, read with `nav_decimals` digits and
+/// checked against the fund's fallback like any valuation. For a re-anchor:
+/// a fallback may never be the anchor, and must not contradict it.
+pub fn read_primary_checked(
+    env: &Env,
+    config: &FundConfig,
+    nav_decimals: u32,
+    fallback: Option<&(FallbackFeed, u32)>,
+) -> Result<Reading, Error> {
+    let nav = read_fresh(
+        env,
+        &config.oracle,
+        &config.oracle_asset,
+        nav_decimals,
+        config.nav_max_age_secs,
+    )?;
+    let Some((feed, decimals)) = fallback else {
+        return Ok(nav);
+    };
+    let backup = read_fallback(env, config, feed, *decimals, nav_decimals);
+    agree(nav, backup, feed)
 }
 
 /// Checks that `nav` lies in the corridor predicted from the fund's reference.
