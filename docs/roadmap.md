@@ -87,6 +87,22 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **What it retires:** the governance risk and the residual code risk.
 
+**Status on 15 October 2026:**
+
+| Item | State | Evidence |
+|---|---|---|
+| Multisig governor | Done on testnet | 2-of-2 native account with an outside co-signer; both signing paths succeed, a single key is refused with `txBadAuth` |
+| Time delay | Done, version 3 | Upgrades, feed changes, re-anchoring, a new guardian and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
+| Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
+| Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |
+| Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 10 seconds later, with 290 of the 300 seconds of the testnet delay left |
+| Internal reviews | Done | Three passes on version 3, every finding fixed with a test |
+| Audit package | Ready | [audit-scope.md](audit-scope.md) |
+| Third-party audit | Not started | Needs an auditor and a budget |
+| Bug bounty | Not started | Needs a budget sized to the value at stake |
+
+Found on the way and fixed: operations used to extend the contract's code entry, whose rent grows with its size. On testnet the user who crossed the extension threshold would have paid about 530 XLM, more than one transaction may carry. The contract now extends only its instance, and the operator keeps the code alive (decision S20 in [securite.md](securite.md)).
+
 ### Step 3: guarded launch
 
 **Adds:**

@@ -23,12 +23,12 @@ cd demo
 npm run monitor -- --watch --act
 ```
 
-Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique de prix ou de rapprochement, et prolonge les entrées proches de l'archivage. Chaque alerte est ajoutée à `demo/.state/alerts.jsonl`.
+Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique de prix ou de rapprochement, annule toute proposition de mise à niveau non annoncée, et prolonge les entrées proches de l'archivage (le code du contrat par tranches de 30 jours, décision S20). Une mise à niveau prévue s'annonce d'abord : `npm run monitor -- --announce=<hash>`. Chaque alerte est ajoutée à `demo/.state/alerts.jsonl`.
 
 | Niveau | Délai de réaction | Exemples |
 |---|---|---|
-| Critique | Pause automatique, responsable joint en 15 minutes | Prix refusé par le contrat, écart de rapprochement des parts (I2), code du contrat modifié, entrée archivée |
-| Avertissement | Examen dans l'heure | Changement privilégié, pause en cours, plafond utilisé à 80 %, NAV de plus de 24 heures, entrée à moins de 14 jours de l'archivage |
+| Critique | Pause ou annulation automatique, responsable joint en 15 minutes | Prix refusé par le contrat, écart de rapprochement des parts (I2), parts retenues par l'émetteur, proposition de mise à niveau non annoncée, code du contrat modifié, entrée archivée |
+| Avertissement | Examen avant l'échéance de la proposition | Proposition en attente (fonds, secours, recalage, gardien, enveloppe, limites, plafond), changement privilégié, pause en cours, plafond utilisé à 80 %, NAV de plus de 24 heures, entrée à moins de 14 jours de l'archivage |
 
 ## 3. Conduite à tenir par alerte
 
@@ -36,7 +36,10 @@ Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique 
 |---|---|---|---|
 | Prix refusé (`PriceOutOfBand`, `StalePrice`) | Flux NAV faux ou muet ; change hors bande | Pause par le gardien | L'opérateur republie la bonne valeur ; si le change a dérivé durablement, nouvelle admission à deux clés ; puis levée de pause par le gouverneur |
 | Écart de rapprochement (I2) | Gel ou reprise des parts par l'émetteur ; bogue | Pause ; contacter l'émetteur | Écart expliqué et soldé ; décision S9 si des pensions sont touchées |
-| Code modifié | Mise à niveau attendue ou clé compromise | Si la mise à niveau n'est pas annoncée : pause, révocation des signataires du multisig | Revue du WASM déployé contre le code publié |
+| Proposition de mise à niveau non annoncée | Clés du gouverneur compromises | Annulation par le gardien (automatique avec `--act`), pause, rotation des signataires du multisig | Nouvelles clés en place ; toute proposition restante annulée |
+| Proposition en attente | Opération d'administration ou de l'intendant | Un second signataire vérifie qu'elle était prévue avant son échéance | Aucun si prévue ; sinon annulation par le gardien ou l'intendant |
+| Parts retenues (`ReleaseDeferred`) | L'émetteur gèle le contrat ou retire un bénéficiaire de sa liste blanche | Contacter l'émetteur ; la dette est déjà soldée | Levée du gel, puis `release` par n'importe qui ; le bénéficiaire peut rediriger |
+| Code modifié | Mise à niveau appliquée | Vérifier qu'elle avait été annoncée et que le délai a couru | Revue du WASM déployé contre le code publié (`docs/audit-scope.md`) |
 | Changement privilégié | Opération d'administration | Un second signataire vérifie qu'elle était prévue | Aucun si prévue ; sinon traiter comme une compromission de clé |
 | Entrée proche de l'archivage | TTL non prolongé | Prolongation (automatique avec `--act`) | Entrée revenue au-dessus du seuil |
 | Plafond à 80 % ou rythme anormal d'ouvertures | Usage réel ou sondage | Examen ; pause si inexpliqué | Plafonds revus par l'intendant ou le gouverneur |
@@ -64,17 +67,19 @@ La répétition rejoue chaque détecteur avec un déclencheur réel sur testnet,
 npm run monitor -- --rehearse
 ```
 
-Répétition du 14 octobre 2026 :
+Répétition du 15 octobre 2026, sur la version 3 avec gouverneur multisig et délai de 5 minutes :
 
 | Détecteur | Menace | Déclencheur | Alerte | Action | Restauré |
 |---|---|---|---|---|---|
-| Prix | Tamper.1 | NAV publiée 3 % trop haut | oui, critique | pause par le gardien en 1,9 s | oui |
-| Rapprochement | DoS.5 | Reprise d'une unité de part par l'émetteur | oui, critique | pause par le gardien en 6,4 s | oui |
-| Changement privilégié | Elev.2 | `set_guardian` par le gouverneur | oui | vérification par un second signataire, manuelle | oui |
-| Exposition | DoS.1 | Plafond du fonds abaissé à 90 % d'utilisation | oui | plafonds revus et rétablis | oui |
+| Prix | Tamper.1 | NAV publiée 3 % trop haut | oui, critique | pause par le gardien | oui |
+| Rapprochement | DoS.5 | Reprise d'une unité de part par l'émetteur | oui, critique | pause par le gardien | oui |
+| Changement privilégié | Elev.2 | Le gouverneur propose un nouveau gardien | oui | le gardien en place annule son remplacement | oui |
+| Exposition | DoS.1 | Plafond du fonds abaissé à 90 % d'utilisation | oui | plafonds rétablis, après le délai de 300 s puisque c'est un assouplissement | oui |
 | Pause | DoS.4 | Pause par le gardien | oui | levée par le gouverneur | oui |
-| Archivage | DoS.2 | Seuil forcé à 130 jours : aucune entrée n'approche réellement l'archivage | oui | 6 entrées prolongées à environ 140 jours en 2,1 s | oui |
+| Archivage | DoS.2 | Seuil forcé à 130 jours : aucune entrée n'approche réellement l'archivage | oui | entrées prolongées à environ 140 jours | oui |
 | Événements | Repud.1 | Aucun déclencheur réel possible : chaque pension émet son événement | non, vérification passée | aucune | sans objet |
+| Compromission de clé | Elev.2 | Mise à niveau non annoncée proposée avec les clés du gouverneur | oui, critique | annulation par le gardien 11 s après la proposition, 290 s avant son échéance ; `upgrade` avant le délai refusé (`TimelockPending`) | oui |
+| Gel par l'émetteur | DoS.5 | L'émetteur gèle le contrat, l'emprunteur rembourse | oui, critique | dette soldée, parts inscrites ; livraison refusée pendant le gel, réussie après | oui |
 
 Rythme : une répétition complète avant chaque démonstration publique et chaque mise à niveau, puis une par mois en exploitation.
 

@@ -6,7 +6,7 @@
 
 An on-chain repo contract on Stellar. Holders of tokenized money market funds borrow stablecoins against their shares at any hour, for a fixed term and a fixed price, when the fund's redemption window is closed.
 
-> **Status:** early development (October 2026). The full lifecycle is implemented and tested (offers, repos, repurchase, seizure, roles, price checks), and was reviewed for security; nothing is deployed on mainnet. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
+> **Status:** early development (October 2026). Version 3 is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed and deferred share delivery. It runs on testnet; nothing is deployed on mainnet, and no external audit has been done yet. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
 
 ## Why
 
@@ -56,18 +56,25 @@ sequenceDiagram
 
 ## Contract interface
 
-The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 2.
+The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 3.
+
+**Governance.** Every change that could loosen a check waits for a time delay (48 hours by default, set before the first fund is admitted and only able to grow), can be cancelled during that window, and expires seven days after it falls due. Tightening is immediate. Anyone may apply a change once it is due: the signatures were given when it was proposed.
 
 | Function | Who | What it does |
 |---|---|---|
 | `__constructor(admin)` | deployer | Sets the governor, who is also the first guardian, and the default risk envelope |
-| `set_admin(new)`, `accept_admin()` | governor, then successor | Two-step governor handover |
-| `upgrade(wasm_hash)`, `set_max_term(secs)`, `set_envelope(envelope)`, `set_guardian(addr)` | governor | Code, term ceiling (1 hour to 30 days), risk envelope, guardian |
-| `set_stablecoin(token, currency)`, `remove_stablecoin(token)`, `set_currency_cap(currency, cap)` | governor | Stablecoin registry and per-currency caps (unset means no lending) |
-| `set_fund(fund, config)` | governor **and** steward | Two-key admission: checks the envelope and the oracles' currency, reads decimals, anchors the NAV (and FX) reference |
+| `set_admin(new)`, `accept_admin()`, `cancel_admin()` | governor, then successor | Two-step governor handover; the new governor drops the old one's pending proposals |
+| `set_timelock_delay(secs)` | governor | Any value from 60 s to 30 days before the first admission, then only longer |
+| `propose_upgrade(hash)`, `upgrade(hash)`, `cancel_upgrade(caller)` | governor; guardian may cancel | Code change after the delay, exact hash only |
+| `set_max_term`, `set_envelope`, `set_currency_cap`, `set_guardian` (+ `apply_*`, `cancel_*`, `pending_*`) | governor | Tightening at once; loosening and a new guardian after the delay, cancellable by the guardian |
+| `hand_over_guardian(new)` / `force_guardian_change(new)` | guardian / governor | The guardian passes its role at once; the governor can replace it only after 30 days, without the guardian's veto |
+| `set_stablecoin(token, currency)`, `remove_stablecoin(token)` | governor | Stablecoin registry |
+| `set_fund(fund, config)` (+ `apply_fund_change`, `cancel_fund_change`) | governor **and** steward | Two-key admission, immediate the first time; a replacement waits for the delay, keeps the price references, and needs the steward on record |
+| `propose_reanchor(fund, expected_nav, expected_fx)` (+ apply, cancel) | governor **and** steward | The only way to move a fund's price reference off its model: the signers name the values, the contract checks today's feeds agree, and installs those values after the delay if the feeds still follow the model |
+| `propose_fallback(fund, feed)` (+ apply, cancel, `remove_fallback`) | governor **and** steward | A backup NAV feed that stands in for a stale primary and must agree with a fresh one |
 | `remove_fund(fund)` | governor | Open repos keep their frozen terms |
 | `pause(caller)` / `unpause()` | guardian or governor / governor | Stops new offers and new repos; never exits |
-| `set_fund_limits(fund, haircut, per_repo, total)`, `approve_lender(fund, lender, bool)`, `freeze_fund(fund, bool)`, `reset_reference(fund)`, `set_sponsor(offer, fund, bool)` | the fund's steward | Tunes its own fund inside the envelope |
+| `set_fund_limits` (+ apply, cancel), `approve_lender`, `freeze_fund`, `reset_reference`, `set_sponsor` | the fund's steward | Tunes its own fund inside the envelope; loosening its limits waits for the delay |
 | `refresh_reference(fund)` | anyone | Moves the NAV reference along the model path |
 | `quote(fund, shares, stablecoin)`, `fund_price(fund)`, `repo_due(repo)` | anyone | Read-only valuation, raw NAV, interest due now |
 | `create_offer(lender, stablecoin, amount, rate_bps, max_term, funds)` | approved lender | Deposits stablecoins with fixed terms |
@@ -75,8 +82,9 @@ The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry poin
 | `open_repo(borrower, offer, fund, shares, principal, term)` | borrower | Locks shares and receives stablecoins in one transaction |
 | `repurchase(repo)` | borrower | Repays principal and interest, gets the shares back |
 | `seize(repo, to)` | lender, from maturity | Sends the shares to an approved address |
+| `release(repo)`, `redirect_release(repo, to)`, `pending_release(repo)` | anyone / beneficiary | Delivers shares the issuer's token refused at repurchase or seizure, once the issuer allows it |
 
-How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), and, when the NAV is not in the loan currency, crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/securite.md](docs/securite.md), section 6.
+How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), agree with the backup feed when one is set, and, when the NAV is not in the loan currency, be crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/securite.md](docs/securite.md), section 6.
 
 ## Roadmap
 
@@ -94,11 +102,13 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Demo contracts: allowlisted fund share token (`fund-token`) and operator-fed SEP-40 feed (`nav-oracle`)
 - [x] Monitoring plan implemented and rehearsed on testnet: six of seven detectors fired on a real trigger ([docs/procedure-incident.md](docs/procedure-incident.md))
 - [x] Upgrade test with the real WASM, 200-repo load test at constant cost, Scout static analysis with every alert justified
-- [ ] Multisig administrator and time delay on upgrades and oracle changes (the emergency pause is in place)
+- [x] Version 3 (October 2026): time delay on upgrades, feed changes and every loosening; guardian veto that the governor alone cannot remove inside a window; backup NAV feed; shares delivered later when the issuer blocks them, instead of a blocked exit
+- [x] Native multisig governor with an outside co-signer, on testnet; key-compromise and issuer-freeze drills rehearsed ([docs/procedure-incident.md](docs/procedure-incident.md))
+- [x] Three internal security reviews of version 3, every finding fixed with a test; audit package ready ([docs/audit-scope.md](docs/audit-scope.md))
 - [x] Testnet deployment with test fund tokens and a test oracle: a scripted live demo in [demo/](demo/README.md), with a fallback FX feed
 - [x] Minimal web interface with Freighter: market board, borrow, positions, repurchase, lend, withdraw, take the shares at maturity ([web/](web/README.md))
 - [ ] OpenZeppelin detectors for Soroban, and an indexer that keeps history beyond the RPC's retention
-- [ ] Third-party audit before any mainnet deployment
+- [ ] Third-party audit before any mainnet deployment, and a bug bounty sized to the value at stake
 
 ## Security
 
@@ -209,6 +219,7 @@ cd demo && npm run onboard -- G...YOUR_ADDRESS     # --role=lender for a lender
 - [docs/securite.md](docs/securite.md): security baseline, threat model and invariants of the contract (French).
 - [docs/modele-menace-stride.md](docs/modele-menace-stride.md): STRIDE threat model and monitoring plan (French).
 - [docs/procedure-incident.md](docs/procedure-incident.md): incident procedure, roles, action per alert and the monitoring rehearsal (French).
+- [docs/audit-scope.md](docs/audit-scope.md): audit package: scope, reproducible build, trust model, invariants, reviews done, where to look hardest.
 - [docs/stellar-platform.md](docs/stellar-platform.md): overview of the Stellar platform (French).
 - [docs/claude-tooling.md](docs/claude-tooling.md): AI tooling (French).
 - [AGENTS.md](AGENTS.md): build, test and security rules for contributors and AI agents.

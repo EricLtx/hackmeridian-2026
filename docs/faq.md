@@ -90,7 +90,7 @@ An offer from the fund issuer, marked as such by the fund's steward. Interfaces 
 
 ### What happens when the fund issuer freezes the shares held by the contract?
 
-Shares cannot move while frozen, so a repurchase fails until the freeze is lifted, and the debt remains. Handling this on-chain is planned for version 1.1; today it is a documented limit, covered by a test.
+The exit still works. Since version 3, a repurchase settles the debt even when the share token refuses to move the shares: the lender is repaid, the interest stops, and the shares are recorded as owed to the borrower. Once the issuer lifts its freeze, anyone can trigger the delivery, and only to that borrower. The same applies to a seizure, for the lender. This was rehearsed on testnet: the issuer froze the contract, the borrower repaid, the shares waited, then reached the borrower when the freeze was lifted.
 
 ---
 
@@ -134,7 +134,7 @@ One event per state change, with identifiers and addresses as topics: offers, re
 
 ### Can it be upgraded?
 
-Yes, by the governor, through `upgrade(wasm_hash)`. Error codes and exported types are append-only, so clients keep working across versions. A time delay on upgrades is on the roadmap.
+Yes, but not by surprise. The governor proposes the exact code hash with `propose_upgrade`; the upgrade can only happen after the time delay (48 hours by default), and the guardian can cancel it in the meantime. The monitoring raises a critical alert on any upgrade proposal not announced in advance, and cancels it. Error codes and exported types are append-only, so clients keep working across versions.
 
 ---
 
@@ -216,9 +216,9 @@ Privately, as described in [SECURITY.md](../SECURITY.md): GitHub's private vulne
 
 | Role | Can | Cannot |
 |---|---|---|
-| Governor | Upgrade, set the risk envelope, the stablecoin registry and the caps, admit or remove a fund with the steward, unpause | Move anyone's funds or shares; change an open repo |
-| Guardian | Pause new offers and new repos | Unpause; block repurchase, withdrawal or seizure |
-| Steward, one per fund | Approve lenders, tune its fund inside the envelope, freeze its fund, lower the NAV reference | Raise the reference; exceed the envelope; touch another fund |
+| Governor, a multisig account | Propose upgrades and any loosening, tighten at once, admit or remove a fund with the steward, unpause | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent |
+| Guardian | Pause new offers and new repos; cancel pending proposals; hand its role over | Unpause; block repurchase, withdrawal or seizure |
+| Steward, one per fund | Approve lenders, tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring | Raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
 | Lender | Create and withdraw its offers; seize at maturity | Seize early; seize to an unapproved address |
 | Borrower | Open and repurchase its repos | Borrow above the haircut-adjusted value |
 | Anyone | Read; move the NAV reference along the model path | Move it outside the corridor |
@@ -251,11 +251,11 @@ Open Window is designed to be operated as an ICT service a regulated entity can 
 
 ### What is not done yet?
 
-- **Third-party audit:** not done.
-- **Multisig governor and time delay** on upgrades and oracle changes: not in place. Today the governor is a single key.
+- **Third-party audit:** not done; the package for it is ready in [audit-scope.md](audit-scope.md).
+- **Bug bounty:** not set up; it needs a budget sized to the value at stake.
 - **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where six of seven detectors fired on a real trigger ([procedure-incident.md](procedure-incident.md)); it is not yet run continuously on dedicated infrastructure.
 - **Static analysis:** Scout has run, with every alert justified in [securite.md](securite.md), section 7; the OpenZeppelin detectors have not run yet.
-- **Issuer freeze during a repo:** documented limit, planned for version 1.1.
+- **Multisig governor in production:** in place on testnet as a 2-of-2 account; the outside signer's organisation is a decision for launch.
 
 Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 
