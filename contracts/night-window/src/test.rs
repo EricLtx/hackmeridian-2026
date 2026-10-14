@@ -3432,3 +3432,30 @@ mod integration {
         );
     }
 }
+
+/// Operations extend the contract instance but never the WASM code entry:
+/// code rent grows with its size, and an ordinary user must not pay it (see
+/// `storage::bump_instance`). The operator extends the code separately.
+#[cfg(night_window_wasm)]
+#[test]
+fn operations_extend_the_instance_but_not_the_code() {
+    use soroban_sdk::testutils::Deployer as _;
+    let env = Env::default();
+    env.mock_all_auths();
+    let governor = Address::generate(&env);
+    let id = env.register(NIGHT_WINDOW_WASM, (governor.clone(),));
+    let client = OpenWindowClient::new(&env, &id);
+    let instance_before = env.deployer().get_contract_instance_ttl(&id);
+    let code_before = env.deployer().get_contract_code_ttl(&id);
+
+    client.set_currency_cap(&eur(&env), &1);
+
+    let instance_after = env.deployer().get_contract_instance_ttl(&id);
+    let code_after = env.deployer().get_contract_code_ttl(&id);
+    assert!(instance_after > instance_before, "the instance is extended");
+    assert_eq!(instance_after, 120 * 17_280);
+    assert_eq!(
+        code_after, code_before,
+        "the code entry is left to the operator"
+    );
+}

@@ -1,5 +1,6 @@
 //! Storage access. Every write of a persistent entry extends its TTL; every
-//! privileged path extends the instance TTL. Deadlines never derive from TTLs.
+//! privileged path extends the instance TTL (not the code: see `bump_instance`).
+//! Deadlines never derive from TTLs.
 
 use soroban_sdk::{panic_with_error, Address, Env, Symbol};
 
@@ -14,8 +15,18 @@ const DAY_IN_LEDGERS: u32 = 17_280;
 const BUMP_THRESHOLD: u32 = 30 * DAY_IN_LEDGERS;
 const BUMP_TO: u32 = 120 * DAY_IN_LEDGERS;
 
+/// Extends the contract instance only, never the code. `instance().extend_ttl`
+/// would extend the WASM code entry as well, and rent grows with entry size:
+/// with a 75 KB code entry, the user who crossed the threshold paid about
+/// 530 XLM of rent on testnet (October 2026), above the largest fee one
+/// transaction may carry. The code is kept alive by the operator instead
+/// (monitoring TTL detector, ExtendFootprintTtl), in small increments.
 pub fn bump_instance(env: &Env) {
-    env.storage().instance().extend_ttl(BUMP_THRESHOLD, BUMP_TO);
+    env.deployer().extend_ttl_for_contract_instance(
+        env.current_contract_address(),
+        BUMP_THRESHOLD,
+        BUMP_TO,
+    );
 }
 
 fn bump(env: &Env, key: &DataKey) {
