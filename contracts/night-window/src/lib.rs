@@ -41,8 +41,8 @@ pub use oracle::{OracleClient, Sep40Oracle};
 pub use types::{
     Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg, Offer, PendingCurrencyCapChange,
     PendingEnvelopeChange, PendingFallback, PendingFundChange, PendingFundLimitsChange,
-    PendingGuardianChange, PendingMaxTermChange, PendingRelease, PendingUpgrade, PriceData,
-    PriceSource, Quote, Repo, RepoStatus, RiskEnvelope, StablecoinConfig,
+    PendingGuardianChange, PendingMaxTermChange, PendingReanchor, PendingRelease, PendingUpgrade,
+    PriceData, PriceSource, Quote, Repo, RepoStatus, RiskEnvelope, StablecoinConfig,
 };
 
 use events::*;
@@ -162,6 +162,25 @@ impl OpenWindow {
         AdminChanged {
             previous,
             admin: pending,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Withdraws a governor handover proposed by `set_admin`, for instance
+    /// one proposed to a wrong or compromised address. Requires the governor.
+    pub fn cancel_admin(env: Env) -> Result<(), Error> {
+        let governor = storage::require_governor(&env);
+        let proposed: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(Error::NotProposed)?;
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        storage::bump_instance(&env);
+        AdminProposalCancelled {
+            proposed,
+            by: governor,
         }
         .publish(&env);
         Ok(())
@@ -345,12 +364,15 @@ impl OpenWindow {
     }
 
     /// Appoints the proposed guardian once the delay has elapsed. Anyone may
-    /// call it.
+    /// call it. A forced change still waiting is dropped: the guardian it
+    /// meant to replace is gone, and the ordinary path, which that guardian
+    /// could veto, has settled the question.
     pub fn apply_guardian_change(env: Env) -> Result<(), Error> {
         let pending: PendingGuardianChange =
             storage::instance_value(&env, &DataKey::PendingGuardian).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
         storage::remove_instance(&env, &DataKey::PendingGuardian);
+        drop_pending_forced_guardian(&env, &env.current_contract_address());
         install_guardian(&env, pending.guardian);
         Ok(())
     }
@@ -545,6 +567,13 @@ impl OpenWindow {
         }
         if storage::past_bootstrap(&env) && cap > storage::currency_cap(&env, &currency) {
             let mut pending = storage::pending_currency_caps(&env);
+            // Expired proposals are gone: they must not hold a slot.
+            // Bounded by MAX_PENDING_CURRENCY_CAPS.
+            for (other, change) in pending.clone().iter() {
+                if !is_live(&env, change.eta) {
+                    pending.remove(other);
+                }
+            }
             if !pending.contains_key(currency.clone()) && pending.len() >= MAX_PENDING_CURRENCY_CAPS
             {
                 return Err(Error::LimitReached);
@@ -625,8 +654,12 @@ impl OpenWindow {
     /// nor the issuer: the steward on record (the last installed one, kept
     /// after a removal) must sign when the new configuration names another.
     /// A replacement keeps the NAV and FX references unless it changes the
-    /// feed, and then the new feed must agree with them. Open repos keep
-    /// their frozen terms (invariant I9).
+    /// feed, and then the new feed must agree with them; the only way to
+    /// move them otherwise is `propose_reanchor`. A replacement that gives
+    /// the fund its first FX leg anchors it on the rate read now. For a
+    /// removed fund, the agreement with the references is checked at the
+    /// apply only, so that a re-anchor proposed meanwhile can bring them to
+    /// the new feed. Open repos keep their frozen terms (invariant I9).
     pub fn set_fund(env: Env, fund: Address, config: FundConfig) -> Result<(), Error> {
         storage::require_governor(&env);
         config.steward.require_auth();
@@ -635,10 +668,25 @@ impl OpenWindow {
                 on_record.require_auth();
             }
         }
-        let state = prepare_fund(&env, &fund, &config)?;
-        if storage::fund_state(&env, &fund).is_ok() {
+        let previous = storage::fund_state(&env, &fund).ok();
+        let admitted = storage::has_fund(&env, &fund);
+        let state = prepare_fund(&env, &fund, &config, admitted, None)?;
+        if let Some(previous) = previous {
+            let fx_anchor = if previous.reference_fx == 0 {
+                state.reference_fx
+            } else {
+                0
+            };
             let eta = eta(&env)?;
-            storage::set_pending_fund_change(&env, &fund, &PendingFundChange { config, eta });
+            storage::set_pending_fund_change(
+                &env,
+                &fund,
+                &PendingFundChange {
+                    config,
+                    fx_anchor,
+                    eta,
+                },
+            );
             storage::mark_funds_admitted(&env);
             storage::bump_instance(&env);
             FundChangeProposed { fund, eta }.publish(&env);
@@ -653,11 +701,13 @@ impl OpenWindow {
     /// configuration is checked again now, with fresh prices. The references
     /// carry over from the current state, so the caller's choice of moment
     /// cannot re-anchor them on a spot price; a new feed must agree with
-    /// them. On failure the proposal stays for a later attempt.
+    /// them, and a first FX leg takes the rate read at the proposal. On
+    /// failure the proposal stays for a later attempt.
     pub fn apply_fund_change(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_fund_change(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
-        let state = prepare_fund(&env, &fund, &pending.config)?;
+        let anchor = (pending.fx_anchor > 0).then_some(pending.fx_anchor);
+        let state = prepare_fund(&env, &fund, &pending.config, true, anchor)?;
         storage::remove_pending_fund_change(&env, &fund);
         install_fund(&env, fund, pending.config, state);
         Ok(())
@@ -687,22 +737,17 @@ impl OpenWindow {
     /// Removes a fund from the registry, at once: removal never harms an open
     /// repo. Open repos on that fund can still be repurchased or seized:
     /// their terms are frozen. A pending replacement and the fallback feed go
-    /// with it, so that nothing brings the fund back on its own. Requires
-    /// the governor.
+    /// with it, so that nothing brings the fund back on its own. The steward
+    /// is recorded first: a fund admitted before that record existed, or
+    /// whose record aged, still cannot be re-admitted without its issuer.
+    /// Requires the governor.
     pub fn remove_fund(env: Env, fund: Address) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
-        if !storage::has_fund(&env, &fund) {
-            return Err(Error::FundNotAccepted);
-        }
+        let config = storage::fund(&env, &fund)?;
+        storage::set_last_steward(&env, &fund, &config.steward);
         storage::remove_fund(&env, &fund);
-        if storage::pending_fund_change(&env, &fund).is_some() {
-            storage::remove_pending_fund_change(&env, &fund);
-            FundChangeCancelled {
-                fund: fund.clone(),
-                by: governor.clone(),
-            }
-            .publish(&env);
-        }
+        drop_pending_reanchor(&env, &fund, &governor);
+        drop_pending_fund_change(&env, &fund, &governor);
         drop_pending_fund_limits(&env, &fund, &governor);
         if storage::pending_fallback(&env, &fund).is_some() {
             storage::remove_pending_fallback(&env, &fund);
@@ -723,6 +768,109 @@ impl OpenWindow {
         storage::bump_instance(&env);
         FundRemoved { fund }.publish(&env);
         Ok(())
+    }
+
+    // -- Re-anchoring ---------------------------------------------------------
+
+    /// Proposes to re-anchor a fund's NAV and FX references, the only way to
+    /// move them other than along the model path or down by the steward:
+    /// after a legitimate jump, or to re-admit a removed fund whose new feed
+    /// no longer lies on the old path. The fresh readings of the feed are
+    /// taken now and stored; they are what the apply installs, so whoever
+    /// applies cannot choose the anchor. The feed is the fund's current one,
+    /// or for a removed fund the one of its pending re-admission. Replaces an
+    /// earlier proposal. Requires the governor and the fund's steward on
+    /// record.
+    pub fn propose_reanchor(env: Env, fund: Address) -> Result<(), Error> {
+        let governor = storage::require_governor(&env);
+        let steward = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
+        if steward != governor {
+            steward.require_auth();
+        }
+        let config = pricing_config(&env, &fund)?;
+        let (nav, fx) = read_anchor(&env, &config)?;
+        let eta = eta(&env)?;
+        let pending = PendingReanchor {
+            nav: nav.price.mantissa(),
+            nav_time: nav.timestamp,
+            nav_decimals: nav.price.decimals(),
+            fx: fx.map_or(0, |rate| rate.price.mantissa()),
+            fx_decimals: fx.map_or(0, |rate| rate.price.decimals()),
+            eta,
+        };
+        storage::set_pending_reanchor(&env, &fund, &pending);
+        storage::bump_instance(&env);
+        ReanchorProposed {
+            fund,
+            nav: pending.nav,
+            nav_time: pending.nav_time,
+            fx: pending.fx,
+            eta,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Installs a proposed re-anchor once its delay has elapsed, within its
+    /// grace period. Anyone may call it. The feed must still agree with the
+    /// proposal: today's NAV within the fund's corridor floor of the proposed
+    /// one, today's FX rate within the leg's band of the proposed rate. The
+    /// references become the proposed readings, not today's.
+    pub fn apply_reanchor(env: Env, fund: Address) -> Result<(), Error> {
+        let pending = storage::pending_reanchor(&env, &fund).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        let config = pricing_config(&env, &fund)?;
+        let (nav, fx) = read_anchor(&env, &config)?;
+        // A feed in other units than the proposal's cannot be compared.
+        if nav.price.decimals() != pending.nav_decimals
+            || fx.map_or(0, |rate| rate.price.decimals()) != pending.fx_decimals
+        {
+            return Err(Error::CurrencyMismatch);
+        }
+        if !math::within_band(nav.price.mantissa(), pending.nav, config.corridor_floor_bps)? {
+            return Err(Error::PriceOutOfBand);
+        }
+        if let (PriceSource::Cross(leg), Some(rate)) = (&config.source, fx) {
+            if !math::within_band(rate.price.mantissa(), pending.fx, leg.band_bps)? {
+                return Err(Error::PriceOutOfBand);
+            }
+        }
+        let mut state = storage::fund_state(&env, &fund)?;
+        state.reference_nav = pending.nav;
+        state.reference_time = pending.nav_time;
+        state.nav_decimals = pending.nav_decimals;
+        state.reference_fx = pending.fx;
+        state.fx_decimals = pending.fx_decimals;
+        storage::set_fund_state(&env, &fund, &state);
+        storage::remove_pending_reanchor(&env, &fund);
+        storage::bump_instance(&env);
+        Reanchored {
+            fund,
+            nav: pending.nav,
+            nav_time: pending.nav_time,
+            fx: pending.fx,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Withdraws a proposed re-anchor. `caller` must be the governor, the
+    /// guardian or the fund's steward on record.
+    pub fn cancel_reanchor(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        if !drop_pending_reanchor(&env, &fund, &caller) {
+            return Err(Error::NotProposed);
+        }
+        storage::bump_instance(&env);
+        Ok(())
+    }
+
+    /// The proposed re-anchor of a fund, unless it has expired.
+    pub fn pending_reanchor(env: Env, fund: Address) -> Option<PendingReanchor> {
+        storage::pending_reanchor(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
 
     // -- Fallback NAV feed ----------------------------------------------------
@@ -917,6 +1065,9 @@ impl OpenWindow {
             return Ok(());
         }
         drop_pending_fund_limits(&env, &fund, &current.steward);
+        // A pending replacement would overwrite this tightening with the
+        // limits it carries: it goes too, and can be proposed again.
+        drop_pending_fund_change(&env, &fund, &current.steward);
         install_fund_limits(&env, fund, config);
         Ok(())
     }
@@ -1436,6 +1587,12 @@ impl OpenWindow {
     /// (decision S8). Delivery still goes through `release`.
     pub fn redirect_release(env: Env, repo_id: u64, to: Address) -> Result<(), Error> {
         let mut pending = storage::pending_release(&env, repo_id).ok_or(Error::NothingToRelease)?;
+        // A "delivery" to the contract itself would close the record while
+        // the shares stay here, unattributed: the share balance would no
+        // longer match the books, the mismatch `TransferMismatch` reports.
+        if to == env.current_contract_address() {
+            return Err(Error::TransferMismatch);
+        }
         let repo = storage::repo(&env, repo_id)?;
         match repo.status {
             RepoStatus::Repurchased => repo.borrower.require_auth(),
@@ -1645,6 +1802,83 @@ fn drop_pending_currency_cap(env: &Env, currency: &Symbol, by: &Address) -> bool
     true
 }
 
+fn drop_pending_fund_change(env: &Env, fund: &Address, by: &Address) -> bool {
+    if storage::pending_fund_change(env, fund).is_none() {
+        return false;
+    }
+    storage::remove_pending_fund_change(env, fund);
+    FundChangeCancelled {
+        fund: fund.clone(),
+        by: by.clone(),
+    }
+    .publish(env);
+    true
+}
+
+fn drop_pending_reanchor(env: &Env, fund: &Address, by: &Address) -> bool {
+    if storage::pending_reanchor(env, fund).is_none() {
+        return false;
+    }
+    storage::remove_pending_reanchor(env, fund);
+    ReanchorCancelled {
+        fund: fund.clone(),
+        by: by.clone(),
+    }
+    .publish(env);
+    true
+}
+
+fn drop_pending_fallback(env: &Env, fund: &Address, by: &Address) -> bool {
+    if storage::pending_fallback(env, fund).is_none() {
+        return false;
+    }
+    storage::remove_pending_fallback(env, fund);
+    FallbackCancelled {
+        fund: fund.clone(),
+        by: by.clone(),
+    }
+    .publish(env);
+    true
+}
+
+/// The configuration that prices a fund: its current one, or for a removed
+/// fund the one of its pending re-admission.
+fn pricing_config(env: &Env, fund: &Address) -> Result<FundConfig, Error> {
+    if let Ok(config) = storage::fund(env, fund) {
+        return Ok(config);
+    }
+    storage::pending_fund_change(env, fund)
+        .filter(|p| is_live(env, p.eta))
+        .map(|p| p.config)
+        .ok_or(Error::FundNotAccepted)
+}
+
+/// Fresh readings of a configuration's NAV feed and, for a cross price, its
+/// FX feed, each with the feed's own decimals.
+fn read_anchor(
+    env: &Env,
+    config: &FundConfig,
+) -> Result<(oracle::Reading, Option<oracle::Reading>), Error> {
+    let nav = oracle::read_fresh(
+        env,
+        &config.oracle,
+        &config.oracle_asset,
+        OracleClient::new(env, &config.oracle).decimals(),
+        config.nav_max_age_secs,
+    )?;
+    let fx = match &config.source {
+        PriceSource::Cross(leg) => Some(oracle::read_fresh(
+            env,
+            &leg.oracle,
+            &leg.asset,
+            OracleClient::new(env, &leg.oracle).decimals(),
+            leg.max_age_secs,
+        )?),
+        PriceSource::Direct => None,
+    };
+    Ok((nav, fx))
+}
+
 fn drop_pending_fund_limits(env: &Env, fund: &Address, by: &Address) -> bool {
     if storage::pending_fund_limits(env, fund).is_none() {
         return false;
@@ -1703,8 +1937,17 @@ fn take_due_upgrade(env: &Env, wasm_hash: &BytesN<32>) -> Result<(), Error> {
 /// keeps the references it finds, since whoever applies it picks the moment
 /// and must not be able to re-anchor on a spot price; a new feed is accepted
 /// only if it agrees with them (see `carry_nav_reference` and
-/// `carry_fx_reference`).
-fn prepare_fund(env: &Env, fund: &Address, config: &FundConfig) -> Result<FundState, Error> {
+/// `carry_fx_reference`). `check_path` turns that agreement check off for
+/// the proposal of a removed fund's re-admission, which is checked at the
+/// apply, after a possible re-anchor. `fx_anchor` is the rate stored by a
+/// proposal that gives the fund its first FX leg.
+fn prepare_fund(
+    env: &Env,
+    fund: &Address,
+    config: &FundConfig,
+    check_path: bool,
+    fx_anchor: Option<i128>,
+) -> Result<FundState, Error> {
     check_fund_config(env, config)?;
     let nav_oracle = OracleClient::new(env, &config.oracle);
     let nav_decimals = nav_oracle.decimals();
@@ -1745,14 +1988,25 @@ fn prepare_fund(env: &Env, fund: &Address, config: &FundConfig) -> Result<FundSt
     }
     let (reference_nav, reference_time) = match &previous {
         None => (nav.price.mantissa(), nav.timestamp),
-        Some(previous) => {
-            carry_nav_reference(current.as_ref(), config, previous, &nav, nav_decimals)?
-        }
+        Some(previous) => carry_nav_reference(
+            current.as_ref(),
+            config,
+            previous,
+            &nav,
+            nav_decimals,
+            check_path,
+        )?,
     };
     let reference_fx = match (&config.source, &rate) {
-        (PriceSource::Cross(leg), Some(rate)) => {
-            carry_fx_reference(current.as_ref(), previous.as_ref(), leg, rate, fx_decimals)?
-        }
+        (PriceSource::Cross(leg), Some(rate)) => carry_fx_reference(
+            current.as_ref(),
+            previous.as_ref(),
+            leg,
+            rate,
+            fx_decimals,
+            check_path,
+            fx_anchor,
+        )?,
         _ => 0,
     };
     Ok(FundState {
@@ -1780,12 +2034,13 @@ fn carry_nav_reference(
     previous: &FundState,
     nav: &oracle::Reading,
     nav_decimals: u32,
+    check_path: bool,
 ) -> Result<(i128, u64), Error> {
     let reference =
         math::rescale_floor(previous.reference_nav, previous.nav_decimals, nav_decimals)?;
     let same_feed =
         current.is_some_and(|c| c.oracle == next.oracle && c.oracle_asset == next.oracle_asset);
-    if !same_feed {
+    if check_path && !same_feed {
         let anchored = FundState {
             reference_nav: reference,
             nav_decimals,
@@ -1799,24 +2054,36 @@ fn carry_nav_reference(
 /// The FX reference a replacement installs. The current reference stays,
 /// expressed with the new feed's decimals; when the FX leg changes (oracle or
 /// asset), the new rate must lie within the current band around it. Without
-/// an earlier FX reference (the fund was priced directly), there is nothing
-/// to carry and the rate is anchored as at admission.
+/// an earlier FX reference (the fund was priced directly), the proposal
+/// takes the rate it reads as the anchor (`fx_anchor` is then `None`), and
+/// the apply keeps that anchor if its own rate lies within the leg's band
+/// of it: whoever applies does not pick the anchor.
 fn carry_fx_reference(
     current: Option<&FundConfig>,
     previous: Option<&FundState>,
     next: &FxLeg,
     rate: &oracle::Reading,
     fx_decimals: u32,
+    check_path: bool,
+    fx_anchor: Option<i128>,
 ) -> Result<i128, Error> {
     let Some(previous) = previous.filter(|p| p.reference_fx > 0) else {
-        return Ok(rate.price.mantissa());
+        return match fx_anchor {
+            None => Ok(rate.price.mantissa()),
+            Some(anchor) if math::within_band(rate.price.mantissa(), anchor, next.band_bps)? => {
+                Ok(anchor)
+            }
+            Some(_) => Err(Error::PriceOutOfBand),
+        };
     };
     let reference = math::rescale_floor(previous.reference_fx, previous.fx_decimals, fx_decimals)?;
     let current_leg = current.and_then(|c| match &c.source {
         PriceSource::Cross(leg) => Some(leg),
         PriceSource::Direct => None,
     });
-    if current_leg.is_some_and(|leg| leg.oracle == next.oracle && leg.asset == next.asset) {
+    if !check_path
+        || current_leg.is_some_and(|leg| leg.oracle == next.oracle && leg.asset == next.asset)
+    {
         return Ok(reference);
     }
     let band = current_leg.map_or(next.band_bps, |leg| leg.band_bps);
@@ -1827,8 +2094,18 @@ fn carry_fx_reference(
 }
 
 /// Writes a validated configuration and its state, and records its steward
-/// as the one a later re-admission must hear from.
+/// as the one a later re-admission must hear from. Proposals made against
+/// the configuration it replaces go: pending loosened limits and a pending
+/// re-anchor (both read against the old settings), and a pending fallback
+/// when the steward who signed it is no longer the steward. They are
+/// cancelled by the contract itself, as no caller chose it.
 fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) {
+    let by = env.current_contract_address();
+    drop_pending_fund_limits(env, &fund, &by);
+    drop_pending_reanchor(env, &fund, &by);
+    if storage::steward_on_record(env, &fund).is_some_and(|previous| previous != config.steward) {
+        drop_pending_fallback(env, &fund, &by);
+    }
     storage::set_fund(env, &fund, &config);
     storage::set_fund_state(env, &fund, &state);
     storage::set_last_steward(env, &fund, &config.steward);

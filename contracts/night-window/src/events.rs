@@ -34,6 +34,38 @@ pub struct AdminProposed {
 }
 
 #[contractevent]
+pub struct AdminProposalCancelled {
+    pub proposed: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct ReanchorProposed {
+    #[topic]
+    pub fund: Address,
+    pub nav: i128,
+    pub nav_time: u64,
+    pub fx: i128,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct ReanchorCancelled {
+    #[topic]
+    pub fund: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct Reanchored {
+    #[topic]
+    pub fund: Address,
+    pub nav: i128,
+    pub nav_time: u64,
+    pub fx: i128,
+}
+
+#[contractevent]
 pub struct MaxTermChanged {
     pub max_term: u64,
 }

@@ -96,6 +96,9 @@ pub enum DataKey {
     PendingForcedGuardian,
     /// Instance: number of funds with an active fallback feed.
     FallbackCount,
+    /// Persistent: re-anchoring of a fund's references waiting for its
+    /// delay.
+    PendingReanchor(Address),
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -280,6 +283,29 @@ pub struct PendingUpgrade {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingFundChange {
     pub config: FundConfig,
+    /// When the replacement gives the fund its first FX leg: the rate read
+    /// at the proposal, which becomes the FX reference. The rate at the
+    /// apply must lie within the leg's band of it, so whoever applies does
+    /// not pick the anchor. Zero otherwise.
+    pub fx_anchor: i128,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// A re-anchoring of a fund's references, signed by the governor and the
+/// steward, waiting for its time delay. The references it installs are the
+/// readings taken at the proposal, never the spot at the apply.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingReanchor {
+    /// NAV read at the proposal, with `nav_decimals` digits, and its time.
+    pub nav: i128,
+    pub nav_time: u64,
+    pub nav_decimals: u32,
+    /// FX rate read at the proposal, with `fx_decimals` digits; 0 without
+    /// FX leg.
+    pub fx: i128,
+    pub fx_decimals: u32,
     /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }

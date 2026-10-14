@@ -1883,6 +1883,7 @@ fn fund_replacement_waits_for_the_delay_then_anyone_applies_it() {
         f.client.pending_fund_change(&f.shares),
         Some(PendingFundChange {
             config: config.clone(),
+            fx_anchor: 0,
             eta
         })
     );
@@ -3049,6 +3050,421 @@ fn governor_handover_drops_the_governors_proposals() {
     assert!(f.client.pending_fund_change(&f.shares).is_some());
 }
 
+// -- Second review of version 3 -----------------------------------------------
+
+/// Second review, M1: a fund admitted before the steward record existed
+/// (here: the record erased) is recorded at its removal, and reading the
+/// record extends its TTL.
+#[test]
+fn removal_records_the_steward_and_reading_it_keeps_it_alive() {
+    let (f, _) = ready();
+    f.env.as_contract(&f.contract_id, || {
+        f.env
+            .storage()
+            .persistent()
+            .remove(&DataKey::LastSteward(f.shares.clone()));
+    });
+    f.client.remove_fund(&f.shares);
+    let newcomer = Address::generate(&f.env);
+    let mut config = fund_config(&f);
+    config.steward = newcomer.clone();
+    let signs = |address: &Address| MockAuth {
+        address: leak(address.clone()),
+        invoke: leak(MockAuthInvoke {
+            contract: leak(f.contract_id.clone()),
+            fn_name: "set_fund",
+            args: (f.shares.clone(), config.clone()).into_val(&f.env),
+            sub_invokes: &[],
+        }),
+    };
+    f.env.mock_auths(&[signs(&f.governor), signs(&newcomer)]);
+    assert!(f.client.try_set_fund(&f.shares, &config).is_err());
+    f.env.mock_all_auths();
+    f.client.set_fund(&f.shares, &config);
+    let key = DataKey::LastSteward(f.shares.clone());
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    f.client.cancel_fund_change(&f.shares, &f.steward);
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
+}
+
+/// Second review, M2 (a) and M3: a replacement drops the loosened limits and
+/// the re-anchor proposed against the configuration it replaces.
+#[test]
+fn a_replacement_drops_proposals_made_against_the_old_configuration() {
+    let (f, _) = ready();
+    f.client.set_fund(&f.shares, &replacement(&f));
+    f.client
+        .set_fund_limits(&f.shares, &200, &(600_000 * ONE), &(5_000_000 * ONE));
+    f.client.propose_reanchor(&f.shares);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    f.client.apply_fund_change(&f.shares);
+    let by = f.contract_id.clone();
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FundLimitsChangeCancelled {
+                fund: f.shares.clone(),
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            ReanchorCancelled {
+                fund: f.shares.clone(),
+                by
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundSet {
+                fund: f.shares.clone(),
+                oracle: f.nav_oracle.clone(),
+                haircut_bps: 300
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_fund_limits_change(&f.shares), None);
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+}
+
+/// Second review, M2 (b): the steward's direct tightening drops a pending
+/// replacement, which would otherwise overwrite it.
+#[test]
+fn a_limits_tightening_drops_a_pending_replacement() {
+    let (f, _) = ready();
+    f.client.set_fund(&f.shares, &replacement(&f));
+    f.client
+        .set_fund_limits(&f.shares, &300, &(400_000 * ONE), &(4_000_000 * ONE));
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FundChangeCancelled {
+                fund: f.shares.clone(),
+                by: f.steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundLimitsSet {
+                fund: f.shares.clone(),
+                haircut_bps: 300,
+                max_principal_per_repo: 400_000 * ONE,
+                max_outstanding: 4_000_000 * ONE
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+}
+
+/// Second review, M2 (c): when a replacement changes the steward, the
+/// fallback the previous steward signed goes.
+#[test]
+fn a_new_steward_drops_the_fallback_the_previous_one_signed() {
+    let (f, _) = ready();
+    let mut config = fund_config(&f);
+    config.steward = Address::generate(&f.env);
+    f.client.set_fund(&f.shares, &config);
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &oracle));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FallbackCancelled {
+                fund: f.shares.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundSet {
+                fund: f.shares.clone(),
+                oracle: f.nav_oracle.clone(),
+                haircut_bps: 200
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_fallback(&f.shares), None);
+}
+
+/// Second review, M3: after a legitimate drop, the governor and the steward
+/// re-anchor the fund on the readings of the proposal; whoever applies can
+/// neither choose the anchor nor apply it against a feed that moved away.
+#[test]
+fn reanchor_installs_the_readings_of_the_proposal() {
+    let (f, offer_id) = ready();
+    let dropped = NAV_EUR * 98 / 100;
+    publish_nav(&f, dropped);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    // Two keys: the governor alone cannot propose it.
+    f.env.mock_auths(&[MockAuth {
+        address: &f.governor,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "propose_reanchor",
+            args: (f.shares.clone(),).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_propose_reanchor(&f.shares).is_err());
+    f.env.mock_all_auths();
+    f.client.propose_reanchor(&f.shares);
+    let signers: std::vec::Vec<Address> = f.env.auths().into_iter().map(|a| a.0).collect();
+    assert_eq!(signers, std::vec![f.governor.clone(), f.steward.clone()]);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![ReanchorProposed {
+            fund: f.shares.clone(),
+            nav: dropped,
+            nav_time: T0,
+            fx: 0,
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_reanchor(&f.shares),
+        Some(PendingReanchor {
+            nav: dropped,
+            nav_time: T0,
+            nav_decimals: NAV_DECIMALS,
+            fx: 0,
+            fx_decimals: 0,
+            eta
+        })
+    );
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    // The feed moved 0.2 % from the proposal: more than the 0.1 % floor.
+    publish_nav(&f, dropped * 1_002 / 1_000);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert!(f.client.pending_reanchor(&f.shares).is_some());
+    // 0.05 % away: the proposal's readings are installed, not the spot.
+    publish_nav(&f, dropped * 10_005 / 10_000);
+    f.env.set_auths(&[]);
+    f.client.apply_reanchor(&f.shares);
+    assert!(f.env.auths().is_empty());
+    assert_eq!(
+        own_events(&f),
+        std::vec![Reanchored {
+            fund: f.shares.clone(),
+            nav: dropped,
+            nav_time: T0,
+            fx: 0
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+    f.env.mock_all_auths();
+    f.client.open_repo(
+        &f.borrower,
+        &offer_id,
+        &f.shares,
+        &(10_000 * ONE),
+        &(1_000 * ONE),
+        &DAY,
+    );
+}
+
+#[test]
+fn reanchor_is_cancelled_by_the_right_roles() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    f.client.propose_reanchor(&f.shares);
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_reanchor(&f.shares, &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_reanchor(&f.shares, &guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![ReanchorCancelled {
+            fund: f.shares.clone(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.try_cancel_reanchor(&f.shares, &guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    for caller in [&f.steward, &f.governor] {
+        f.client.propose_reanchor(&f.shares);
+        f.client.cancel_reanchor(&f.shares, caller);
+        assert_eq!(f.env.auths()[0].0, *caller);
+    }
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+}
+
+/// Second review, M3: a removed fund whose NAV left the old path is
+/// re-admitted through a re-anchor on the feed of its pending re-admission.
+#[test]
+fn readmission_off_the_path_goes_through_a_reanchor() {
+    let (f, _) = ready();
+    f.client.remove_fund(&f.shares);
+    let dropped = NAV_EUR * 98 / 100;
+    publish_nav(&f, dropped);
+    // The proposal of a removed fund's re-admission defers the path check.
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    f.client.propose_reanchor(&f.shares);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, dropped);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    f.client.apply_reanchor(&f.shares);
+    f.client.apply_fund_change(&f.shares);
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
+    assert!(f.client.get_fund(&f.shares).is_some());
+}
+
+/// Second review, L1: a replacement that gives a directly priced fund its
+/// first FX leg anchors it on the rate read at the proposal; the apply only
+/// checks today's rate lies within the band of it.
+#[test]
+fn a_first_fx_leg_is_anchored_at_the_proposal() {
+    let (f, _) = ready();
+    let usd_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let nav_feed = MockOracleClient::new(&f.env, &usd_oracle);
+    let fx_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let fx_feed = MockOracleClient::new(&f.env, &fx_oracle);
+    let publish = |rate: i128| {
+        let now = f.env.ledger().timestamp();
+        // A NAV on the fund's current path, so that only the FX is at stake.
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_EUR, &now);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+    };
+    let mut config = fund_config(&f);
+    config.oracle = usd_oracle;
+    config.source = PriceSource::Cross(FxLeg {
+        oracle: fx_oracle,
+        asset: Asset::Other(eur(&f.env)),
+        haircut_bps: 200,
+        max_age_secs: 3 * DAY,
+        band_bps: 500,
+    });
+    publish(EUR_USD);
+    f.client.set_fund(&f.shares, &config);
+    assert_eq!(
+        f.client.pending_fund_change(&f.shares).unwrap().fx_anchor,
+        EUR_USD
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish(EUR_USD * 94 / 100);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish(EUR_USD * 97 / 100);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().reference_fx,
+        EUR_USD
+    );
+}
+
+/// Second review, L2: an ordinary guardian change, which the old guardian
+/// could veto, settles a forced one still waiting; a hand-over does not.
+#[test]
+fn an_ordinary_guardian_change_settles_a_forced_one() {
+    let (f, _) = ready();
+    let forced = Address::generate(&f.env);
+    let chosen = Address::generate(&f.env);
+    f.client.force_guardian_change(&forced);
+    f.client.hand_over_guardian(&Address::generate(&f.env));
+    assert!(f.client.pending_forced_guardian_change().is_some());
+    f.client.set_guardian(&chosen);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.apply_guardian_change();
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            ForcedGuardianChangeCancelled {
+                guardian: forced,
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            GuardianChanged {
+                guardian: chosen.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+    assert_eq!(f.client.guardian(), chosen);
+}
+
+/// Second review, L3: the governor withdraws a handover it proposed.
+#[test]
+fn governor_cancels_a_proposed_handover() {
+    let f = bare();
+    let successor = Address::generate(&f.env);
+    assert_eq!(f.client.try_cancel_admin(), Err(Ok(Error::NotProposed)));
+    f.client.set_admin(&successor);
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "cancel_admin",
+            args: ().into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_cancel_admin().is_err());
+    f.env.mock_all_auths();
+    f.client.cancel_admin();
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        own_events(&f),
+        std::vec![AdminProposalCancelled {
+            proposed: successor,
+            by: f.governor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::Unauthorized)));
+    assert_eq!(f.client.admin(), f.governor);
+}
+
+/// Second review, L4: an expired cap proposal no longer holds one of the
+/// eight slots.
+#[test]
+fn expired_currency_cap_proposals_free_their_slot() {
+    let (f, _) = ready();
+    for i in 0..MAX_PENDING_CURRENCY_CAPS {
+        let currency = Symbol::new(&f.env, &std::format!("C{i}"));
+        f.client.set_currency_cap(&currency, &ONE);
+    }
+    assert_eq!(
+        f.client.try_set_currency_cap(&usd(&f.env), &ONE),
+        Err(Ok(Error::LimitReached))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    f.client.set_currency_cap(&usd(&f.env), &ONE);
+    assert!(f.client.pending_currency_cap_change(&usd(&f.env)).is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Repurchase
 // ---------------------------------------------------------------------------
@@ -4036,10 +4452,14 @@ mod integration {
         live.token.set_frozen(&f.contract_id, &true);
         f.client.repurchase(&repo_id);
         let key = DataKey::PendingRelease(repo_id);
+        let repo_key = DataKey::Repo(repo_id);
         age_ledgers(f);
         assert!(entry_ttl(f, &key) < BUMP_THRESHOLD_LEDGERS);
+        assert!(entry_ttl(f, &repo_key) < BUMP_THRESHOLD_LEDGERS);
         assert!(!f.client.release(&repo_id));
         assert_eq!(entry_ttl(f, &key), BUMP_TO_LEDGERS);
+        // Second review, L5: the repo, which `redirect_release` reads, too.
+        assert_eq!(entry_ttl(f, &repo_key), BUMP_TO_LEDGERS);
     }
 
     /// Anyone retries the release once the token accepts again.
@@ -4226,6 +4646,12 @@ mod integration {
         }]);
         assert!(f.client.try_redirect_release(&repo_id, &custodian).is_err());
         f.env.mock_all_auths();
+        // Second review, L6: never to the contract itself, which would keep
+        // the shares while dropping the record.
+        assert_eq!(
+            f.client.try_redirect_release(&repo_id, &f.contract_id),
+            Err(Ok(Error::TransferMismatch))
+        );
         f.client.redirect_release(&repo_id, &custodian);
         assert_eq!(f.env.auths()[0].0, f.borrower);
         assert_eq!(

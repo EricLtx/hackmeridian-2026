@@ -7,8 +7,8 @@ use soroban_sdk::{panic_with_error, Address, Env, Map, Symbol};
 use crate::error::Error;
 use crate::types::{
     DataKey, FallbackFeed, FundConfig, FundState, Offer, PendingCurrencyCapChange, PendingFallback,
-    PendingFundChange, PendingFundLimitsChange, PendingRelease, PendingUpgrade, Repo, RiskEnvelope,
-    StablecoinConfig,
+    PendingFundChange, PendingFundLimitsChange, PendingReanchor, PendingRelease, PendingUpgrade,
+    Repo, RiskEnvelope, StablecoinConfig,
 };
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
@@ -372,6 +372,10 @@ pub fn fallback_for_pricing(env: &Env, fund: &Address) -> Option<(FallbackFeed, 
     Some(active)
 }
 
+/// Number of funds with an active fallback. The counter appeared in a later
+/// draft of version 3: a contract running an earlier draft and upgraded in
+/// place would count only the fallbacks applied afterwards. No version 3 was
+/// released before the counter, so no migration is provided.
 pub fn fallback_count(env: &Env) -> u32 {
     env.storage()
         .instance()
@@ -419,14 +423,32 @@ pub fn remove_fallback(env: &Env, fund: &Address) {
 // -- Stewards, fund limits and currency caps -----------------------------------
 
 /// The steward on record for a fund: the current configuration's, or after a
-/// removal the last installed one's.
+/// removal the last installed one's. Reading the record extends its TTL: it
+/// may have to outlive a long removal.
 pub fn steward_on_record(env: &Env, fund: &Address) -> Option<Address> {
     if let Ok(config) = self::fund(env, fund) {
         return Some(config.steward);
     }
+    let key = DataKey::LastSteward(fund.clone());
+    let steward = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(steward)
+}
+
+pub fn pending_reanchor(env: &Env, fund: &Address) -> Option<PendingReanchor> {
     env.storage()
         .persistent()
-        .get(&DataKey::LastSteward(fund.clone()))
+        .get(&DataKey::PendingReanchor(fund.clone()))
+}
+
+pub fn set_pending_reanchor(env: &Env, fund: &Address, pending: &PendingReanchor) {
+    put(env, &DataKey::PendingReanchor(fund.clone()), pending);
+}
+
+pub fn remove_pending_reanchor(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingReanchor(fund.clone()));
 }
 
 pub fn set_last_steward(env: &Env, fund: &Address, steward: &Address) {
@@ -470,10 +492,12 @@ pub fn set_pending_currency_caps(env: &Env, pending: &Map<Symbol, PendingCurrenc
     }
 }
 
-/// Extends the TTL of a pending release whose delivery was refused: the
-/// record may wait a long time for the issuer.
+/// Extends the TTL of a pending release whose delivery was refused, and of
+/// its repo, which `redirect_release` reads: the record may wait a long time
+/// for the issuer.
 pub fn bump_pending_release(env: &Env, repo_id: u64) {
     bump(env, &DataKey::PendingRelease(repo_id));
+    bump(env, &DataKey::Repo(repo_id));
 }
 
 pub fn pending_fallback(env: &Env, fund: &Address) -> Option<PendingFallback> {
