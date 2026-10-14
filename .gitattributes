@@ -1,0 +1,3 @@
+# rustfmt.toml sets newline_style = "Unix": check Rust and TOML out with LF on every OS.
+*.rs   text eol=lf
+*.toml text eol=lf
