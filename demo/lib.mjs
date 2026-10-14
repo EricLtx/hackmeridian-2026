@@ -18,6 +18,7 @@ import {
   Keypair,
   Networks,
   Operation,
+  SorobanDataBuilder,
   StrKey,
   TransactionBuilder,
   authorizeEntry,
@@ -482,6 +483,70 @@ export async function deploySac(state, sourceRole, classicAsset) {
 }
 
 export { Asset, Operation, Keypair, StrKey };
+
+// ---------------------------------------------------------------------------
+// Ledger entries and their time to live (monitoring)
+// ---------------------------------------------------------------------------
+
+/** Ledger key of a persistent entry of `contractId`; `key` is an ScVal, or null for the instance. */
+export function storageKey(contractId, key = null) {
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(contractId).toScAddress(),
+      key: key ?? xdr.ScVal.scvLedgerKeyContractInstance(),
+      durability: xdr.ContractDataDurability.persistent,
+    }),
+  );
+}
+
+/** Reads ledger entries: `{ latest, entries: [{ liveUntil, value }] }`, null for a missing entry. */
+export async function ledgerEntries(keys) {
+  const response = await net(() => server.getLedgerEntries(...keys), "ledger entries");
+  const byKey = new Map(response.entries.map((e) => [e.key.toXDR("base64"), e]));
+  return {
+    latest: response.latestLedger,
+    entries: keys.map((k) => {
+      const e = byKey.get(k.toXDR("base64"));
+      return e ? { liveUntil: e.liveUntilLedgerSeq, value: e.val } : null;
+    }),
+  };
+}
+
+/** Extends the time to live of persistent entries to `ledgers` from now. Anyone may pay for it. */
+export async function extendTtl(state, sourceRole, keys, ledgers) {
+  const source = keypair(state, sourceRole);
+  const account = await net(() => server.getAccount(source.publicKey()), "account");
+  const tx = new TransactionBuilder(account, { fee: "2000000", networkPassphrase: PASSPHRASE })
+    .addOperation(Operation.extendFootprintTtl({ extendTo: ledgers }))
+    .setSorobanData(new SorobanDataBuilder().setReadOnly(keys).build())
+    .setTimeout(TX_VALIDITY_SECS)
+    .build();
+  const sim = await net(() => server.simulateTransaction(tx), "simulate");
+  if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+  const ready = rpc.assembleTransaction(tx, sim).build();
+  ready.sign(source);
+  const { hash, seconds, fee } = await submit(ready, `${sourceRole} extend TTL`);
+  return { hash, seconds, fee };
+}
+
+/** Contract events since `startLedger`, decoded: `{ ledger, name, topics, data, txHash }`. */
+export async function contractEvents(contractId, startLedger) {
+  const out = [];
+  let cursor;
+  for (let page = 0; page < 20; page += 1) {
+    const request = cursor
+      ? { filters: [{ type: "contract", contractIds: [contractId] }], cursor, limit: 200 }
+      : { filters: [{ type: "contract", contractIds: [contractId] }], startLedger, limit: 200 };
+    const response = await net(() => server.getEvents(request), "events");
+    for (const e of response.events) {
+      const topics = e.topic.map((t) => scValToNative(t));
+      out.push({ ledger: e.ledger, name: String(topics[0]), topics: topics.slice(1), data: scValToNative(e.value), txHash: e.txHash });
+    }
+    if (response.events.length < 200) break;
+    cursor = response.cursor;
+  }
+  return out;
+}
 
 /**
  * Writes the public facts of the deployment for the web interface:

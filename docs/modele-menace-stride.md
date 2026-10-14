@@ -122,7 +122,9 @@ Les traitements ci-dessus se répartissent en trois états :
 
 - **En place et testé** : Spoof.1, Spoof.2, Spoof.3, Tamper.1, Tamper.2, Tamper.3, Repud.2, Disc.2, DoS.1, DoS.2, DoS.3, DoS.4, DoS.6, Elev.1, Elev.3, Elev.4. Les plafonds par pension, par fonds et par devise sont en place.
 - **En partie** : Repud.1 (événements en place, indexeur à construire), Tamper.4 (mise à niveau réservée au gouverneur ; délai d'attente et test avec un WASM réel à faire), DoS.5 (limite documentée, traitement en version 1.1).
-- **À mettre en place avant tout dépôt réel** : Elev.2 (multisig, délai d'attente), le plan de monitoring ci-dessous rejoué sur testnet, le tampon de première perte.
+- **À mettre en place avant tout dépôt réel** : Elev.2 (multisig, délai d'attente), le plan de monitoring ci-dessous en production, le tampon de première perte.
+
+Le plan de monitoring est implémenté (`demo/monitor.mjs`) et a été rejoué sur testnet le 14 octobre 2026 : six détecteurs sur sept ont été déclenchés par un événement réel, l'action prévue a été prise et l'état restauré. Résultats et conduite à tenir dans [procedure-incident.md](procedure-incident.md).
 
 Le calendrier de ces étapes est dans [roadmap.md](roadmap.md).
 
@@ -146,10 +148,10 @@ Outils envisagés : Hypernative (guide SDF de juillet 2026, deux exemples publi�
 Liste de revue, à reprendre à chaque changement d'architecture :
 
 - [ ] Le diagramme de flux (1.4) a été relu après l'implémentation du cycle de vie.
-- [ ] Chaque catégorie STRIDE a au moins un problème identifié : oui, six catégories, 21 problèmes.
+- [x] Chaque catégorie STRIDE a au moins un problème identifié : oui, six catégories, 21 problèmes.
 - [ ] Chaque problème a un traitement et, quand il est implémentable, un test nommé.
 - [ ] Les problèmes découverts après coup sont ajoutés ici, pas seulement corrigés.
-- [ ] Le plan de monitoring a été rejoué sur testnet avec au moins un déclencheur réel.
+- [x] Le plan de monitoring a été rejoué sur testnet avec au moins un déclencheur réel (14 octobre 2026, [procedure-incident.md](procedure-incident.md), section 5).
 - [ ] Le modèle a été relu lors d'une session Security Office Hours ou par l'auditeur.
 
 ## 5. Sources

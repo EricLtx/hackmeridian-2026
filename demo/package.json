@@ -8,7 +8,8 @@
     "setup": "node setup.mjs",
     "demo": "node run.mjs",
     "status": "node run.mjs --status",
-    "onboard": "node onboard.mjs"
+    "onboard": "node onboard.mjs",
+    "monitor": "node monitor.mjs"
   },
   "engines": { "node": ">=20" },
   "dependencies": {

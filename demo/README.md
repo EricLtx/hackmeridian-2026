@@ -25,6 +25,9 @@ npm run demo                     # every scene, Enter between scenes
 npm run demo -- --auto           # no pauses, for rehearsal or recording
 npm run demo -- --only=open,repurchase
 npm run demo -- --only=repair    # unpause, fix the NAV, close the live repo
+npm run onboard -- G...ADDRESS   # let an outside wallet use the web interface (--role=lender for a lender)
+npm run monitor -- --watch --act # monitoring: alerts every 30 s, pause on a critical alert, TTL extension
+npm run monitor -- --rehearse    # fire every detector with a real trigger, act, restore
 ```
 
 `setup` records each completed step in the state file. When the network drops, rerun the same command: finished steps are skipped, and the steps that move funds check balances first, so nothing is paid or minted twice.
@@ -83,6 +86,14 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 | `Setup failed: … account` | Testnet reset; accounts and contracts are gone | Delete `demo/.state/testnet.json`, run `setup` again |
 
 Re-admission anchors the NAV reference on the live NAV, so run `repair` before `setup -- --fx=…` if a wrong NAV might be live.
+
+## Monitoring
+
+`monitor.mjs` implements the monitoring plan of [docs/modele-menace-stride.md](../docs/modele-menace-stride.md), section 3.1. Seven detectors cover the price, the share reconciliation of invariant I2, privileged changes and code upgrades, the pause, storage time to live, exposure against caps, and the event trail of each repo. With `--act`, a critical price or reconciliation alert makes the guardian pause new entries, and entries near archival are extended. Nothing else is automatic: unpausing stays a decision for the governor. What to do for each alert is in [docs/procedure-incident.md](../docs/procedure-incident.md).
+
+## Outside wallets
+
+`setup` writes the public facts of the deployment to `web/public/deployment.testnet.json` for the web interface. A wallet that is not one of the demo keys needs the fund issuer's allowlist and some test assets: add the tEUR trustline from the web interface, then run `npm run onboard -- G...ADDRESS`. A borrower receives fund shares and a little tEUR for interest; a lender with `--role=lender` receives the steward's approval and tEUR to lend.
 
 ## Optional settings
 
