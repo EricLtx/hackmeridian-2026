@@ -1,7 +1,7 @@
 # Open Window
 
 [![CI](https://github.com/EricLtx/hackmeridian-2026/actions/workflows/ci.yml/badge.svg)](https://github.com/EricLtx/hackmeridian-2026/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Stellar](https://img.shields.io/badge/Stellar-soroban--sdk%2028-black)](https://developers.stellar.org/docs/build/smart-contracts)
 
 An on-chain repo contract on Stellar. Holders of tokenized money market funds borrow stablecoins against their shares at any hour, for a fixed term and a fixed price, when the fund's redemption window is closed.
@@ -212,4 +212,4 @@ Details and alternatives are in [docs/claude-tooling.md](docs/claude-tooling.md)
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE). Copyright and trademark notice in [NOTICE](NOTICE).
