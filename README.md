@@ -37,22 +37,22 @@ sequenceDiagram
     C->>O: lastprice(fund)
     O-->>C: price
     C-->>B: stablecoins (shares locked)
-    B->>C: repurchase(repo) before maturity
+    B->>C: repurchase(repo), principal + interest
     C-->>B: shares back
-    C-->>L: principal + interest
+    L->>C: withdraw_offer(amount), repayments included
 ```
 
 ## Design choices
 
-- Fixed term of seven days at most and a fixed rate. Early repurchase is allowed, with interest pro rata.
+- Fixed term of seven days at most by default and a fixed rate. Early repurchase is allowed; interest counts per started hour, one hour at least, and keeps running after maturity until repurchase or seizure.
 - A haircut per fund caps the loan below the value of the shares.
-- Fund shares and stablecoins are SEP-41 tokens. The share price comes from a SEP-40 oracle chosen by the administrator.
+- Fund shares and stablecoins are SEP-41 tokens. The share price comes from a SEP-40 NAV feed fixed at the fund's admission, crossed through a SEP-40 FX feed when the NAV is not in the loan currency.
 - One ledger entry per fund, per offer and per repo, and no loop over all positions: the cost of every operation stays constant whatever the number of open repos.
 - Issuer-agnostic: any permissioned fund share can be registered with its own oracle, haircut and allowlist. The contract address itself has to be allowlisted by the issuer, like any other holder, and so do lenders and borrowers.
-- The share price comes from a NAV-based feed and is checked against an absolute band per fund, not a relative deviation from the previous reading: a money market fund share barely moves in a week, so a large jump is a faulty price, not a market move.
-- An administrator keeps the registry of accepted funds and can upgrade the code. Error codes and exported types are append-only.
+- The NAV is checked against a corridor predicted from a reference, not against the previous reading: a money market fund share grows slowly and predictably, so a jump is a faulty price, not a market move. The reference never falls and rises at most at a maximum yield, so a faulty feed cannot drag it.
+- Three roles: a governor (registry, risk envelope, upgrades), a guardian (pause only), and a steward per fund, the issuer, who approves lenders and tunes its fund inside the envelope. A fund is admitted only when the governor and its steward sign the same call. Error codes and exported types are append-only.
 - Footprint: a repo is three transactions (offer, open, repurchase). The network's published estimates are about 0.2 Wh and 0.06 g CO2 per transaction (SDF and PwC, 2022; an independent 2021 measurement gives 0.222 Wh), so one repo costs well under one watt-hour. The design keeps it that way: constant cost per operation, no loops, minimal storage with TTL management, no polling.
-- Planned controls, documented in [docs/securite.md](docs/securite.md): an allowlist of accepted stablecoins, an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure, and an administrator held by a multisig with a time delay on upgrades and oracle changes.
+- Controls in place: an allowlist of accepted stablecoins, caps per repo, per fund and per currency, and an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure. Planned before any real deposit: a multisig governor with a time delay on upgrades and oracle changes. Details in [docs/securite.md](docs/securite.md).
 
 ## Contract interface
 
@@ -79,6 +79,8 @@ The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry poin
 How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), and, when the NAV is not in the loan currency, crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/securite.md](docs/securite.md), section 6.
 
 ## Roadmap
+
+[docs/roadmap.md](docs/roadmap.md) maps each product claim to its evidence (test, demo scene, testnet transaction), then sets out the steps to a guarded launch with the exit criteria of each step. Progress so far:
 
 - [x] Rust workspace, pinned toolchain, CI with security lints and dependency audit
 - [x] Administration, upgrade path, fund registry, SEP-40 price lookup, tests
@@ -185,6 +187,9 @@ npm run demo
 ```
 
 ## Documentation
+
+- [docs/faq.md](docs/faq.md): questions and answers for newcomers, users, the Stellar ecosystem, engineers and security reviewers.
+- [docs/roadmap.md](docs/roadmap.md): what the MVP proves, and the steps to a product in operation.
 
 - [docs/securite.md](docs/securite.md): security baseline, threat model and invariants of the contract (French).
 - [docs/modele-menace-stride.md](docs/modele-menace-stride.md): STRIDE threat model and monitoring plan (French).

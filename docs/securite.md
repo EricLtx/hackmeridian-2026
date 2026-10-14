@@ -93,14 +93,18 @@ Ces invariants sont la base des tests de propriété et de la revue. Ils sont é
 
 ## 5. Contrôles déjà en place dans le code
 
-- Constructeur atomique avec l'admin ; pas de fenêtre d'initialisation.
-- `require_admin` charge l'admin depuis le stockage et appelle `require_auth` dessus, sur chaque fonction privilégiée : `set_admin`, `upgrade`, `set_max_term`, `set_fund`, `remove_fund`.
-- Décote validée strictement inférieure à 100 % ; durée maximale strictement positive.
-- Oracle lu uniquement depuis le registre, jamais depuis un argument ; `None` devient `Error::NoPrice`.
-- Clés de stockage typées, une entrée par fonds, offre et pension ; TTL prolongés sur les écritures.
-- Erreurs typées (`#[contracterror]`), aucun `unwrap` ni `panic!` dans le code du contrat (lints `deny`), échec de lecture de l'admin converti en `Error::NotInitialized`.
-- Événements sur chaque changement d'état administratif, pour l'audit et l'indexation.
-- Tests : autorisation vérifiée avec `env.auths()` et avec des `mock_auths` ciblés qui prouvent qu'un intrus est refusé sur `set_admin`, `set_fund` et `upgrade` ; événements comparés en XDR ; chemins d'erreur couverts par les méthodes `try_`.
+État au 14 octobre 2026, cycle de vie complet implémenté.
+
+- **Initialisation.** Constructeur atomique avec le gouverneur, qui est aussi le premier gardien ; pas de fenêtre d'initialisation.
+- **Rôles.** Chaque fonction privilégiée charge son rôle depuis le stockage et appelle `require_auth` dessus : gouverneur (registre, enveloppe de risque, plafonds par devise, mise à niveau, levée de pause), gardien (pause des entrées), intendant de chaque fonds (prêteurs approuvés, réglages dans l'enveloppe, gel du fonds, abaissement de la référence). Transfert du gouverneur en deux temps. Admission d'un fonds signée par le gouverneur et l'intendant dans le même appel.
+- **Autorité des parties.** `require_auth` sur le prêteur dans `create_offer` et `withdraw_offer`, sur l'emprunteur dans `open_repo` ; dans `repurchase` et `seize`, l'adresse est chargée depuis la pension stockée, jamais prise en argument.
+- **Prix.** Oracles lus uniquement depuis le registre ; fraîcheur et horodatage futur refusés ; corridor fondé sur un modèle (S2) ; prix croisé avec bande et décote de change propres ; référence qui ne baisse jamais et ne monte qu'au rythme du modèle.
+- **Bornes.** Décotes strictement inférieures à 100 % (type `Bps`) ; enveloppe de risque bornant chaque réglage d'intendant ; plafonds par pension, par fonds et par devise ; durée d'une heure à 30 jours ; huit fonds au plus par offre.
+- **Transferts.** Chaque entrée de jetons est vérifiée par le solde avant et après (`TransferMismatch` sinon).
+- **Pause.** Seuls `create_offer` et `open_repo` la consultent ; `repurchase`, `withdraw_offer` et `seize` restent toujours disponibles.
+- **Stockage.** Clés typées, une entrée par fonds, offre et pension ; TTL prolongé à chaque écriture (seuil 30 jours, prolongation à 120 jours) ; échéances en horodatage.
+- **Erreurs et événements.** 30 erreurs typées, aucun `unwrap` ni `panic!` (lints `deny`) ; un événement par changement d'état.
+- **Tests.** 63 tests pour le contrat : intrus refusé sur chaque fonction privilégiée, arbres `env.auths()` vérifiés, événements comparés en XDR, chaque chemin d'erreur, invariants vérifiés après 300 opérations aléatoires, empreinte constante de `open_repo` (17 entrées lues, 9 écrites), cycle complet avec un vrai jeton à liste blanche et un vrai flux de prix.
 
 ## 6. Décisions prises au cadrage (13 octobre 2026)
 
@@ -132,7 +136,7 @@ Chaque décision ci-dessous a été prise lors du peaufinement du cadrage, sur l
 
 | Scénario | Ce qui limite la perte | Perte maximale |
 |---|---|---|
-| Prix manipulé ou oracle compromis | Bande absolue (S2) et décote : une manipulation dans la bande ne crée pas de sous-collatéralisation ; hors bande, refus | Zéro dans la bande ; plafond par fonds si l'oracle entier est compromis |
+| Prix manipulé ou oracle compromis | Corridor fondé sur un modèle (S2), bande de change et décotes : une manipulation dans le corridor ne crée pas de sous-collatéralisation ; hors corridor, refus | Zéro dans le corridor ; plafond par fonds si l'oracle entier est compromis |
 | Clé admin compromise | Délai de 48 h (S7) ; sorties jamais bloquées (S6) | Flux entrés pendant le délai, si personne ne surveille (S17) |
 | Gel ou reprise des parts par l'émetteur | Dette maintenue (S9) ; le prêteur perd les parts saisies | Pensions ouvertes sur ce fonds, donc plafond par fonds |
 | Bug du contrat | Pause des entrées ; sorties intactes ; tampon (S16) | Valeur bloquée au moment du bug, donc plafond total |
@@ -222,7 +226,7 @@ La qualification de chaque service appartient à l'entité financière (Commissi
 
 1. **Qui porte la clé d'administration ?** Une clé unique pendant le hackathon ; un multisig natif à seuils avec un signataire extérieur dès le testnet public ; un TimelockController devant l'upgrade et l'oracle avant tout dépôt réel (S7, S15).
 2. **L'émetteur accepte-t-il que le contrat détienne des parts ?** Techniquement, le contrat est une adresse comme une autre pour la liste blanche d'un émetteur : sur Stellar, le token d'un émetteur régulé exige le même rôle sur l'expéditeur et le destinataire, et le propre contrat de rachat de cet émetteur doit le détenir. Pour un actif classique à autorisation requise, l'émetteur autorise l'adresse du contrat via `set_authorized`. La décision commerciale reste celle de l'émetteur ; S8 et S9 fixent les règles de gel et de saisie.
-3. **L'oracle publie-t-il le week-end ?** Les flux de valeur liquidative pour les parts de fonds existent sur Stellar (RedStone, 18 flux SEP-40 dont BENJI ; Pyth) ; leur rythme de publication est un paramètre par fonds (S1), complété par la bande absolue (S2) et la décote.
+3. **L'oracle publie-t-il le week-end ?** Les flux de valeur liquidative pour les parts de fonds existent sur Stellar (RedStone, 18 flux SEP-40 dont BENJI ; Pyth) ; leur rythme de publication est un paramètre par fonds (S1), complété par le corridor (S2) et la décote.
 4. **Faut-il un plafond global ?** Oui (S18) : par pension, par fonds et au total, aligné sur le premier seuil d'audit de suivi.
 5. **Qui décide de la pause ?** Un seul signataire, pouvoir limité aux entrées (S6) ; les prêteurs gardent le retrait de la part non prêtée à tout moment.
 

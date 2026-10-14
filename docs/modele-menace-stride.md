@@ -54,7 +54,7 @@ Les fonctions du contrat : `__constructor`, `set_admin`, `upgrade`, `set_max_ter
 
 - **F1, utilisateur ↔ contrat** : tout argument est hostile ; chaque autorité consommée est ré-authentifiée dans la fonction.
 - **F2, contrat ↔ tokens** : un token peut échouer, renvoyer un montant différent (token à permissions, gel), ou être faux ; d'où la liste blanche et la vérification des soldes avant et après transfert.
-- **F3, contrat ↔ oracle** : la donnée est externe ; fraîcheur, bande absolue, refus en cas de doute.
+- **F3, contrat ↔ oracle** : la donnée est externe ; fraîcheur, corridor fondé sur un modèle, bande de change, refus en cas de doute.
 - **F4, admin ↔ contrat** : l'autorité la plus forte ; multisig, timelock, pouvoirs d'urgence étroits.
 - **F5, émetteur ↔ parts** : l'émetteur peut geler ou reprendre ; la règle S9 fixe les conséquences.
 - **F6, chaîne ↔ hors chaîne** : monitoring, indexeur, interface web ; aucune décision du contrat n'en dépend, mais la réponse à incident en dépend.
@@ -75,7 +75,7 @@ Chaque problème est numéroté par catégorie. Les invariants I1 à I9 et les d
 
 | # | Problème | Traitement |
 |---|---|---|
-| Tamper.1 | Prix manipulé pour emprunter plus que la valeur des parts (incident YieldBlox, février 2026) | Flux de valeur liquidative, jamais un prix de DEX ; bande absolue par fonds (S2) ; fraîcheur (S1) ; décote ; refus hors bande |
+| Tamper.1 | Prix manipulé pour emprunter plus que la valeur des parts (incident YieldBlox, février 2026) | Flux de valeur liquidative, jamais un prix de DEX ; corridor fondé sur un modèle avec une référence qui ne suit pas le flux (S2) ; fraîcheur (S1) ; bande et décote de change ; décote ; refus hors corridor. Tests : `reference_cannot_be_ratcheted_by_a_faulty_feed`, `corridor_refuses_a_jump_faster_than_the_maximum_yield` |
 | Tamper.2 | Débordement ou arrondi défavorable dans le calcul d'intérêt ou du plafond d'emprunt | `checked_*` imposé par les lints, `overflow-checks` en release et test, arrondis fixés (S3, S4), tests de propriété |
 | Tamper.3 | Modification des conditions d'une pension ouverte par un changement de registre | I9 : conditions figées à l'ouverture ; `remove_fund` n'affecte pas les pensions ouvertes |
 | Tamper.4 | Upgrade malveillant ou erroné qui corrompt le stockage | Timelock 48 h (S7), clés de stockage jamais renommées ni retypées, version de schéma et `migrate` (S14), test d'upgrade avec WASM réel |
@@ -102,7 +102,7 @@ Chaque problème est numéroté par catégorie. Les invariants I1 à I9 et les d
 | DoS.2 | Entrée archivée (TTL expiré) qui bloque un rachat ou une saisie | Échéances en timestamp, jamais en TTL ; TTL prolongé à chaque écriture ; tâche de prolongation en RUN ; restauration possible par l'appelant |
 | DoS.3 | Oracle muet ou périmé un week-end | Refus explicite (`NoPrice`, `StalePrice`) plutôt que prix par défaut ; paramètre de fraîcheur par fonds ; second oracle en version suivante |
 | DoS.4 | Pause abusive qui bloque les sorties | La pause ne touche que `create_offer` et `open_repo` (S6) ; `repurchase`, `withdraw_offer` et `seize` restent toujours disponibles |
-| DoS.5 | Gel ou reprise des parts par l'émetteur pendant une pension | Règle S9 : dette maintenue, clôture possible sans restitution des parts |
+| DoS.5 | Gel ou reprise des parts par l'émetteur pendant une pension | Règle S9 : dette maintenue. Aujourd'hui, le rachat échoue tant que l'émetteur gèle les parts du contrat ; limite documentée et couverte par un test ; clôture sans restitution prévue en version 1.1 |
 | DoS.6 | Pensions de quelques secondes qui sondent ou saturent le contrat | Durée minimale d'une heure (S11), plafonds (S18) |
 
 ### Élévation de privilège (Elevation of Privilege)
@@ -111,16 +111,20 @@ Chaque problème est numéroté par catégorie. Les invariants I1 à I9 et les d
 |---|---|---|
 | Elev.1 | Capture de l'admin par une fonction d'initialisation rejouable | Écartée : constructeur `__constructor`, pas d'`initialize` |
 | Elev.2 | Compromission de la clé admin | Multisig natif à seuils avec signataire extérieur ; timelock 48 h sur upgrade et oracle ; transfert d'admin en deux temps (S7) ; pouvoirs d'urgence limités aux entrées |
-| Elev.3 | Un prêteur sponsor obtient un privilège de sortie ou de saisie | S19 : l'offre sponsor n'a qu'une priorité d'allocation ; mêmes règles que toute offre |
-| Elev.4 | Un prêteur non autorisé par l'émetteur reçoit des parts saisies et les bloque | S8 : seuls des détenteurs autorisés peuvent prêter ; vérifié à `create_offer` et à `seize` |
+| Elev.3 | Un prêteur sponsor obtient un privilège de sortie ou de saisie | S19 : la marque sponsor est indicative, posée par l'intendant, sans appariement on-chain ; mêmes règles que toute offre |
+| Elev.4 | Un prêteur non autorisé par l'émetteur reçoit des parts saisies et les bloque | S8 : seuls des prêteurs approuvés par l'intendant peuvent prêter ; vérifié à `create_offer`, de nouveau à chaque `open_repo`, et sur l'adresse de destination de `seize` |
 
 ## 3. Que faisons-nous ?
 
 Les traitements ci-dessus se répartissent en trois états :
 
-- **En place** : Spoof.1 pour les fonctions d'administration, Spoof.2, Tamper.2, Tamper.3 (documenté), Repud.2 (événements admin), Disc.2, DoS.1, DoS.2 (échéances en timestamp), Elev.1.
-- **À implémenter avec le cycle de vie** : Spoof.1 pour les fonctions de cycle de vie, Spoof.3, Tamper.1, Tamper.4, Repud.1, DoS.3, DoS.4, DoS.5, DoS.6, Elev.3, Elev.4.
-- **À mettre en place avant tout dépôt réel** : Elev.2 (multisig, timelock), le plan de monitoring ci-dessous, le tampon de première perte, les plafonds.
+État au 14 octobre 2026, cycle de vie implémenté :
+
+- **En place et testé** : Spoof.1, Spoof.2, Spoof.3, Tamper.1, Tamper.2, Tamper.3, Repud.2, Disc.2, DoS.1, DoS.2, DoS.3, DoS.4, DoS.6, Elev.1, Elev.3, Elev.4. Les plafonds par pension, par fonds et par devise sont en place.
+- **En partie** : Repud.1 (événements en place, indexeur à construire), Tamper.4 (mise à niveau réservée au gouverneur ; délai d'attente et test avec un WASM réel à faire), DoS.5 (limite documentée, traitement en version 1.1).
+- **À mettre en place avant tout dépôt réel** : Elev.2 (multisig, délai d'attente), le plan de monitoring ci-dessous rejoué sur testnet, le tampon de première perte.
+
+Le calendrier de ces étapes est dans [roadmap.md](roadmap.md).
 
 ### 3.1 Plan de monitoring, première version
 
@@ -128,7 +132,7 @@ Le plan découle du modèle : chaque menace qui ne peut pas être rendue impossi
 
 | Menace | Détecteur | Seuil | Action |
 |---|---|---|---|
-| Tamper.1 | Prix lu par `fund_price` comparé à la dernière valeur acceptée | Sortie de la bande absolue, ou prix inchangé depuis plus de N heures | Alerte immédiate ; pause des entrées par un signataire |
+| Tamper.1 | Prix lu par `fund_price` comparé au corridor de la référence | Sortie du corridor, ou prix inchangé depuis plus de N heures | Alerte immédiate ; pause des entrées par le gardien |
 | Elev.2 | Opérations programmées dans le timelock ; appels à `set_admin`, `upgrade`, `set_fund` | Toute occurrence | Alerte immédiate ; vérification par un second signataire pendant le délai |
 | DoS.2 | TTL restant des entrées `Fund`, `Offer`, `Repo` ouvertes | Moins de 14 jours | Prolongation automatique ; alerte si l'échec se répète |
 | DoS.1, DoS.6 | Nombre de pensions ouvertes par heure, montant par pension, total bloqué | Dépassement des plafonds S18, ou rythme anormal | Alerte ; pause des entrées |
