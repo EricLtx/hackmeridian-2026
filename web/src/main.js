@@ -55,6 +55,7 @@ const S = {
   nextRepo: 1, // first repo id not scanned yet
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
+  releases: new Map(), // closed repo id -> shares the token refused to deliver
   eventsFrom: null,
   busy: false,
   refreshing: false,
@@ -417,6 +418,7 @@ function adoptWallet(wallet) {
   S.nextRepo = 1;
   S.dues = new Map();
   S.openings = new Map();
+  S.releases = new Map();
   S.eventsFrom = null;
   S.borrowSharesSet = false;
   S.stopWatch?.();
@@ -685,6 +687,19 @@ async function refreshPositions() {
       }
     }),
   );
+  // A closed repo may still owe shares the issuer's token refused to move.
+  const closedIds = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status !== "Open").map((r) => r.id);
+  await Promise.all(
+    closedIds.map(async (id) => {
+      try {
+        const pending = await S.chain.pendingRelease(id);
+        if (pending) S.releases.set(id, pending);
+        else S.releases.delete(id);
+      } catch {
+        // Older contract versions have no deferred release.
+      }
+    }),
+  );
   renderPositions();
   // Opening transactions come from events, which the RPC keeps for a limited
   // window. Best effort: positions are complete without them.
@@ -751,7 +766,7 @@ function renderPositions() {
       (r) =>
         `<li><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
           r.status === "Repurchased" ? "Repurchased" : "Shares kept by lender"
-        }</span> <span class="num">${esc(money(r.principal))}</span> ${openingLink(r.id)}</li>`,
+        }</span> <span class="num">${esc(money(r.principal))}</span> ${openingLink(r.id)}${releaseNote(r.id)}</li>`,
     );
   setHTML(
     body,
@@ -937,7 +952,7 @@ function renderLent() {
     (r) =>
       `<li><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
         r.status === "Repurchased" ? "Repaid" : "Shares taken"
-      }</span> <span class="num">${esc(money(r.principal))}</span></li>`,
+      }</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</li>`,
   );
   setHTML(
     box,
@@ -946,6 +961,29 @@ function renderLent() {
   );
   syncWriteButtons();
   tick();
+}
+
+/** Held-back shares on a closed repo: a note, and a Release button for the beneficiary. */
+function releaseNote(id) {
+  const pending = S.releases.get(id);
+  if (!pending) return "";
+  const mine = pending.to === S.wallet?.address;
+  return ` <span class="pill pill-danger">${esc(shareAmount(pending.shares))} held: the issuer blocks the transfer</span>${
+    mine ? ` <button type="button" class="btn btn-secondary" data-write data-release="${id}">Release</button>` : ""
+  }`;
+}
+
+function onRelease(id) {
+  const pending = S.releases.get(id);
+  runTx(
+    $("positions-tx"),
+    { action: "release" },
+    (onStatus) => S.chain.release(S.wallet, id, onStatus),
+    (result) =>
+      result.value
+        ? `Repo #${id}: ${shareAmount(pending?.shares ?? 0n)} delivered to your wallet.`
+        : `Repo #${id}: the issuer still blocks the transfer. The shares stay reserved for you; try again later.`,
+  );
 }
 
 function onSeize(id) {
@@ -1043,6 +1081,7 @@ function wire() {
     if (target.dataset.repurchase) return onRepurchase(Number(target.dataset.repurchase));
     if (target.dataset.withdraw) return onWithdraw(Number(target.dataset.withdraw));
     if (target.dataset.seize) return onSeize(Number(target.dataset.seize));
+    if (target.dataset.release) return onRelease(Number(target.dataset.release));
     if (target.dataset.trust !== undefined) {
       return runTx($("wallet-tx"), { code: code() }, (onStatus) => S.chain.addTrustline(S.wallet, onStatus), () => `${code()} added to your wallet.`);
     }

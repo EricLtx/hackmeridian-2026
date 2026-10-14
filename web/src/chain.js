@@ -486,6 +486,19 @@ export class Chain {
   }
 
   /**
+   * Shares owed on a closed repo that the share token refused to move (an
+   * issuer freeze or allowlist removal): `{ fund, to, shares }` or null.
+   */
+  async pendingRelease(repoId) {
+    return this.read(this.contracts.openWindow, "pending_release", [sv.u64(repoId)]);
+  }
+
+  /** Retries the delivery of held-back shares; anyone may call it. Resolves `value` true when delivered. */
+  release(signer, repoId, onStatus) {
+    return this.invoke(signer, "release", [sv.u64(repoId)], onStatus);
+  }
+
+  /**
    * Simulates `fn` without a wallet and returns the contract error it would
    * hit, or null. Simulation records authorizations without checking them,
    * so this probes the contract's other rules only, never who may call.

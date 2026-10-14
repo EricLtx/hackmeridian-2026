@@ -123,6 +123,16 @@ test("a simulation error is named after the contract that raised it", () => {
     kinds,
   );
   assert.equal(nested.name, "stellar-asset:Balance");
+
+  // An error the contract caught (a refused try_transfer) does not mask the
+  // contract's own refusal: the surfaced code decides.
+  const caught = decodeSimulationError(
+    `HostError: Error(Contract, #34)
+0: [Diagnostic Event] contract:${OW}, topics:[error, Error(Contract, #34)]
+1: [Diagnostic Event] contract:${SAC}, topics:[error, Error(Contract, #10)]`,
+    kinds,
+  );
+  assert.equal(caught.name, "ReleaseBlocked");
   assert.equal(describeError(nested, { code: "tEUR" }).text, "Your tEUR balance is too low for this.");
 
   const bare = decodeSimulationError("HostError: Error(Contract, #8)", kinds);

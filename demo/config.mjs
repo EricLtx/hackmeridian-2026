@@ -30,6 +30,13 @@ export const FUND_SETTINGS = {
 /** EUR/USD used for the local FX feed when Reflector has no price, 14 decimals. */
 export const FALLBACK_EUR_USD = 112_000_000_000_000n;
 
+/**
+ * Time delay on upgrades and on changes to an admitted fund, set before the
+ * first admission. Five minutes lets a demo show propose, wait, apply; a
+ * real deployment keeps the contract's 48-hour default or more.
+ */
+export const DEMO_TIMELOCK_SECS = 300;
+
 /** Offers created at setup: the issuer's sponsor offer and a market offer. */
 export const OFFERS = {
   sponsor: { amount: 300_000n * ONE, rateBps: 250 },

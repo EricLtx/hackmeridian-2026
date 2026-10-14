@@ -22,3 +22,5 @@ target
 /web/node_modules/
 /web/dist/
 /.claude/worktrees/
+# Ledger snapshots the Soroban test host writes when a test Env is dropped.
+**/test_snapshots/

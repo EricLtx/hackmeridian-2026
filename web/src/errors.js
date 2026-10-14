@@ -14,7 +14,9 @@ export const ERRORS = {
   17: "RepoNotOpen", 18: "NotMatured", 19: "CapExceeded", 20: "TooManyFunds",
   21: "LenderNotApproved", 22: "TransferMismatch", 23: "FundNotInOffer", 24: "InvalidRate",
   25: "ArithmeticOverflow", 26: "OutsideEnvelope", 27: "FundFrozen", 28: "InvalidPrice",
-  29: "DuplicateFund", 30: "Unauthorized",
+  29: "DuplicateFund", 30: "Unauthorized", 31: "DelayCannotDecrease", 32: "NotProposed",
+  33: "TimelockPending", 34: "ReleaseBlocked", 35: "PriceDivergence", 36: "NothingToRelease",
+  37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached",
 };
 
 /** Error tables of the other contracts a transaction can reach. */
@@ -86,9 +88,14 @@ export class TransactionError extends Error {
  * where the failure started (a token refusing a transfer inside `open_repo`).
  */
 export function decodeSimulationError(text, kinds = new Map()) {
+  // The surfaced code heads the message; error events are listed newest
+  // first, so the oldest one with that code names the contract it came from.
+  // An error a contract caught carries another code and is ignored.
+  const surfaced = /^HostError: Error\(Contract, #(\d+)\)/.exec(String(text))?.[1];
   const events = [...String(text).matchAll(/contract:(C[A-Z0-9]{55}), topics:\[error, Error\(Contract, #(\d+)\)\]/g)];
-  if (events.length) {
-    const [, contractId, code] = events[events.length - 1];
+  const same = surfaced ? events.filter(([, , code]) => code === surfaced) : events;
+  if (same.length) {
+    const [, contractId, code] = same[same.length - 1];
     return new ContractError(Number(code), kinds.get(contractId) ?? "unknown", text);
   }
   const match = /Error\(Contract, #(\d+)\)/.exec(String(text));
@@ -139,6 +146,10 @@ const SENTENCES = {
     InvalidPrice: () => "The price feed returned an invalid price.",
     DuplicateFund: () => "The fund is listed twice in the offer.",
     Unauthorized: () => "This wallet does not hold the role this action needs.",
+    PriceDivergence: () => "The fund's two price feeds disagree, so no loan is priced until they agree again.",
+    ReleaseBlocked: () => "The fund issuer still refuses the transfer of these shares. They stay reserved for you; retry once the issuer lifts its block.",
+    NothingToRelease: () => "No shares are waiting for release on this repo.",
+    TimelockPending: () => "This change is waiting for its time delay to pass.",
   },
   "fund-token": {
     NotWhitelisted: (c) => `This wallet is not on the fund's allowlist.${c.command ? ` Ask the operator to run: ${c.command}` : " Ask the operator to onboard it."}`,

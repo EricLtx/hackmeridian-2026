@@ -88,6 +88,10 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 
 Re-admission anchors the NAV reference on the live NAV, so run `repair` before `setup -- --fx=…` if a wrong NAV might be live.
 
+## Version 3 governance in the demo
+
+`setup` sets the contract's time delay to 5 minutes before the first fund is admitted (`config.mjs`), so changes can be shown live; a real deployment keeps 48 hours or more. With `--multisig`, the governor needs two keys for every action. After admission, replacing the fund, raising a cap or appointing a guardian is a proposal: `setup -- --fx=…` proposes the replacement, waits for the delay, then applies it. The operator extends the contract code itself, by 30 days at a time, because the contract never extends its own code.
+
 ## Monitoring
 
 `monitor.mjs` implements the monitoring plan of [docs/modele-menace-stride.md](../docs/modele-menace-stride.md), section 3.1. Seven detectors cover the price, the share reconciliation of invariant I2, privileged changes and code upgrades, the pause, storage time to live, exposure against caps, and the event trail of each repo. With `--act`, a critical price or reconciliation alert makes the guardian pause new entries, and entries near archival are extended. Nothing else is automatic: unpausing stays a decision for the governor. What to do for each alert is in [docs/procedure-incident.md](../docs/procedure-incident.md).

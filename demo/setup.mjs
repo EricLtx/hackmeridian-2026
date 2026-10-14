@@ -33,10 +33,17 @@ import {
   loadState,
   read,
   saveState,
+  WASM_DIR,
+  codeKey,
+  extendTtl,
+  sleep,
   sv,
   writeDeployment,
 } from "./lib.mjs";
-import { FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, OFFERS, navAt } from "./config.mjs";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, OFFERS, navAt } from "./config.mjs";
 
 const ROLES = ["governor", "guardian", "steward", "operator", "euroIssuer", "lender", "borrower"];
 
@@ -158,6 +165,12 @@ async function main() {
     saveState(state);
   }
   console.log(`  Open Window      ${state.contracts.openWindow}`);
+  await once(state, "codeTtl", "Operator extends the contract code by 30 days (the contract never pays for its own code)", async () => {
+    const wasm = fs.readFileSync(path.join(WASM_DIR, "night_window.wasm"));
+    const hash = crypto.createHash("sha256").update(wasm).digest();
+    const r = await extendTtl(state, "operator", [codeKey(hash)], 30 * 17_280);
+    console.log(`  code ${hash.toString("hex").slice(0, 12)}… extended, fee ${(Number(r.fee ?? 0n) / 1e7).toFixed(2)} XLM`);
+  });
 
   const ow = state.contracts.openWindow;
   const shares = state.contracts.shares;
@@ -189,6 +202,9 @@ async function main() {
     await invoke(state, "governor", ow, "set_guardian", [sv.address(pub("guardian"))]);
     await invoke(state, "governor", ow, "set_stablecoin", [sv.address(state.contracts.euro), sv.symbol("EUR")]);
     await invoke(state, "governor", ow, "set_currency_cap", [sv.symbol("EUR"), sv.i128(1_000_000n * ONE)]);
+    // Only possible before the first fund is admitted: afterwards the delay can only grow.
+    await invoke(state, "governor", ow, "set_timelock_delay", [sv.u64(DEMO_TIMELOCK_SECS)]);
+    console.log(`  time delay on upgrades and fund changes: ${DEMO_TIMELOCK_SECS / 60} min`);
   });
 
   await once(state, "issuer", "Issuer: allowlist (holders and the contract), mint shares", async () => {
@@ -272,7 +288,18 @@ async function main() {
         max_principal_per_repo: sv.i128(s.maxPrincipalPerRepo),
         max_outstanding: sv.i128(s.maxOutstanding),
       });
+      const admitted = await read(state, ow, "get_fund", [sv.address(shares)]);
       await invoke(state, "governor", ow, "set_fund", [sv.address(shares), fundConfig]);
+      if (admitted) {
+        // Replacing an admitted fund is a proposal: it applies after the time delay.
+        const pending = await read(state, ow, "pending_fund_change", [sv.address(shares)]);
+        const wait = Math.max(0, Number(pending.eta) - (await ledgerTime()));
+        console.log(`  replacement proposed; applying it after the time delay (${Math.ceil(wait / 60)} min)`);
+        while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
+        await refreshNav(state);
+        await invoke(state, "operator", ow, "apply_fund_change", [sv.address(shares)]);
+        console.log("  replacement applied");
+      }
     },
   );
 

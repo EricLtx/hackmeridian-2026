@@ -60,7 +60,9 @@ export const ERRORS = {
   17: "RepoNotOpen", 18: "NotMatured", 19: "CapExceeded", 20: "TooManyFunds",
   21: "LenderNotApproved", 22: "TransferMismatch", 23: "FundNotInOffer", 24: "InvalidRate",
   25: "ArithmeticOverflow", 26: "OutsideEnvelope", 27: "FundFrozen", 28: "InvalidPrice",
-  29: "DuplicateFund", 30: "Unauthorized",
+  29: "DuplicateFund", 30: "Unauthorized", 31: "DelayCannotDecrease", 32: "NotProposed",
+  33: "TimelockPending", 34: "ReleaseBlocked", 35: "PriceDivergence", 36: "NothingToRelease",
+  37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached",
 };
 
 /** Error tables of the other contracts the demo calls. */
@@ -117,9 +119,15 @@ export class ContractError extends Error {
  */
 function simulationError(sim) {
   const text = sim.error ?? "";
+  // The surfaced code heads the message. Error events are listed newest first:
+  // the oldest event carrying that same code names the contract it came from.
+  // An error a contract caught (a refused `try_transfer`) carries another code
+  // and is ignored, so the contract's own refusal is reported.
+  const surfaced = /^HostError: Error\(Contract, #(\d+)\)/.exec(text)?.[1];
   const events = [...text.matchAll(/contract:(C[A-Z0-9]{55}), topics:\[error, Error\(Contract, #(\d+)\)\]/g)];
-  if (events.length) {
-    const [, contractId, code] = events[events.length - 1];
+  const same = surfaced ? events.filter(([, , code]) => code === surfaced) : events;
+  if (same.length) {
+    const [, contractId, code] = same[same.length - 1];
     return new ContractError(Number(code), registry.get(contractId)?.kind ?? "unknown", text);
   }
   const match = /Error\(Contract, #(\d+)\)/.exec(text);
@@ -533,6 +541,12 @@ export function storageKey(contractId, key = null) {
       durability: xdr.ContractDataDurability.persistent,
     }),
   );
+}
+
+/** Ledger key of a contract's WASM code entry, from the code hash (hex or bytes). */
+export function codeKey(hash) {
+  const bytes = typeof hash === "string" ? Buffer.from(hash, "hex") : Buffer.from(hash);
+  return xdr.LedgerKey.contractCode(new xdr.LedgerKeyContractCode({ hash: bytes }));
 }
 
 /** Reads ledger entries: `{ latest, entries: [{ liveUntil, value }] }`, null for a missing entry. */

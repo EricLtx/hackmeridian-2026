@@ -12,11 +12,14 @@
 // which blocks new entries and never exits, and a TTL extension, which
 // anyone may pay for. Unpausing stays a human decision for the governor.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
   ONE,
   STATE_DIR,
+  WASM_DIR,
+  codeKey,
   asset,
   contractEvents,
   explorer,
@@ -33,7 +36,7 @@ import {
   storageKey,
   sv,
 } from "./lib.mjs";
-import { navAt } from "./config.mjs";
+import { FUND_SETTINGS, navAt } from "./config.mjs";
 
 const args = process.argv.slice(2);
 const WATCH = args.includes("--watch");
@@ -51,6 +54,8 @@ const LIMITS = {
   opensPerHour: 20, // an unusual rate of new repos
 };
 const LEDGER_SECS = 5;
+/** Largest extension of the code entry in one transaction, in days. */
+const CODE_STEP_DAYS = 30;
 const MONITOR_FILE = path.join(STATE_DIR, "monitor.json");
 const ALERT_FILE = path.join(STATE_DIR, "alerts.jsonl");
 
@@ -58,8 +63,11 @@ const ALERT_FILE = path.join(STATE_DIR, "alerts.jsonl");
 const PRIVILEGED = new Set([
   "admin_changed", "admin_proposed", "guardian_changed", "envelope_changed", "fund_set", "fund_removed",
   "stablecoin_set", "stablecoin_removed", "currency_cap_set", "max_term_changed", "fund_limits_set",
-  "lender_approval", "fund_frozen", "sponsor_set",
+  "lender_approval", "fund_frozen", "sponsor_set", "timelock_delay_changed", "fund_change_cancelled",
+  "fallback_set", "fallback_cancelled", "fallback_removed", "upgrade_cancelled", "upgraded",
 ]);
+/** Proposals that take effect after the time delay: the window to verify and cancel (Elev.2). */
+const PROPOSALS = /_proposed$|_change_proposed$/;
 
 const state = loadState();
 const C = state.contracts;
@@ -68,12 +76,15 @@ if (!C?.openWindow) {
   process.exit(1);
 }
 
+/** Monitoring state of the deployed contract; a new deployment starts afresh. */
 function loadMonitor() {
+  let m = {};
   try {
-    return JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
+    m = JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
   } catch {
-    return {};
+    // first run
   }
+  return m.contract === C.openWindow ? m : { contract: C.openWindow, announced: m.announced ?? [] };
 }
 function saveMonitor(m) {
   fs.writeFileSync(MONITOR_FILE, JSON.stringify(m, null, 2));
@@ -94,6 +105,7 @@ async function scan(getter) {
 }
 
 const statusOf = (repo) => (Array.isArray(repo.status) ? repo.status[0] : repo.status);
+const hex = (bytes) => (bytes ? Buffer.from(bytes).toString("hex") : "");
 
 async function snapshot(monitor) {
   const now = await ledgerTime();
@@ -115,6 +127,11 @@ async function snapshot(monitor) {
   const priceError = await probe(state, "governor", C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(C.euro)]);
 
   const openRepos = repos.filter((r) => statusOf(r) === "Open");
+  const releases = [];
+  for (const r of repos.filter((x) => statusOf(x) !== "Open")) {
+    const pending = await read(state, C.openWindow, "pending_release", [sv.u64(r.id)]);
+    if (pending) releases.push({ id: r.id, ...pending });
+  }
   const liveOffers = offers.filter((o) => BigInt(o.available) > 0n);
   const keyed = [
     ["contract instance", storageKey(C.openWindow)],
@@ -123,19 +140,25 @@ async function snapshot(monitor) {
     ...openRepos.map((r) => [`repo #${r.id}`, storageKey(C.openWindow, sv.variant("Repo", sv.u64(r.id)))]),
     ...liveOffers.map((o) => [`offer #${o.id}`, storageKey(C.openWindow, sv.variant("Offer", sv.u64(o.id)))]),
   ];
+  // The contract no longer extends its own code (rent grows with size): the operator does.
+  const head = await ledgerEntries([storageKey(C.openWindow)]);
+  const rawCode = head.entries[0]?.value?.contractData?.val?.instance?.executable?.wasmHash;
+  if (rawCode) keyed.push(["contract code", codeKey(typeof rawCode.toXDR === "function" ? rawCode.toXDR() : rawCode), "code"]);
   const ledger = await ledgerEntries(keyed.map(([, k]) => k));
-  const ttl = keyed.map(([label, key], i) => ({
+  const ttl = keyed.map(([label, key, kind], i) => ({
     label,
     key,
+    kind,
     days: ledger.entries[i] ? ((ledger.entries[i].liveUntil - ledger.latest) * LEDGER_SECS) / 86_400 : null,
   }));
   const instance = ledger.entries[0]?.value?.contractData?.val?.instance;
   const rawHash = instance?.executable?.wasmHash;
   const wasmHash = rawHash ? (typeof rawHash.toXDR === "function" ? rawHash.toXDR("hex") : Buffer.from(rawHash).toString("hex")) : null;
 
-  const from = Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000);
+  // The RPC serves events up to its latest ledger and for about a week back.
+  const from = Math.min(Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000), ledger.latest);
   const events = await contractEvents(C.openWindow, from);
-  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, held, outstanding, cap, currency, priceError, ttl, wasmHash, events };
+  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, outstanding, cap, currency, priceError, ttl, wasmHash, events };
 }
 
 /** The detectors. Each returns alerts: { detector, threat, level, message, action }. */
@@ -152,15 +175,35 @@ const DETECTORS = {
     return out.map((a) => ({ detector: "price", threat: "Tamper.1", ...a }));
   },
   reconciliation(s) {
+    // Invariant I2 (v3): shares held = shares of open repos + shares awaiting release.
     const locked = s.openRepos.reduce((sum, r) => sum + BigInt(r.shares), 0n);
+    const awaiting = s.releases.reduce((sum, r) => sum + BigInt(r.shares), 0n);
     const held = BigInt(s.held);
-    if (held === locked) return [];
-    return [{ detector: "reconciliation", threat: "DoS.5", level: "critical", message: `contract holds ${fmt(held, 7, 7)} shares, open repos lock ${fmt(locked, 7, 7)}: ${held - locked} units apart (invariant I2)`, action: "pause" }];
+    const out = s.releases.map((r) => ({
+      detector: "reconciliation", threat: "DoS.5", level: "critical",
+      message: `repo #${r.id}: ${fmt(r.shares, 7, 0)} shares held back, the share token refuses the transfer (issuer freeze or allowlist)`,
+      action: "contact the issuer, then release",
+    }));
+    if (held !== locked + awaiting) {
+      out.push({ detector: "reconciliation", threat: "DoS.5", level: "critical", message: `contract holds ${fmt(held, 7, 7)} shares, open repos and releases account for ${fmt(locked + awaiting, 7, 7)}: ${held - locked - awaiting} units apart (invariant I2)`, action: "pause" });
+    }
+    return out;
   },
   privileged(s, monitor) {
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
       .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
+    for (const e of s.events.filter((ev) => PROPOSALS.test(ev.name))) {
+      const isUpgrade = e.name === "upgrade_proposed";
+      const hash = isUpgrade ? hex(e.data?.wasm_hash) : null;
+      const announced = isUpgrade && (monitor.announced ?? []).includes(hash);
+      out.push({
+        level: isUpgrade && !announced ? "critical" : "warning",
+        message: `${e.name} at ledger ${e.ledger}${hash ? `, code ${hash.slice(0, 12)}${announced ? " (announced)" : " (NOT announced)"}` : ""}; takes effect at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(11, 19) : "?"} UTC`,
+        action: isUpgrade && !announced ? "cancel" : "verify before it applies",
+        tx: e.txHash,
+      });
+    }
     if (monitor.wasmHash && s.wasmHash && monitor.wasmHash !== s.wasmHash) {
       out.push({ level: "critical", message: `contract code changed: ${monitor.wasmHash.slice(0, 12)} to ${s.wasmHash.slice(0, 12)}`, action: "verify" });
     }
@@ -183,6 +226,8 @@ const DETECTORS = {
         message: t.days === null ? `${t.label} is archived or missing` : `${t.label} has ${t.days.toFixed(1)} days to live`,
         action: "extend",
         key: t.key,
+        kind: t.kind,
+        days: t.days,
       }));
   },
   exposure(s) {
@@ -226,19 +271,37 @@ function report(s, alerts) {
   for (const a of alerts) console.log(`  ${a.level.toUpperCase().padEnd(8)} ${a.threat.padEnd(9)} ${a.message}  (action: ${a.action})`);
 }
 
-/** The safe automatic actions: pause on a critical price or reconciliation alert, extend TTLs. */
+/** The safe automatic actions: pause on a critical alert, cancel an unannounced upgrade, extend TTLs. */
 async function act(alerts, s) {
   const done = [];
+  if (alerts.some((a) => a.action === "cancel")) {
+    const pending = await read(state, C.openWindow, "pending_upgrade");
+    if (pending) {
+      const r = await invoke(state, "guardian", C.openWindow, "cancel_upgrade", [sv.address(keypair(state, "guardian").publicKey())]);
+      console.log(`  ACTION   guardian cancelled the upgrade proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      done.push("cancel upgrade");
+    }
+  }
   if (!s.paused && alerts.some((a) => a.level === "critical" && a.action === "pause")) {
     const r = await invoke(state, "guardian", C.openWindow, "pause", [sv.address(keypair(state, "guardian").publicKey())]);
     console.log(`  ACTION   guardian paused new entries in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
     done.push("pause");
   }
-  const keys = alerts.filter((a) => a.action === "extend" && a.key).map((a) => a.key);
-  if (keys.length) {
-    const r = await extendTtl(state, "guardian", keys, 2_419_200); // about 140 days
-    console.log(`  ACTION   extended ${keys.length} entries to about 140 days in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+  const extend = alerts.filter((a) => a.action === "extend" && a.key);
+  const small = extend.filter((a) => a.kind !== "code").map((a) => a.key);
+  if (small.length) {
+    const r = await extendTtl(state, "operator", small, 2_419_200); // about 140 days
+    console.log(`  ACTION   extended ${small.length} entries to about 140 days in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
     done.push("extend");
+  }
+  // The code entry is large: extend it by 30 days at most per transaction, so
+  // its rent stays well under the largest fee a transaction may carry.
+  for (const a of extend.filter((x) => x.kind === "code")) {
+    const target = Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120);
+    const r = await extendTtl(state, "operator", [a.key], Math.floor(target * 17_280));
+    const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
+    console.log(`  ACTION   extended the contract code to about ${target.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
+    done.push("extend code");
   }
   return done;
 }
@@ -289,11 +352,15 @@ async function rehearse() {
   }
 
   if (runStep(3)) {
-    console.log("\n3. Privileged change (Elev.2): the governor re-sets the guardian");
-    await invoke(state, "governor", C.openWindow, "set_guardian", [sv.address(pub("guardian"))]);
+    console.log("\n3. Privileged change (Elev.2): the governor proposes a new guardian, which waits for the time delay");
+    await invoke(state, "governor", C.openWindow, "set_guardian", [sv.address(pub("operator"))]);
     const { alerts } = await pass(monitor);
-    const fired = alerts.some((a) => a.detector === "privileged" && /guardian_changed/.test(a.message));
-    record("privileged", "Elev.2", "set_guardian by the governor", fired, "second signer verifies (manual)", true);
+    const fired = alerts.some((a) => a.detector === "privileged" && /guardian_change_proposed/.test(a.message));
+    // The current guardian vetoes its own replacement inside the window.
+    await invoke(state, "guardian", C.openWindow, "cancel_guardian_change", [sv.address(pub("guardian"))]);
+    const left = await read(state, C.openWindow, "pending_guardian_change");
+    const guardian = await read(state, C.openWindow, "guardian");
+    record("privileged", "Elev.2", "governor proposes a new guardian", fired, "current guardian cancelled it", !left && guardian === pub("guardian"));
   }
 
   if (runStep(4)) {
@@ -305,9 +372,16 @@ async function rehearse() {
     await invoke(state, "steward", C.openWindow, "set_fund_limits", [fund, sv.u32(config.haircut_bps), sv.i128(tight), sv.i128(tight)]);
     const { alerts } = await pass(monitor);
     const fired = alerts.some((a) => a.detector === "exposure" && /fund outstanding/.test(a.message));
-    await invoke(state, "steward", C.openWindow, "set_fund_limits", [fund, sv.u32(config.haircut_bps), sv.i128(config.max_principal_per_repo), sv.i128(config.max_outstanding)]);
+    // Lowering a cap is immediate; raising it back is a loosening, so it
+    // waits for the time delay before anyone may apply it.
+    await invoke(state, "steward", C.openWindow, "set_fund_limits", [fund, sv.u32(FUND_SETTINGS.haircutBps), sv.i128(FUND_SETTINGS.maxPrincipalPerRepo), sv.i128(FUND_SETTINGS.maxOutstanding)]);
+    const pending = await read(state, C.openWindow, "pending_fund_limits_change", [fund]);
+    const wait = pending ? Number(pending.eta) - (await ledgerTime()) : 0;
+    console.log(`  restoring the caps is a loosening: it applies after the delay (${wait} s)`);
+    while (pending && (await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
+    if (pending) await invoke(state, "operator", C.openWindow, "apply_fund_limits_change", [fund]);
     const after = await clean();
-    record("exposure", "DoS.1", "fund cap lowered to 90 % utilisation", fired, "limits reviewed and restored", !after.some((a) => a.detector === "exposure"));
+    record("exposure", "DoS.1", "fund cap lowered to 90 % utilisation", fired, `caps restored through the ${wait} s delay`, !after.some((a) => a.detector === "exposure"));
   }
 
   if (runStep(5)) {
@@ -326,16 +400,60 @@ async function rehearse() {
     LIMITS.ttlDays = 130;
     const { s, alerts } = await pass(monitor);
     const fired = firedBy(alerts, "ttl");
-    const done = await act(alerts, s);
+    // The forced threshold would also flag the code entry; its rent is real
+    // money, so the drill extends the small entries and leaves the code to
+    // its normal 14-day rule.
+    const done = await act(alerts.filter((x) => x.kind !== "code"), s);
     const after = await clean();
     LIMITS.ttlDays = saved;
-    record("ttl", "DoS.2", "threshold forced to 130 days", fired, done.join(", ") || "none", !firedBy(after, "ttl"));
+    record("ttl", "DoS.2", "threshold forced to 130 days", fired, done.join(", ") || "none", !after.some((x) => x.detector === "ttl" && x.kind !== "code"));
   }
 
   if (runStep(7)) {
     console.log("\n7. Events (Repud.1): no real trigger exists; the contract emits an event on every repo");
     const { alerts } = await pass(monitor);
     record("events", "Repud.1", "none possible: checked that every recent repo has its event", false, "none", !firedBy(alerts, "events"));
+  }
+
+  if (runStep(8)) {
+    console.log("\n8. Key compromise drill (Elev.2): the governor keys propose an unannounced upgrade");
+    // The hash of another contract's code stands for a hostile WASM: it is never executed.
+    const hostile = crypto.createHash("sha256").update(fs.readFileSync(path.join(WASM_DIR, "fund_token.wasm"))).digest();
+    const proposed = await invoke(state, "governor", C.openWindow, "propose_upgrade", [sv.bytes(hostile)]);
+    const proposedAt = Date.now();
+    const pending = await read(state, C.openWindow, "pending_upgrade");
+    const early = await probe(state, "governor", C.openWindow, "upgrade", [sv.bytes(hostile)]);
+    console.log(`  upgrade before the delay: ${early ? early.name : "accepted"}`);
+    const { s, alerts } = await pass(monitor);
+    const fired = alerts.some((a) => a.detector === "privileged" && a.level === "critical" && /upgrade_proposed/.test(a.message));
+    const done = await act(alerts, s);
+    const reacted = (Date.now() - proposedAt) / 1000;
+    const after = await read(state, C.openWindow, "pending_upgrade");
+    const window = Number(pending.eta) - (await ledgerTime());
+    console.log(`  proposal ${explorer(proposed.hash)}; cancelled ${reacted.toFixed(0)} s after it, ${window} s before it could apply`);
+    record("privileged", "Elev.2", "unannounced upgrade proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, ${window} s of the delay left`, !after && early?.name === "TimelockPending");
+  }
+
+  if (runStep(9)) {
+    console.log("\n9. Issuer freeze during a repo (DoS.5, decision S9): repurchase settles, the shares wait");
+    const borrower = pub("borrower");
+    const opened = await invoke(state, "borrower", C.openWindow, "open_repo", [
+      sv.address(borrower), sv.u64(state.ids.marketOffer), fund, sv.i128(100n * ONE), sv.i128(50n * ONE), sv.u64(3600),
+    ]);
+    const repoId = Number(opened.value);
+    await invoke(state, "steward", C.shares, "set_frozen", [sv.address(C.openWindow), sv.bool(true)]);
+    const repaid = await invoke(state, "borrower", C.openWindow, "repurchase", [sv.u64(repoId)]);
+    console.log(`  repo #${repoId} repaid while the contract is frozen: ${explorer(repaid.hash)}`);
+    // While the token refuses, release returns false and keeps the record (and its TTL).
+    const delivered = await read(state, C.openWindow, "release", [sv.u64(repoId)], "operator");
+    const { s, alerts } = await pass(monitor);
+    const fired = alerts.some((a) => a.detector === "reconciliation" && /held back/.test(a.message));
+    const balanced = !alerts.some((a) => /units apart/.test(a.message));
+    await invoke(state, "steward", C.shares, "set_frozen", [sv.address(C.openWindow), sv.bool(false)]);
+    const released = await invoke(state, "operator", C.openWindow, "release", [sv.u64(repoId)]);
+    console.log(`  release while frozen: ${delivered ? "delivered" : "refused by the token, record kept"}; after the issuer lifts the freeze: ${explorer(released.hash)}, delivered ${released.value}`);
+    const after = await clean();
+    record("reconciliation", "DoS.5", "issuer freezes the contract, borrower repays", fired && balanced && delivered === false && released.value === true, "issuer lifts the freeze, anyone releases", !firedBy(after, "reconciliation"));
   }
 
   saveMonitor(monitor);
@@ -349,6 +467,14 @@ async function rehearse() {
 async function main() {
   if (REHEARSE) return rehearse();
   const monitor = loadMonitor();
+  // An upgrade announced in advance is reported as a warning, not cancelled.
+  const announce = args.find((a) => a.startsWith("--announce="))?.slice(11);
+  if (announce) {
+    monitor.announced = [...new Set([...(monitor.announced ?? []), announce.toLowerCase()])];
+    saveMonitor(monitor);
+    console.log(`Upgrade ${announce} recorded as announced.`);
+    return;
+  }
   for (;;) {
     const { s, alerts } = await pass(monitor);
     if (ACT) await act(alerts, s);
