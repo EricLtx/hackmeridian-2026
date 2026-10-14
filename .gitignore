@@ -17,3 +17,7 @@ target
 # Demo runner: dependencies and testnet state (keys, addresses), local only
 /demo/node_modules/
 /demo/.state/
+
+# Web interface: dependencies and build output
+/web/node_modules/
+/web/dist/

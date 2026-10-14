@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Borrow stablecoins against tokenized fund shares at any hour, on Stellar testnet." />
+    <title>Open Window</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="top">
+      <div class="wrap top-inner">
+        <a class="brand" href="#main" aria-label="Open Window, home">
+          <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M12 3v18M3 12h9" stroke="currentColor" stroke-width="2" />
+            <path d="M14.5 9.5 18 6m0 0h-3m3 0v3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" />
+          </svg>
+          <span>Open Window</span>
+        </a>
+        <span class="pill pill-net" id="network">Testnet</span>
+        <nav class="nav" aria-label="Sections">
+          <a href="#board">Market</a>
+          <a href="#borrow">Borrow</a>
+          <a href="#positions">Positions</a>
+          <a href="#lend">Lend</a>
+        </nav>
+        <div class="wallet-chip" id="wallet-chip">
+          <button type="button" class="btn btn-primary" id="connect">Connect Freighter</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="wrap">
+      <section class="intro">
+        <h1>Borrow against fund shares, at any hour.</h1>
+        <p>
+          Lock tokenized money market fund shares, receive stablecoins in one transaction, and buy the shares back when
+          you are done. Interest runs per started hour. Testnet only: nothing here has real value.
+        </p>
+      </section>
+
+      <div class="notice" id="load-error" role="alert" hidden></div>
+
+      <!-- 1. Market board: no wallet needed -->
+      <section class="card" id="board" aria-labelledby="board-title">
+        <div class="card-head">
+          <h2 id="board-title">Market</h2>
+          <div class="head-meta">
+            <span id="board-status" class="pill">Loading…</span>
+            <span class="muted small" id="board-updated" aria-live="polite"></span>
+            <button type="button" class="btn btn-ghost btn-small" id="refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="tiles" id="tiles" aria-live="off"></div>
+
+        <form class="quote" id="quote-form" novalidate>
+          <div class="field">
+            <label for="quote-shares">Shares to value</label>
+            <div class="input-unit">
+              <input id="quote-shares" name="shares" inputmode="decimal" autocomplete="off" value="1000" aria-describedby="quote-help" />
+              <span class="unit" data-fund-symbol>tMMF</span>
+            </div>
+          </div>
+          <p class="quote-out" id="quote-out" aria-live="polite"></p>
+          <p class="muted small" id="quote-help">The most you can borrow against these shares right now, after the haircut.</p>
+        </form>
+
+        <h3 class="sub">Offers</h3>
+        <div id="offers"></div>
+      </section>
+
+      <!-- 2. Wallet and onboarding -->
+      <section class="card" id="wallet" aria-labelledby="wallet-title">
+        <div class="card-head"><h2 id="wallet-title">Your wallet</h2></div>
+        <div id="wallet-body"></div>
+        <div class="tx" id="wallet-tx" role="status" aria-live="polite"></div>
+      </section>
+
+      <!-- 4. Borrow -->
+      <section class="card" id="borrow" aria-labelledby="borrow-title">
+        <div class="card-head"><h2 id="borrow-title">Borrow</h2></div>
+        <p class="muted" id="borrow-gate"></p>
+        <form id="borrow-form" class="split" novalidate hidden>
+          <div class="fields">
+            <div class="field">
+              <label for="b-shares">Shares to lock</label>
+              <div class="input-unit">
+                <input id="b-shares" inputmode="decimal" autocomplete="off" aria-describedby="b-shares-help" />
+                <span class="unit" data-fund-symbol>tMMF</span>
+              </div>
+              <p class="help" id="b-shares-help"></p>
+            </div>
+            <div class="field">
+              <label for="b-offer">Offer</label>
+              <select id="b-offer" aria-describedby="b-offer-help"></select>
+              <p class="help" id="b-offer-help">The fund issuer's own offer comes first, then the cheapest.</p>
+            </div>
+            <div class="field">
+              <label for="b-principal">Amount to borrow</label>
+              <div class="input-unit">
+                <input id="b-principal" inputmode="decimal" autocomplete="off" aria-describedby="b-principal-help" />
+                <span class="unit" data-stable-code>tEUR</span>
+              </div>
+              <p class="help" id="b-principal-help"></p>
+            </div>
+            <div class="field">
+              <label for="b-term">Term, in hours</label>
+              <div class="input-unit">
+                <input id="b-term" type="number" min="1" step="1" value="64" inputmode="numeric" aria-describedby="b-term-help" />
+                <span class="unit">hours</span>
+              </div>
+              <div class="chips" role="group" aria-label="Term presets">
+                <button type="button" class="chip" data-term="1">1 hour</button>
+                <button type="button" class="chip" data-term="24">1 day</button>
+                <button type="button" class="chip" data-term="64">Weekend, 64 h</button>
+                <button type="button" class="chip" data-term="max">Longest</button>
+              </div>
+              <p class="help" id="b-term-help"></p>
+            </div>
+          </div>
+          <aside class="preview" aria-labelledby="preview-title">
+            <h3 id="preview-title" class="sub">What it costs</h3>
+            <dl id="b-preview"></dl>
+            <p class="muted small">
+              Interest runs at the offer's rate for every started hour until you repurchase, with a minimum of one hour.
+              Repay early and you pay less. After the term, the lender may keep your shares.
+            </p>
+            <button type="submit" class="btn btn-primary btn-block" id="b-submit" data-write data-blocked="1">Borrow</button>
+            <div class="tx" id="borrow-tx" role="status" aria-live="polite"></div>
+          </aside>
+        </form>
+      </section>
+
+      <!-- 5. Positions -->
+      <section class="card" id="positions" aria-labelledby="positions-title">
+        <div class="card-head">
+          <h2 id="positions-title">Your positions</h2>
+          <span class="muted small" id="positions-meta"></span>
+        </div>
+        <div id="positions-body"></div>
+        <div class="tx" id="positions-tx" role="status" aria-live="polite"></div>
+      </section>
+
+      <!-- 6. Lend -->
+      <section class="card" id="lend" aria-labelledby="lend-title">
+        <div class="card-head"><h2 id="lend-title">Lend</h2></div>
+        <div id="lend-gate"></div>
+        <form id="lend-form" class="lend-form" novalidate hidden>
+          <div class="field">
+            <label for="l-amount">Amount to lend</label>
+            <div class="input-unit">
+              <input id="l-amount" inputmode="decimal" autocomplete="off" value="1000" aria-describedby="l-amount-help" />
+              <span class="unit" data-stable-code>tEUR</span>
+            </div>
+            <p class="help" id="l-amount-help"></p>
+          </div>
+          <div class="field">
+            <label for="l-rate">Annual rate</label>
+            <div class="input-unit">
+              <input id="l-rate" inputmode="decimal" autocomplete="off" value="3.00" aria-describedby="l-rate-help" />
+              <span class="unit">%</span>
+            </div>
+            <p class="help" id="l-rate-help">Up to two decimals. Charged per started hour.</p>
+          </div>
+          <div class="field">
+            <label for="l-term">Longest term</label>
+            <div class="input-unit">
+              <input id="l-term" type="number" min="1" step="1" value="168" inputmode="numeric" aria-describedby="l-term-help" />
+              <span class="unit">hours</span>
+            </div>
+            <p class="help" id="l-term-help"></p>
+          </div>
+          <div class="field field-submit">
+            <button type="submit" class="btn btn-primary" id="l-submit" data-write>Create offer</button>
+          </div>
+        </form>
+        <div class="tx" id="lend-tx" role="status" aria-live="polite"></div>
+        <div id="my-offers"></div>
+      </section>
+    </main>
+
+    <footer class="wrap foot">
+      <p class="muted small" id="foot"></p>
+    </footer>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
