@@ -65,6 +65,7 @@ const PRIVILEGED = new Set([
   "stablecoin_set", "stablecoin_removed", "currency_cap_set", "max_term_changed", "fund_limits_set",
   "lender_approval", "fund_frozen", "sponsor_set", "timelock_delay_changed", "fund_change_cancelled",
   "fallback_set", "fallback_cancelled", "fallback_removed", "upgrade_cancelled", "upgraded",
+  "reanchored", "reanchor_cancelled", "admin_proposal_cancelled", "release_redirected",
 ]);
 /** Proposals that take effect after the time delay: the window to verify and cancel (Elev.2). */
 const PROPOSALS = /_proposed$|_change_proposed$/;
@@ -193,6 +194,15 @@ const DETECTORS = {
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
       .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
+    // The one change the guardian cannot veto: 30 days to react, from now.
+    for (const e of s.events.filter((ev) => ev.name === "guardian_change_forced")) {
+      out.push({
+        level: "critical",
+        message: `forced guardian change at ledger ${e.ledger}: the governor alone replaces the guardian at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(0, 16) : "?"} UTC`,
+        action: "verify with the governor's signers; if unexpected, treat as a key compromise",
+        tx: e.txHash,
+      });
+    }
     for (const e of s.events.filter((ev) => PROPOSALS.test(ev.name))) {
       const isUpgrade = e.name === "upgrade_proposed";
       const hash = isUpgrade ? hex(e.data?.wasm_hash) : null;
