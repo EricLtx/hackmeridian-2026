@@ -16,7 +16,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, ContractEvents, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    vec, Address, BytesN, Env, Event as _, IntoVal, Symbol,
+    vec, Address, BytesN, Env, Event as _, IntoVal, Symbol, Val,
 };
 
 // ---------------------------------------------------------------------------
@@ -192,14 +192,32 @@ fn fund_config(f: &Fixture) -> FundConfig {
     }
 }
 
-/// Fund admitted, EURC registered with a cap, lender approved, balances
-/// minted, one offer of 100,000 EURC at 3 %.
+/// Hash of a lender's off-chain declaration, as the lender and the steward
+/// sign it.
+fn declaration(env: &Env, byte: u8) -> BytesN<32> {
+    BytesN::from_array(env, &[byte; 32])
+}
+
+/// Attests then approves `lender` for `fund`: from version 4 an approval
+/// needs the attestation the lender and the steward signed.
+fn admit_lender(client: &OpenWindowClient, env: &Env, fund: &Address, lender: &Address) {
+    client.attest_lender(fund, lender, &declaration(env, 0xA7));
+    client.approve_lender(fund, lender, &true);
+}
+
+/// Fund admitted, EURC registered with a cap, lender attested and approved,
+/// balances minted, one offer of 100,000 EURC at 3 %.
 fn ready() -> (Fixture, u64) {
-    let f = bare();
+    ready_from(bare())
+}
+
+/// `ready` on a fixture prepared beforehand, for instance in sole-lender
+/// mode.
+fn ready_from(f: Fixture) -> (Fixture, u64) {
     f.client.set_stablecoin(&f.eurc, &eur(&f.env));
     f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
     f.client.set_fund(&f.shares, &fund_config(&f));
-    f.client.approve_lender(&f.shares, &f.lender, &true);
+    admit_lender(&f.client, &f.env, &f.shares, &f.lender);
     mint(&f.env, &f.eurc, &f.lender, 1_000_000 * ONE);
     mint(&f.env, &f.eurc, &f.borrower, 100_000 * ONE);
     mint(&f.env, &f.shares, &f.borrower, 1_000_000 * ONE);
@@ -297,7 +315,7 @@ fn constructor_sets_roles_and_defaults() {
     let f = bare();
     assert_eq!(f.client.admin(), f.governor);
     assert_eq!(f.client.guardian(), f.governor);
-    assert_eq!(f.client.version(), 3);
+    assert_eq!(f.client.version(), 4);
     assert_eq!(f.client.timelock_delay(), DEFAULT_TIMELOCK_SECS);
     assert_eq!(f.client.pending_upgrade(), None);
     assert_eq!(f.client.max_term(), DEFAULT_MAX_TERM_SECS);
@@ -1100,6 +1118,18 @@ fn a_fresh_but_invalid_fallback_fails_closed() {
     assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).price, NAV_EUR);
 }
 
+/// A backup feed whose call fails is ignored by a real opening too, not only
+/// by a quote: the repo opens on the fresh primary. A callee that exhausts
+/// the CPU budget is not caught this way (`try_` calls do not catch budget
+/// exhaustion): the whole transaction fails, a documented host limitation.
+#[test]
+fn a_reverting_fallback_does_not_block_an_opening() {
+    let (f, offer_id, feed) = ready_with_fallback();
+    feed.set_broken(&true);
+    let repo_id = open(&f, offer_id);
+    assert_eq!(f.client.get_repo(&repo_id).unwrap().principal, 10_000 * ONE);
+}
+
 /// Review finding L6: the fallback entry is read by operations that never
 /// write it; reading it to price the fund extends its TTL.
 #[test]
@@ -1576,7 +1606,7 @@ fn open_with_a_removed_stablecoin_is_refused() {
 #[test]
 fn cross_currency_repo_opens_and_closes() {
     let (f, _) = cross_fund();
-    f.client.approve_lender(&f.shares, &f.lender, &true);
+    admit_lender(&f.client, &f.env, &f.shares, &f.lender);
     mint(&f.env, &f.eurc, &f.lender, 100_000 * ONE);
     mint(&f.env, &f.shares, &f.borrower, 10_000 * ONE);
     mint(&f.env, &f.eurc, &f.borrower, 100 * ONE);
@@ -2852,12 +2882,14 @@ fn currency_cap_increase_is_cancelled_by_the_right_roles_or_a_decrease() {
     );
 }
 
-/// Review finding M2: the current guardian can always hand its role over.
+/// Review finding M2: the current guardian can always hand its role over,
+/// at once, to the backup it registered with the governor (I13).
 #[test]
 fn guardian_hands_over_its_role_at_once() {
     let (f, _) = ready();
     let guardian = appoint_guardian(&f);
     let successor = Address::generate(&f.env);
+    f.client.set_guardian_backup(&successor);
     let intruder = Address::generate(&f.env);
     f.env.mock_auths(&[MockAuth {
         address: &intruder,
@@ -3005,6 +3037,8 @@ fn governor_handover_drops_the_governors_proposals() {
     f.client.set_fund(&f.shares, &replacement(&f));
     let successor = Address::generate(&f.env);
     f.client.set_admin(&successor);
+    // After the first admission the handover waits for the delay (I12).
+    advance(&f, DEFAULT_TIMELOCK_SECS);
     f.client.accept_admin();
     let by = successor.clone();
     assert_eq!(
@@ -3984,7 +4018,7 @@ fn many_repos_keep_a_constant_footprint_per_operation() {
     const REPOS: usize = 200;
     let (f, first_offer) = ready();
     let second_lender = Address::generate(&f.env);
-    f.client.approve_lender(&f.shares, &second_lender, &true);
+    admit_lender(&f.client, &f.env, &f.shares, &second_lender);
     mint(&f.env, &f.eurc, &second_lender, 1_000_000 * ONE);
     let mut offers = std::vec![first_offer];
     for (lender, rate_bps) in [
@@ -4248,7 +4282,7 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
 
     // From here on, every call runs the uploaded WASM in the VM.
     assert_eq!(snapshot(&f, &offers, &repos), before);
-    assert_eq!(f.client.version(), 3);
+    assert_eq!(f.client.version(), 4);
     assert_eq!(f.client.pending_upgrade(), None);
     check_invariants(&f, &offers, &repos);
 
@@ -4451,7 +4485,7 @@ mod integration {
                 max_outstanding: 5_000_000 * ONE,
             },
         );
-        client.approve_lender(&shares, &lender, &true);
+        admit_lender(&client, &env, &shares, &lender);
         mint(&env, &eurc, &lender, 100_000 * ONE);
         mint(&env, &eurc, &borrower, 1_000 * ONE);
         let offer_id = client.create_offer(
@@ -4823,10 +4857,29 @@ mod integration {
             f.client.try_redirect_release(&repo_id, &other),
             Err(Ok(Error::LenderNotApproved))
         );
-        f.client.approve_lender(&f.shares, &other, &true);
+        admit_lender(&f.client, &f.env, &f.shares, &other);
         f.client.redirect_release(&repo_id, &other);
         assert_eq!(f.env.auths()[0].0, f.lender);
         assert_released(&live, repo_id, &other, 0);
+    }
+
+    /// Storage: redirecting seized shares reads the new recipient's
+    /// approval and extends it.
+    #[test]
+    fn redirecting_seized_shares_extends_the_approval_it_reads() {
+        let live = live(true);
+        let f = &live.f;
+        let repo_id = open_live(&live, 2 * HOUR);
+        advance(f, 2 * HOUR);
+        live.token.set_whitelisted(&f.lender, &false);
+        f.client.seize(&repo_id, &f.lender);
+        let other = Address::generate(&f.env);
+        admit_lender(&f.client, &f.env, &f.shares, &other);
+        let key = DataKey::Lender(f.shares.clone(), other.clone());
+        age_ledgers(f);
+        assert!(entry_ttl(f, &key) < BUMP_THRESHOLD_LEDGERS);
+        f.client.redirect_release(&repo_id, &other);
+        assert_eq!(entry_ttl(f, &key), BUMP_TO_LEDGERS);
     }
 
     #[test]
@@ -4898,4 +4951,725 @@ fn asset_contract_deauthorizing_the_contract_defers_the_release() {
         balance(&f.env, &f.shares, &f.borrower),
         shares_before + 10_000 * ONE
     );
+}
+
+// ---------------------------------------------------------------------------
+// Version 4: lenders independent of the fund (MMF Regulation, Art. 35)
+// ---------------------------------------------------------------------------
+
+/// Mocks the signatures of `signers` only, for one call of `fn_name`.
+fn sign_only(f: &Fixture, signers: &[&Address], fn_name: &str, args: soroban_sdk::Vec<Val>) {
+    let invoke = MockAuthInvoke {
+        contract: &f.contract_id,
+        fn_name,
+        args,
+        sub_invokes: &[],
+    };
+    let mocks: std::vec::Vec<MockAuth> = signers
+        .iter()
+        .map(|address| MockAuth {
+            address,
+            invoke: &invoke,
+        })
+        .collect();
+    f.env.mock_auths(&mocks);
+}
+
+/// The addresses whose authorization the last invocation required.
+fn signers(f: &Fixture) -> std::vec::Vec<Address> {
+    f.env
+        .auths()
+        .into_iter()
+        .map(|(address, _)| address)
+        .collect()
+}
+
+#[test]
+fn steward_cannot_attest_or_approve_itself() {
+    let (f, _) = ready();
+    assert_eq!(
+        f.client
+            .try_attest_lender(&f.shares, &f.steward, &declaration(&f.env, 1)),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    assert_eq!(
+        f.client.try_approve_lender(&f.shares, &f.steward, &true),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    assert!(!f.client.is_lender_approved(&f.shares, &f.steward));
+    // The steward on record is checked too, whatever the configuration says.
+    let recorded = Address::generate(&f.env);
+    f.env.as_contract(&f.contract_id, || {
+        f.env
+            .storage()
+            .persistent()
+            .set(&DataKey::LastSteward(f.shares.clone()), &recorded)
+    });
+    assert_eq!(
+        f.client.try_approve_lender(&f.shares, &recorded, &true),
+        Err(Ok(Error::StewardCannotLend))
+    );
+}
+
+#[test]
+fn a_steward_cannot_lend_on_any_fund_an_offer_lists() {
+    let (f, _) = ready();
+    // A second fund whose steward is the lender of the first.
+    let other_fund = new_token(&f.env);
+    f.oracle
+        .set_price(&Asset::Stellar(other_fund.clone()), &NAV_EUR, &T0);
+    let mut config = fund_config(&f);
+    config.oracle_asset = Asset::Stellar(other_fund.clone());
+    config.steward = f.lender.clone();
+    f.client.set_fund(&other_fund, &config);
+    assert_eq!(
+        f.client.try_create_offer(
+            &f.lender,
+            &f.eurc,
+            &ONE,
+            &RATE_BPS,
+            &DAY,
+            &vec![&f.env, f.shares.clone(), other_fund.clone()]
+        ),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    // An approval granted before version 4 does not let a steward through.
+    f.env.as_contract(&f.contract_id, || {
+        f.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Lender(f.shares.clone(), f.steward.clone()), &true)
+    });
+    mint(&f.env, &f.eurc, &f.steward, ONE);
+    assert_eq!(
+        f.client.try_create_offer(
+            &f.steward,
+            &f.eurc,
+            &ONE,
+            &RATE_BPS,
+            &DAY,
+            &vec![&f.env, f.shares.clone()]
+        ),
+        Err(Ok(Error::StewardCannotLend))
+    );
+}
+
+/// The other way round: an approved lender can become the steward neither
+/// by a replacement nor by a recovery, even one approved during the thirty
+/// days of the recovery.
+#[test]
+fn an_approved_lender_cannot_become_the_steward() {
+    let (f, _) = ready();
+    let mut config = replacement(&f);
+    config.steward = f.lender.clone();
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    assert_eq!(
+        f.client.try_propose_steward_recovery(&f.shares, &f.lender),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    let candidate = Address::generate(&f.env);
+    f.client.propose_steward_recovery(&f.shares, &candidate);
+    admit_lender(&f.client, &f.env, &f.shares, &candidate);
+    advance(&f, MAX_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_steward_recovery(&f.shares),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, f.steward);
+    let unknown = new_token(&f.env);
+    assert_eq!(
+        f.client.try_propose_steward_recovery(&unknown, &candidate),
+        Err(Ok(Error::FundNotAccepted))
+    );
+}
+
+#[test]
+fn sole_lender_is_chosen_once_before_anything_is_at_stake() {
+    let f = bare();
+    let intruder = Address::generate(&f.env);
+    sign_only(
+        &f,
+        &[&intruder],
+        "set_sole_lender",
+        (f.lender.clone(),).into_val(&f.env),
+    );
+    assert!(f.client.try_set_sole_lender(&f.lender).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.sole_lender(), None);
+    f.client.set_sole_lender(&f.lender);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        own_events(&f),
+        std::vec![SoleLenderSet {
+            lender: f.lender.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.sole_lender(), Some(f.lender.clone()));
+    assert_eq!(
+        f.client.try_set_sole_lender(&f.borrower),
+        Err(Ok(Error::SoleLenderFixed))
+    );
+
+    // Once a fund is admitted, a multi-lender instance stays one.
+    let (g, _) = ready();
+    assert_eq!(
+        g.client.try_set_sole_lender(&g.lender),
+        Err(Ok(Error::SoleLenderFixed))
+    );
+    assert_eq!(g.client.sole_lender(), None);
+}
+
+#[test]
+fn a_second_lender_is_refused_in_sole_lender_mode() {
+    let f = bare();
+    f.client.set_sole_lender(&f.lender);
+    let (f, offer_id) = ready_from(f);
+    // The steward may still approve another address, as a recipient of
+    // seized shares for instance; it cannot lend.
+    let second = Address::generate(&f.env);
+    admit_lender(&f.client, &f.env, &f.shares, &second);
+    mint(&f.env, &f.eurc, &second, 1_000 * ONE);
+    assert_eq!(
+        f.client.try_create_offer(
+            &second,
+            &f.eurc,
+            &(1_000 * ONE),
+            &RATE_BPS,
+            &(7 * DAY),
+            &vec![&f.env, f.shares.clone()]
+        ),
+        Err(Ok(Error::NotSoleLender))
+    );
+    let repo_id = open(&f, offer_id);
+    assert_eq!(f.client.get_repo(&repo_id).unwrap().lender, f.lender);
+}
+
+/// The mode lives in instance storage, which every call loads: an offer
+/// touches the same ledger entries with or without it.
+#[test]
+fn sole_lender_mode_leaves_the_offer_footprint_unchanged() {
+    let measure = |f: &Fixture| {
+        f.client.create_offer(
+            &f.lender,
+            &f.eurc,
+            &(1_000 * ONE),
+            &RATE_BPS,
+            &(7 * DAY),
+            &vec![&f.env, f.shares.clone()],
+        );
+        footprint(&f.env)
+    };
+    let (open_instance, _) = ready();
+    let sole = bare();
+    sole.client.set_sole_lender(&sole.lender);
+    let (sole, _) = ready_from(sole);
+    let (without, with) = (measure(&open_instance), measure(&sole));
+    assert_eq!((without.0, without.1), (with.0, with.1));
+    std::println!(
+        "create_offer footprint: {} entries read, {} written, with or without a sole lender",
+        with.0,
+        with.1
+    );
+}
+
+#[test]
+fn approval_needs_an_attestation_signed_by_the_lender_and_the_steward() {
+    let f = bare();
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    assert_eq!(
+        f.client.try_approve_lender(&f.shares, &f.lender, &true),
+        Err(Ok(Error::AttestationMissing))
+    );
+    let hash = declaration(&f.env, 0x42);
+    let args: soroban_sdk::Vec<Val> =
+        (f.shares.clone(), f.lender.clone(), hash.clone()).into_val(&f.env);
+    for signer in [&f.lender, &f.steward] {
+        sign_only(&f, &[signer], "attest_lender", args.clone());
+        assert!(f
+            .client
+            .try_attest_lender(&f.shares, &f.lender, &hash)
+            .is_err());
+    }
+    f.env.mock_all_auths();
+    assert_eq!(f.client.lender_attestation(&f.shares, &f.lender), None);
+    f.client.attest_lender(&f.shares, &f.lender, &hash);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.steward) && signed.contains(&f.lender));
+    assert_eq!(
+        own_events(&f),
+        std::vec![LenderAttested {
+            fund: f.shares.clone(),
+            lender: f.lender.clone(),
+            declaration: hash.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.lender_attestation(&f.shares, &f.lender),
+        Some(LenderAttestation {
+            declaration: hash.clone(),
+            at: T0
+        })
+    );
+    f.client.approve_lender(&f.shares, &f.lender, &true);
+    assert_eq!(
+        own_events(&f),
+        std::vec![LenderApproval {
+            fund: f.shares.clone(),
+            lender: f.lender.clone(),
+            approved: true
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    // Revoking keeps the trail; a later approval needs no new attestation,
+    // and reading the attestation then extends it.
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    assert!(!f.client.is_lender_approved(&f.shares, &f.lender));
+    assert!(f.client.lender_attestation(&f.shares, &f.lender).is_some());
+    let key = DataKey::LenderAttestation(f.shares.clone(), f.lender.clone());
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    f.client.approve_lender(&f.shares, &f.lender, &true);
+    assert!(f.client.is_lender_approved(&f.shares, &f.lender));
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Version 4: custody gaps I12 (governor), I13 (guardian), I14 (steward)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn governor_handover_waits_for_the_delay_after_the_first_admission() {
+    let (f, _) = ready();
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            AdminProposed {
+                current: f.governor.clone(),
+                proposed: successor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            AdminChangeProposed {
+                admin: successor.clone(),
+                eta
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(
+        f.client.pending_admin(),
+        Some(PendingAdminChange {
+            admin: successor.clone(),
+            eta
+        })
+    );
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::TimelockPending)));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.accept_admin();
+    assert_eq!(f.env.auths()[0].0, successor);
+    assert_eq!(f.client.admin(), successor);
+    assert_eq!(f.client.pending_admin(), None);
+}
+
+#[test]
+fn governor_handover_is_immediate_before_the_first_admission_and_expires() {
+    let f = bare();
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    assert_eq!(
+        f.client.pending_admin(),
+        Some(PendingAdminChange {
+            admin: successor.clone(),
+            eta: T0
+        })
+    );
+    advance(&f, PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_admin(), None);
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::ProposalExpired)));
+    f.client.set_admin(&successor);
+    f.client.accept_admin();
+    assert_eq!(f.client.admin(), successor);
+}
+
+/// Custody gap I12: a thief holding the governor quorum proposes itself;
+/// the guardian vetoes within the window, as often as needed.
+#[test]
+fn stolen_governor_quorum_cannot_install_a_governor_inside_one_window() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let thief = Address::generate(&f.env);
+    f.client.set_admin(&thief);
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_veto_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    sign_only(
+        &f,
+        &[&intruder],
+        "veto_admin",
+        (guardian.clone(),).into_val(&f.env),
+    );
+    assert!(f.client.try_veto_admin(&guardian).is_err());
+    f.env.mock_all_auths();
+    f.client.veto_admin(&guardian);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(
+        own_events(&f),
+        std::vec![AdminProposalCancelled {
+            proposed: thief.clone(),
+            by: guardian.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::Unauthorized)));
+    assert_eq!(
+        f.client.try_veto_admin(&guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    // Proposing again restarts the window, and the guardian vetoes again.
+    f.client.set_admin(&thief);
+    advance(&f, DEFAULT_TIMELOCK_SECS - 1);
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::TimelockPending)));
+    f.client.veto_admin(&guardian);
+    advance(&f, 1);
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::Unauthorized)));
+    assert_eq!(f.client.admin(), f.governor);
+}
+
+/// A contract upgraded from version 3 may hold a handover in the old key:
+/// it was acceptable at once and stays so; any new proposal, cancellation
+/// or acceptance clears it.
+#[test]
+fn a_handover_proposed_before_version_4_is_honoured_and_cleared() {
+    let (f, _) = ready();
+    let successor = Address::generate(&f.env);
+    let set_legacy = |f: &Fixture, admin: &Address| {
+        f.env.as_contract(&f.contract_id, || {
+            f.env
+                .storage()
+                .instance()
+                .set(&DataKey::PendingAdmin, admin)
+        })
+    };
+    let has_legacy = |f: &Fixture| {
+        f.env.as_contract(&f.contract_id, || {
+            f.env.storage().instance().has(&DataKey::PendingAdmin)
+        })
+    };
+    set_legacy(&f, &successor);
+    advance(&f, DAY);
+    assert_eq!(
+        f.client.pending_admin(),
+        Some(PendingAdminChange {
+            admin: successor.clone(),
+            eta: T0 + DAY
+        })
+    );
+    f.client.set_admin(&Address::generate(&f.env));
+    assert!(!has_legacy(&f));
+    f.client.cancel_admin();
+    assert_eq!(f.client.pending_admin(), None);
+
+    set_legacy(&f, &successor);
+    f.client.accept_admin();
+    assert_eq!(f.env.auths()[0].0, successor);
+    assert_eq!(f.client.admin(), successor);
+    assert!(!has_legacy(&f));
+    assert_eq!(f.client.pending_admin(), None);
+}
+
+/// Custody gap I13: a thief holding the hot guardian key cannot hand the
+/// role to itself; the legitimate rotation goes to the registered backup.
+#[test]
+fn stolen_guardian_key_cannot_hand_over_to_a_fresh_address() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let thief = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_hand_over_guardian(&thief),
+        Err(Ok(raised(Error::NotGuardianBackup)))
+    );
+    let backup = Address::generate(&f.env);
+    f.client.set_guardian_backup(&backup);
+    assert_eq!(
+        f.client.try_hand_over_guardian(&thief),
+        Err(Ok(raised(Error::NotGuardianBackup)))
+    );
+    assert_eq!(f.client.guardian(), guardian);
+    f.client.hand_over_guardian(&backup);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(f.client.guardian(), backup);
+    // The backup is consumed: the new guardian registers its own.
+    assert_eq!(f.client.guardian_backup(), None);
+    assert_eq!(
+        f.client.try_hand_over_guardian(&thief),
+        Err(Ok(raised(Error::NotGuardianBackup)))
+    );
+}
+
+#[test]
+fn guardian_backup_needs_the_governor_and_the_guardian() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let backup = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (backup.clone(),).into_val(&f.env);
+    for signer in [&f.governor, &guardian] {
+        sign_only(&f, &[signer], "set_guardian_backup", args.clone());
+        assert!(f.client.try_set_guardian_backup(&backup).is_err());
+    }
+    assert_eq!(f.client.guardian_backup(), None);
+    sign_only(&f, &[&f.governor, &guardian], "set_guardian_backup", args);
+    f.client.set_guardian_backup(&backup);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.governor) && signed.contains(&guardian));
+    assert_eq!(
+        own_events(&f),
+        std::vec![GuardianBackupSet {
+            backup: backup.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.guardian_backup(), Some(backup));
+}
+
+/// While the governor holds the guardian role, handing it over gives its
+/// key nothing it did not have; any other way of installing a guardian drops
+/// the backup agreed with the one leaving.
+#[test]
+fn a_guardian_that_is_the_governor_hands_over_freely_and_a_new_guardian_drops_the_backup() {
+    let f = bare();
+    let first = Address::generate(&f.env);
+    f.client.hand_over_guardian(&first);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(f.client.guardian(), first);
+    let backup = Address::generate(&f.env);
+    f.client.set_guardian_backup(&backup);
+    let second = Address::generate(&f.env);
+    f.client.set_guardian(&second);
+    assert_eq!(f.client.guardian(), second);
+    assert_eq!(f.client.guardian_backup(), None);
+    assert_eq!(
+        f.client.try_hand_over_guardian(&backup),
+        Err(Ok(raised(Error::NotGuardianBackup)))
+    );
+}
+
+/// Custody gap I14: a lost steward key is replaced only after thirty days,
+/// only with the governor and the guardian; anyone applies it.
+#[test]
+fn lost_steward_key_is_replaced_after_thirty_days_by_the_governor_and_the_guardian() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let new_steward = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (f.shares.clone(), new_steward.clone()).into_val(&f.env);
+    for signer in [&f.governor, &guardian] {
+        sign_only(&f, &[signer], "propose_steward_recovery", args.clone());
+        assert!(f
+            .client
+            .try_propose_steward_recovery(&f.shares, &new_steward)
+            .is_err());
+    }
+    f.env.mock_all_auths();
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.governor) && signed.contains(&guardian));
+    let eta = f.env.ledger().timestamp() + MAX_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardRecoveryProposed {
+            fund: f.shares.clone(),
+            steward: new_steward.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_steward_recovery(&f.shares),
+        Some(PendingStewardRecovery {
+            steward: new_steward.clone(),
+            eta
+        })
+    );
+    advance(&f, MAX_TIMELOCK_SECS - 1);
+    assert_eq!(
+        f.client.try_apply_steward_recovery(&f.shares),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, 1);
+    f.env.set_auths(&[]);
+    f.client.apply_steward_recovery(&f.shares);
+    assert!(f.env.auths().is_empty());
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardRecovered {
+            fund: f.shares.clone(),
+            previous: f.steward.clone(),
+            steward: new_steward.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, new_steward);
+    assert_eq!(f.client.pending_steward_recovery(&f.shares), None);
+
+    // The new steward acts; the old key no longer does.
+    f.env.mock_all_auths();
+    let lender = Address::generate(&f.env);
+    f.client
+        .attest_lender(&f.shares, &lender, &declaration(&f.env, 3));
+    assert!(signers(&f).contains(&new_steward));
+    sign_only(
+        &f,
+        &[&f.steward],
+        "freeze_fund",
+        (f.shares.clone(), true).into_val(&f.env),
+    );
+    assert!(f.client.try_freeze_fund(&f.shares, &true).is_err());
+}
+
+#[test]
+fn steward_recovery_is_cancelled_by_the_steward_or_the_governor_not_the_guardian() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let new_steward = Address::generate(&f.env);
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_steward_recovery(&f.shares, &f.steward),
+        Err(Ok(Error::NotProposed))
+    );
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    for caller in [&guardian, &intruder, &new_steward] {
+        assert_eq!(
+            f.client.try_cancel_steward_recovery(&f.shares, caller),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+    f.client.cancel_steward_recovery(&f.shares, &f.steward);
+    assert_eq!(f.env.auths()[0].0, f.steward);
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardRecoveryCancelled {
+            fund: f.shares.clone(),
+            by: f.steward.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.pending_steward_recovery(&f.shares), None);
+
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    f.client.cancel_steward_recovery(&f.shares, &f.governor);
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardRecoveryCancelled {
+            fund: f.shares.clone(),
+            by: f.governor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+
+    // A forgotten recovery expires like any proposal.
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    advance(&f, MAX_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_steward_recovery(&f.shares), None);
+    assert_eq!(
+        f.client.try_apply_steward_recovery(&f.shares),
+        Err(Ok(Error::ProposalExpired))
+    );
+}
+
+/// What the previous steward signed goes with it: a pending replacement
+/// would put the lost key back, and a thief holding that key may have
+/// signed a loosening in the last days.
+#[test]
+fn steward_recovery_drops_what_the_previous_steward_signed() {
+    let (f, _) = ready();
+    let new_steward = Address::generate(&f.env);
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    advance(&f, MAX_TIMELOCK_SECS - DAY);
+    publish_nav(&f, NAV_EUR);
+    f.client
+        .set_fund_limits(&f.shares, &150, &(500_000 * ONE), &(5_000_000 * ONE));
+    f.client.set_fund(&f.shares, &replacement(&f));
+    assert!(f.client.pending_fund_limits_change(&f.shares).is_some());
+    assert!(f.client.pending_fund_change(&f.shares).is_some());
+    advance(&f, DAY);
+    f.client.apply_steward_recovery(&f.shares);
+    let by = f.contract_id.clone();
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FundChangeCancelled {
+                fund: f.shares.clone(),
+                by: by.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundLimitsChangeCancelled {
+                fund: f.shares.clone(),
+                by
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            StewardRecovered {
+                fund: f.shares.clone(),
+                previous: f.steward.clone(),
+                steward: new_steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_fund_change(&f.shares), None);
+    assert_eq!(f.client.pending_fund_limits_change(&f.shares), None);
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 200);
+}
+
+/// A removed fund whose steward key is lost can come back: its re-admission
+/// then needs the recovered steward, and no longer the lost key.
+#[test]
+fn steward_recovery_lets_a_removed_fund_return_without_the_lost_key() {
+    let (f, _) = ready();
+    f.client.remove_fund(&f.shares);
+    let new_steward = Address::generate(&f.env);
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    advance(&f, MAX_TIMELOCK_SECS);
+    f.client.apply_steward_recovery(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares), None);
+    publish_nav(&f, NAV_EUR);
+    let mut config = fund_config(&f);
+    config.steward = new_steward.clone();
+    sign_only(
+        &f,
+        &[&f.governor, &new_steward],
+        "set_fund",
+        (f.shares.clone(), config.clone()).into_val(&f.env),
+    );
+    f.client.set_fund(&f.shares, &config);
+    assert_eq!(
+        f.client
+            .pending_fund_change(&f.shares)
+            .unwrap()
+            .config
+            .steward,
+        new_steward
+    );
+}
+
+/// Storage: a seizure reads the recipient's approval, possibly months after
+/// it was written, and extends it.
+#[test]
+fn seizure_extends_the_approval_it_reads() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    advance(&f, 64 * HOUR);
+    let key = DataKey::Lender(f.shares.clone(), f.lender.clone());
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    f.client.seize(&repo_id, &f.lender);
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
 }

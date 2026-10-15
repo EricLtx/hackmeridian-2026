@@ -99,6 +99,22 @@ pub enum DataKey {
     /// Persistent: re-anchoring of a fund's references waiting for its
     /// delay.
     PendingReanchor(Address),
+    /// Instance: governor handover proposed by `set_admin` from version 4 on,
+    /// with its eta. Replaces `PendingAdmin`, which stays readable for a
+    /// handover proposed before an upgrade.
+    PendingAdminChange,
+    /// Instance: the only address the guardian may hand its role over to,
+    /// registered by the governor and the guardian together.
+    GuardianBackup,
+    /// Instance: the only lender of a single-lender instance. Set once,
+    /// before anything is at stake.
+    SoleLender,
+    /// Persistent: a lender's attestation for a fund, by fund and lender.
+    /// Kept when the approval is revoked.
+    LenderAttestation(Address, Address),
+    /// Persistent: replacement of a fund's steward, whose key is lost,
+    /// waiting for the longest delay.
+    PendingStewardRecovery(Address),
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -427,6 +443,39 @@ pub struct PendingCurrencyCapChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingFallback {
     pub feed: FallbackFeed,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// A governor handover waiting for its successor's acceptance. After the
+/// first admission it waits for the time delay too, during which the
+/// guardian can veto it (custody gap I12).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminChange {
+    pub admin: Address,
+    /// Ledger timestamp from which the successor may accept.
+    pub eta: u64,
+}
+
+/// What a lender and a fund's steward both signed: the hash of an off-chain
+/// declaration (eligibility, no link with the fund's manager, agreement
+/// reference). The document stays off-chain; no personal data goes on chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LenderAttestation {
+    pub declaration: BytesN<32>,
+    /// Ledger timestamp of the signature.
+    pub at: u64,
+}
+
+/// A new steward for a fund whose steward key is lost, proposed by the
+/// governor and the guardian together, waiting for the longest delay
+/// (custody gap I14).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingStewardRecovery {
+    pub steward: Address,
     /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }

@@ -92,4 +92,20 @@ pub enum Error {
     /// A bounded list kept in instance storage is full: funds with a
     /// fallback feed, or currencies with a pending cap increase.
     LimitReached = 39,
+    /// A fund's steward, its issuer, never lends on its fund: it cannot be
+    /// approved or attested as a lender there, nor create an offer listing
+    /// it, and an approved lender cannot become the fund's steward.
+    StewardCannotLend = 40,
+    /// The instance runs in sole-lender mode and the caller is not that
+    /// lender.
+    NotSoleLender = 41,
+    /// The lender has no attestation for this fund, signed by itself and the
+    /// fund's steward, so the steward cannot approve it.
+    AttestationMissing = 42,
+    /// A guardian may hand its role over only to the backup it registered
+    /// with the governor.
+    NotGuardianBackup = 43,
+    /// The sole lender can be chosen once, before the first admission and the
+    /// first offer, and never changes.
+    SoleLenderFixed = 44,
 }

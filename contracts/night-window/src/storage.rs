@@ -6,9 +6,10 @@ use soroban_sdk::{panic_with_error, Address, Env, Map, Symbol};
 
 use crate::error::Error;
 use crate::types::{
-    DataKey, FallbackFeed, FundConfig, FundState, Offer, PendingCurrencyCapChange, PendingFallback,
-    PendingFundChange, PendingFundLimitsChange, PendingReanchor, PendingRelease, PendingUpgrade,
-    Repo, RiskEnvelope, StablecoinConfig,
+    DataKey, FallbackFeed, FundConfig, FundState, LenderAttestation, Offer,
+    PendingCurrencyCapChange, PendingFallback, PendingFundChange, PendingFundLimitsChange,
+    PendingReanchor, PendingRelease, PendingStewardRecovery, PendingUpgrade, Repo, RiskEnvelope,
+    StablecoinConfig,
 };
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
@@ -232,6 +233,18 @@ pub fn lender_approved(env: &Env, fund: &Address, lender: &Address) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `lender` is approved for `fund`, read on an exit path (seizure,
+/// redirection of seized shares). An approval is written once and may be
+/// read only months later by these exits: reading it extends it, so the
+/// approval an exit depends on does not age into archival.
+pub fn lender_approved_for_exit(env: &Env, fund: &Address, lender: &Address) -> bool {
+    let approved = lender_approved(env, fund, lender);
+    if approved {
+        bump(env, &DataKey::Lender(fund.clone(), lender.clone()));
+    }
+    approved
+}
+
 pub fn set_lender_approved(env: &Env, fund: &Address, lender: &Address, approved: bool) {
     let key = DataKey::Lender(fund.clone(), lender.clone());
     if approved {
@@ -453,6 +466,91 @@ pub fn remove_pending_reanchor(env: &Env, fund: &Address) {
 
 pub fn set_last_steward(env: &Env, fund: &Address, steward: &Address) {
     put(env, &DataKey::LastSteward(fund.clone()), steward);
+}
+
+/// The `LastSteward` record itself, without falling back on the current
+/// configuration. Absent for a fund admitted before version 3 and never
+/// replaced since.
+pub fn last_steward(env: &Env, fund: &Address) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LastSteward(fund.clone()))
+}
+
+// -- Version 4: independent lenders and custody --------------------------------
+
+pub fn sole_lender(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::SoleLender)
+}
+
+pub fn set_sole_lender(env: &Env, lender: &Address) {
+    env.storage().instance().set(&DataKey::SoleLender, lender);
+}
+
+pub fn guardian_backup(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::GuardianBackup)
+}
+
+pub fn set_guardian_backup(env: &Env, backup: &Address) {
+    env.storage()
+        .instance()
+        .set(&DataKey::GuardianBackup, backup);
+}
+
+pub fn remove_guardian_backup(env: &Env) {
+    env.storage().instance().remove(&DataKey::GuardianBackup);
+}
+
+pub fn lender_attestation(
+    env: &Env,
+    fund: &Address,
+    lender: &Address,
+) -> Option<LenderAttestation> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LenderAttestation(fund.clone(), lender.clone()))
+}
+
+/// Whether a lender has an attestation for a fund, read to approve it. The
+/// read extends the attestation: it is the trail counsel and auditors follow,
+/// and it must live at least as long as the approval it backs, which this
+/// same call writes.
+pub fn attested(env: &Env, fund: &Address, lender: &Address) -> bool {
+    let key = DataKey::LenderAttestation(fund.clone(), lender.clone());
+    if !env.storage().persistent().has(&key) {
+        return false;
+    }
+    bump(env, &key);
+    true
+}
+
+pub fn set_lender_attestation(
+    env: &Env,
+    fund: &Address,
+    lender: &Address,
+    attestation: &LenderAttestation,
+) {
+    put(
+        env,
+        &DataKey::LenderAttestation(fund.clone(), lender.clone()),
+        attestation,
+    );
+}
+
+pub fn pending_steward_recovery(env: &Env, fund: &Address) -> Option<PendingStewardRecovery> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingStewardRecovery(fund.clone()))
+}
+
+pub fn set_pending_steward_recovery(env: &Env, fund: &Address, pending: &PendingStewardRecovery) {
+    put(env, &DataKey::PendingStewardRecovery(fund.clone()), pending);
+}
+
+pub fn remove_pending_steward_recovery(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingStewardRecovery(fund.clone()));
 }
 
 pub fn pending_fund_limits(env: &Env, fund: &Address) -> Option<PendingFundLimitsChange> {

@@ -372,3 +372,55 @@ pub struct SharesReleased {
     pub to: Address,
     pub shares: i128,
 }
+
+// -- Version 4: independent lenders and custody gaps ----------------------------
+
+/// Published with `AdminProposed`, which keeps its version 2 shape: when the
+/// proposed governor may accept.
+#[contractevent]
+pub struct AdminChangeProposed {
+    pub admin: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct SoleLenderSet {
+    pub lender: Address,
+}
+
+#[contractevent]
+pub struct LenderAttested {
+    #[topic]
+    pub fund: Address,
+    #[topic]
+    pub lender: Address,
+    pub declaration: BytesN<32>,
+}
+
+#[contractevent]
+pub struct GuardianBackupSet {
+    pub backup: Address,
+}
+
+#[contractevent]
+pub struct StewardRecoveryProposed {
+    #[topic]
+    pub fund: Address,
+    pub steward: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct StewardRecoveryCancelled {
+    #[topic]
+    pub fund: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct StewardRecovered {
+    #[topic]
+    pub fund: Address,
+    pub previous: Address,
+    pub steward: Address,
+}
