@@ -22,6 +22,9 @@ import {
   codeKey,
   asset,
   contractEvents,
+  deploy,
+  saveState,
+  REFLECTOR_FX_TESTNET as REFLECTOR_FX,
   explorer,
   extendTtl,
   fmt,
@@ -106,6 +109,8 @@ async function scan(getter) {
   return items;
 }
 
+/** Rent is paid by the keeper, an account with no role in the contract; older states fall back to the operator. */
+const keeperRole = () => (state.keys.keeper ? "keeper" : "operator");
 const statusOf = (repo) => (Array.isArray(repo.status) ? repo.status[0] : repo.status);
 const hex = (bytes) => (bytes ? Buffer.from(bytes).toString("hex") : "");
 
@@ -169,7 +174,7 @@ async function snapshot(monitor) {
 const DETECTORS = {
   price(s) {
     const out = [];
-    if (s.priceError && ["PriceOutOfBand", "StalePrice", "NoPrice", "InvalidPrice"].includes(s.priceError.name)) {
+    if (s.priceError && ["PriceOutOfBand", "StalePrice", "NoPrice", "InvalidPrice", "PriceDivergence"].includes(s.priceError.name)) {
       out.push({ level: "critical", message: `the contract refuses the fund price: ${s.priceError.name}`, action: "pause" });
     }
     const ageHours = s.nav ? (s.now - Number(s.nav.timestamp)) / 3600 : Infinity;
@@ -327,7 +332,7 @@ async function act(alerts, s, monitor = {}) {
   const extend = alerts.filter((a) => a.action === "extend" && a.key);
   const small = extend.filter((a) => a.kind !== "code").map((a) => a.key);
   if (small.length) {
-    const r = await extendTtl(state, "operator", small, 2_419_200); // about 140 days
+    const r = await extendTtl(state, keeperRole(), small, 2_419_200); // about 140 days
     console.log(`  ACTION   extended ${small.length} entries to about 140 days in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
     done.push("extend");
   }
@@ -335,7 +340,7 @@ async function act(alerts, s, monitor = {}) {
   // its rent stays well under the largest fee a transaction may carry.
   for (const a of extend.filter((x) => x.kind === "code")) {
     const target = Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120);
-    const r = await extendTtl(state, "operator", [a.key], Math.floor(target * 17_280));
+    const r = await extendTtl(state, keeperRole(), [a.key], Math.floor(target * 17_280));
     const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
     console.log(`  ACTION   extended the contract code to about ${target.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
     done.push("extend code");
@@ -508,6 +513,59 @@ async function rehearse() {
     const governor = await read(state, C.openWindow, "admin");
     const window = Number(pending.eta) - (await ledgerTime());
     record("privileged", "Elev.2", "governor handover proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${((Date.now() - proposedAt) / 1000).toFixed(0)} s, ${window} s of the delay left`, !after && governor === pub("governor") && early?.name === "TimelockPending");
+  }
+
+  if (runStep(11)) {
+    console.log("\n11. Backup NAV feed (Tamper.1): admitted with two keys after the delay, then a divergence stops pricing");
+    const fundAsset = asset.stellar(C.shares);
+    if (!C.backupFeed) {
+      C.backupFeed = await deploy(state, "operator", "nav_oracle.wasm", [sv.address(pub("operator")), asset.other("USD"), sv.u32(14), sv.u32(300)]);
+      saveState(state);
+    }
+    const primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
+    let t = await ledgerTime();
+    await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t - 1)]);
+    let active = await read(state, C.openWindow, "get_fallback", [fund]);
+    if (!active) {
+      const feed = sv.struct({ oracle: sv.address(C.backupFeed), asset: fundAsset, max_age_secs: sv.u64(26 * 3600), max_divergence_bps: sv.u32(20) });
+      await invoke(state, "governor", C.openWindow, "propose_fallback", [fund, feed]);
+      const pending = await read(state, C.openWindow, "pending_fallback", [fund]);
+      console.log(`  backup feed proposed by governor and steward; applies after the delay (${Number(pending.eta) - (await ledgerTime())} s)`);
+      while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
+      t = await ledgerTime();
+      await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t - 1)]);
+      await invoke(state, "operator", C.openWindow, "apply_fallback", [fund]);
+      active = await read(state, C.openWindow, "get_fallback", [fund]);
+    }
+    console.log(`  backup feed active: ${Boolean(active)}`);
+    t = await ledgerTime();
+    await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128((BigInt(primary.price) * 1005n) / 1000n), sv.u64(t)]);
+    const refused = await probe(state, "operator", C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(C.euro)]);
+    const { s, alerts } = await pass(monitor);
+    const fired = alerts.some((a) => a.detector === "price" && /PriceDivergence/.test(a.message));
+    const done = await act(alerts, s, monitor);
+    const t2 = Math.max(await ledgerTime(), t);
+    await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t2)]);
+    if (await read(state, C.openWindow, "is_paused")) await invoke(state, "governor", C.openWindow, "unpause", []);
+    const priced = await probe(state, "operator", C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(C.euro)]);
+    record("price", "Tamper.1", "backup feed diverges by 0.5 % from the primary", Boolean(active) && fired && refused?.name === "PriceDivergence", `${done.join(", ") || "none"}; backup realigned`, !priced);
+  }
+
+  if (runStep(12)) {
+    console.log("\n12. Re-anchoring (S21): governor and steward sign the values, applied by anyone after the delay");
+    const fundAsset = asset.stellar(C.shares);
+    const nav = BigInt((await read(state, C.navOracle, "lastprice", [fundAsset])).price);
+    const fxOracle = state.fxSource === "local" ? C.navOracle : REFLECTOR_FX;
+    const fx = BigInt((await read(state, fxOracle, "lastprice", [asset.other("EUR")])).price);
+    await invoke(state, "governor", C.openWindow, "propose_reanchor", [fund, sv.i128(nav), sv.i128(fx)]);
+    const pending = await read(state, C.openWindow, "pending_reanchor", [fund]);
+    const { alerts } = await pass(monitor);
+    const fired = alerts.some((a) => /reanchor_proposed/.test(a.message));
+    console.log(`  proposed with NAV ${(Number(nav) / 1e14).toFixed(4)} and EUR/USD ${(Number(fx) / 1e14).toFixed(4)}; applies after the delay (${Number(pending.eta) - (await ledgerTime())} s)`);
+    while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
+    await invoke(state, "operator", C.openWindow, "apply_reanchor", [fund]);
+    const fs1 = await read(state, C.openWindow, "get_fund_state", [fund]);
+    record("privileged", "S21", "two-key re-anchor of the price reference", fired, "applied after the delay by a third party", BigInt(fs1.reference_nav) === nav && BigInt(fs1.reference_fx) === fx);
   }
 
   saveMonitor(monitor);
