@@ -511,9 +511,44 @@ async function value() {
     const r = bankRoute(at, settings);
     console.log(`  ${label.padEnd(32)} ${`${dayName(r.cash)}, ~${Math.round(r.hours)} h`.padEnd(29)} ${seconds}, any hour`);
   }
+  if (settings.roi) await roiPanel(settings.roi);
   for (const note of settings.notes) console.log(`  ${note}`);
   console.log(dim("\n  Public holidays are ignored: the bank route can only be longer."));
 }
+
+/**
+ * Return on investment, computed with the contract's own interest rule at the
+ * rates of the live offers and at the scenario rates of the business case.
+ * Every assumption (reserve, fund yield, amount borrowed, how often) comes
+ * from the private settings file; nothing about the business case is in the
+ * repository. A line is checked against the simple-interest model the
+ * business case uses: at whole hours they must agree to the cent.
+ */
+async function roiPanel(roi) {
+  const unit = 10n ** 7n;
+  const toUnits = (euros) => BigInt(Math.round(euros)) * unit;
+  const euros = (units) => Number(units) / 1e7;
+  const hours = roi.weekendHours ?? 64;
+  const borrow = toUnits(roi.borrow);
+  const yearly = roi.reserve * roi.fundYield;
+  const rates = [
+    ...(await offers()).map((o) => [`offer #${o.id}${o.sponsor ? " sponsor" : ""}, on chain`, o.rate_bps]),
+    ...Object.entries(roi.scenarioRates ?? {}).map(([name, r]) => [`scenario ${name}`, Math.round(r * 10_000)]),
+  ];
+  console.log(dim(`\n  Return for a treasurer: reserve ${fmtEur(roi.reserve)} kept in the fund at ${(roi.fundYield * 100).toFixed(2)} % (${fmtEur(yearly)} a year), ${fmtEur(roi.borrow)} borrowed for ${hours} h when needed`));
+  console.log(dim(`  ${"Rate".padEnd(36)} ${"weekend cost".padStart(13)} ${"model".padStart(9)} ${roi.weekendsPerYear.map((n) => `net, ${n}/yr`.padStart(14)).join(" ")}`));
+  let mismatches = 0;
+  for (const [label, bps] of rates) {
+    const cost = euros(interestFor(borrow, bps, hours * 3600));
+    const model = roi.borrow * (bps / 10_000) * hours / 8760;
+    if (Math.abs(cost - model) > 0.01) mismatches += 1;
+    const nets = roi.weekendsPerYear.map((n) => fmtEur(yearly - n * cost).padStart(14));
+    console.log(`  ${`${label} ${(bps / 100).toFixed(2)} %`.padEnd(36)} ${fmtEur(cost, 2).padStart(13)} ${fmtEur(model, 2).padStart(9)} ${nets.join(" ")}`);
+  }
+  console.log(mismatches ? red(`  ${mismatches} line(s) differ from the business-case model`) : green("  Contract interest equals the business-case model on every line"));
+}
+
+const fmtEur = (n, digits = 0) => `€${Number(n).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 
 /** Puts the demo back in a clean state after an interrupted run. */
 async function repair() {

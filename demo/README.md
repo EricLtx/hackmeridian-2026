@@ -102,4 +102,4 @@ Re-admission anchors the NAV reference on the live NAV, so run `repair` before `
 
 ## Optional settings
 
-The `value` scene reads `private/demo/value-panel.json` when it exists: `cutoff` (`"HH:MM"`), `settlementBusinessDays`, `timeZone` and `notes`, a list of lines printed under the comparison. An invalid file is reported and ignored. The defaults are a 12:00 Paris cut-off and cash one business day later.
+The `value` scene reads `private/demo/value-panel.json` when it exists: `cutoff` (`"HH:MM"`), `settlementBusinessDays`, `timeZone`, `notes`, a list of lines printed under the comparison, and `roi`: `reserve`, `fundYield`, `borrow`, `weekendHours`, `weekendsPerYear` and `scenarioRates`. With `roi`, the scene prices a weekend loan with the contract's own interest rule at the live offers' rates and at the scenario rates, derives the treasurer's net yearly return, and checks every line against the simple-interest model. An invalid file is reported and ignored. The defaults are a 12:00 Paris cut-off and cash one business day later.
