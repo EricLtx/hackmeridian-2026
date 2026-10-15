@@ -45,7 +45,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, OFFERS, navAt } from "./config.mjs";
 
-const ROLES = ["governor", "guardian", "steward", "operator", "euroIssuer", "lender", "borrower"];
+// The provider is an independent lender the issuer designates: the issuer
+// (steward) approves lenders but never funds offers on its own fund, which
+// EU money market fund rules forbid as sponsor support.
+const ROLES = ["governor", "guardian", "steward", "operator", "euroIssuer", "provider", "lender", "borrower"];
 
 function step(label) {
   process.stdout.write(`\n▸ ${label}\n`);
@@ -119,14 +122,14 @@ async function main() {
 
   const teur = new Asset("tEUR", pub("euroIssuer"));
   await once(state, "teur", "Test euro stablecoin tEUR (classic asset and its contract)", async () => {
-    for (const role of ["lender", "steward", "borrower"]) {
+    for (const role of ["provider", "lender", "borrower"]) {
       await classic(state, role, Operation.changeTrust({ asset: teur }));
     }
     state.contracts.euro = await deploySac(state, "euroIssuer", teur);
     saveState(state);
     console.log(`  tEUR contract ${state.contracts.euro}`);
     // Tops each holder up to its target, so a rerun never pays twice.
-    const funding = { lender: 200_000n, steward: 500_000n, borrower: 2_000n };
+    const funding = { provider: 500_000n, lender: 200_000n, borrower: 2_000n };
     for (const [role, target] of Object.entries(funding)) {
       const held = BigInt(await read(state, state.contracts.euro, "balance", [sv.address(pub(role))]));
       const missing = target * ONE - held;
@@ -208,7 +211,7 @@ async function main() {
   });
 
   await once(state, "issuer", "Issuer: allowlist (holders and the contract), mint shares", async () => {
-    for (const holder of [pub("borrower"), pub("lender"), pub("steward"), ow]) {
+    for (const holder of [pub("borrower"), pub("provider"), pub("lender"), ow]) {
       await invoke(state, "steward", shares, "set_whitelisted", [sv.address(holder), sv.bool(true)]);
     }
     // Mints only once: a rerun after a partial failure finds the shares there.
@@ -303,7 +306,7 @@ async function main() {
     },
   );
 
-  await once(state, "lenders", "Steward: approves the market lender and itself as sponsor", async () => {
+  await once(state, "lenders", "Steward: approves two independent lenders (it never lends itself)", async () => {
     await invoke(state, "steward", ow, "approve_lender", [
       sv.address(shares),
       sv.address(pub("lender")),
@@ -311,16 +314,16 @@ async function main() {
     ]);
     await invoke(state, "steward", ow, "approve_lender", [
       sv.address(shares),
-      sv.address(pub("steward")),
+      sv.address(pub("provider")),
       sv.bool(true),
     ]);
   });
 
   const funds = sv.vec([sv.address(shares)]);
-  await once(state, "sponsorOffer", "Offers: the issuer's sponsor offer", async () => {
+  await once(state, "sponsorOffer", "Offers: the provider's offer, designated by the issuer", async () => {
     if (state.ids.sponsorOffer === undefined) {
-      const sponsor = await invoke(state, "steward", ow, "create_offer", [
-        sv.address(pub("steward")),
+      const sponsor = await invoke(state, "provider", ow, "create_offer", [
+        sv.address(pub("provider")),
         sv.address(state.contracts.euro),
         sv.i128(OFFERS.sponsor.amount),
         sv.u32(OFFERS.sponsor.rateBps),
@@ -335,7 +338,7 @@ async function main() {
       sv.address(shares),
       sv.bool(true),
     ]);
-    console.log(`  sponsor offer #${state.ids.sponsorOffer} 300,000 tEUR at 2.50 %`);
+    console.log(`  designated offer #${state.ids.sponsorOffer} 300,000 tEUR at 2.50 %, funded by the provider`);
   });
 
   await once(state, "marketOffer", "Offers: a market offer", async () => {

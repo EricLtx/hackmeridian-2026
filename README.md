@@ -12,7 +12,7 @@ An on-chain repo contract on Stellar. Holders of tokenized money market funds bo
 
 - **Tokenized money market funds settle once per business day.** Between two redemption windows, a holder who needs liquidity cannot sell. Over a weekend the wait is three days.
 - **So holders keep a buffer of idle stablecoins** next to their fund shares, and that buffer earns nothing.
-- **A repo closes the gap.** The holder locks shares, receives stablecoins in the same transaction, and gets the shares back at a price fixed in advance. Lenders earn short-term interest secured by fund shares. Offers can come from the market, or from the fund issuer itself when it wants to back the liquidity of its own shares without building a dedicated facility.
+- **A repo closes the gap.** The holder locks shares, receives stablecoins in the same transaction, and gets the shares back at a price fixed in advance. Lenders earn short-term interest secured by fund shares. Lenders are independent of the fund: a regulated lender can run its own instance for its clients, and the fund issuer, as steward of its fund, decides which lenders may take its shares as collateral. The issuer never funds or guarantees the loans: under EU money market fund rules, support to a fund's liquidity by its sponsor is forbidden.
 
 Two parties, a fixed term, a known price, and you get your shares back. Banks do this every night; Open Window does it on a public payment network, with offers deposited in advance by whoever wants to lend.
 
@@ -96,7 +96,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Security baseline with threat model, invariants and the framing decisions S1 to S21 (October 2026)
 - [x] STRIDE threat model initiated with a first monitoring plan; CI green on GitHub (October 2026)
 - [x] Specification of the repo lifecycle (states, functions, errors, tests)
-- [x] Lifecycle: offers including sponsor offers, open, repurchase, seize, withdraw, with property tests on the invariants
+- [x] Lifecycle: offers, including offers the issuer designates, open, repurchase, seize, withdraw, with property tests on the invariants
 - [x] Roles: governor (two-step handover), guardian, one steward per fund; two-key fund admission
 - [x] Model-based NAV corridor, cross price through an FX feed with its own band and haircut
 - [x] Independent security review; every finding fixed or recorded, with a test per fix

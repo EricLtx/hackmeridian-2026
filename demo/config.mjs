@@ -37,7 +37,7 @@ export const FALLBACK_EUR_USD = 112_000_000_000_000n;
  */
 export const DEMO_TIMELOCK_SECS = 300;
 
-/** Offers created at setup: the issuer's sponsor offer and a market offer. */
+/** Offers created at setup: the offer the issuer designates (funded by an independent provider) and a market offer. */
 export const OFFERS = {
   sponsor: { amount: 300_000n * ONE, rateBps: 250 },
   market: { amount: 150_000n * ONE, rateBps: 350 },

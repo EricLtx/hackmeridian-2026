@@ -40,7 +40,7 @@ The seizure scene needs a repo past its maturity. The shortest term the contract
 | Scene | What happens on chain | What it shows |
 |---|---|---|
 | `board` | Reads; the operator republishes the NAV when it is over an hour old or wrong | Feeds and their age, the fund settings, the NAV reference, a quote, offers, caps, pause state, open repos |
-| `open` | `open_repo` on the cheapest offer with enough funds, the sponsor offer first | One transaction, latency measured, balances before and after |
+| `open` | `open_repo` on the cheapest offer with enough funds, the offer the issuer designates first | One transaction, latency measured, balances before and after |
 | `guardrails` | Wrong NAV published then corrected; pause by the guardian, unpause by the governor | `LoanTooLarge`, `PriceOutOfBand`, `Paused` refusals; repurchase still allowed while paused |
 | `repurchase` | `repurchase` of the repo opened above | Interest per started hour; principal and interest return to the offer |
 | `seize` | `seize` of the staged repo, or the `NotMatured` refusal before maturity | Seizure only to an address the issuer approved |

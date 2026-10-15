@@ -275,7 +275,7 @@ function renderOffers() {
   const rows = offers
     .map(
       (o) => `<tr>
-        <td data-label="Offer"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge" title="The fund issuer's own offer">Issuer</span>` : ""}
+        <td data-label="Offer"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge" title="An independent lender the fund issuer designates">Designated</span>` : ""}
           <span class="muted small mono">${esc(shortAddress(o.lender))}</span>${S.wallet && o.lender === S.wallet.address ? ` <span class="badge badge-muted">You</span>` : ""}</td>
         <td data-label="Available" class="num">${esc(money(o.available, "floor"))}</td>
         <td data-label="Rate" class="num">${esc(formatRate(o.rate_bps))} <span class="muted small">a year</span></td>
@@ -486,7 +486,7 @@ function renderBorrowOffers() {
   const html = offers
     .map(
       (o) =>
-        `<option value="${o.id}">#${o.id}${o.sponsor ? " · Issuer" : ""} · ${formatRate(o.rate_bps)} · ${money(o.available, "floor")} available · up to ${Math.floor(
+        `<option value="${o.id}">#${o.id}${o.sponsor ? " · Designated" : ""} · ${formatRate(o.rate_bps)} · ${money(o.available, "floor")} available · up to ${Math.floor(
           maxTermFor(o, S.maxTerm) / HOUR,
         )} h</option>`,
     )
@@ -832,7 +832,7 @@ function renderMyOffers() {
   const rows = mine
     .map(
       (o) => `<tr>
-        <td data-label="Offer"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge">Issuer</span>` : ""}</td>
+        <td data-label="Offer"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge">Designated</span>` : ""}</td>
         <td data-label="Available" class="num">${esc(money(o.available))}</td>
         <td data-label="Rate" class="num">${esc(formatRate(o.rate_bps))}</td>
         <td data-label="Longest term" class="num">${esc(formatTerm(o.max_term))}</td>

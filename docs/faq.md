@@ -31,7 +31,7 @@ It is being qualified with counsel. The mechanism is that of a repurchase agreem
 
 ### Where does the money come from?
 
-From lenders who deposit stablecoins in advance into offers, each with a rate, a maximum term and the funds it accepts. A lender can be a market participant or the fund issuer itself, which can back the liquidity of its own shares this way.
+From lenders who deposit stablecoins in advance into offers, each with a rate, a maximum term and the funds it accepts. A lender must be approved by the fund's issuer, and is independent of the fund: the issuer of a money market fund, its management company and their group should not lend against the fund's units, because EU rules forbid a sponsor from supporting a fund's liquidity. The target set-up is a regulated lender, such as a bank or an investment firm, running its own instance for its own clients.
 
 ### What is a stablecoin?
 
@@ -90,7 +90,7 @@ The fund shares held for that repo, at maturity, sent to your address or to anot
 
 ### What is a sponsor offer?
 
-An offer from the fund issuer, marked as such by the fund's steward. Interfaces show it first. It follows the same rules as any other offer and has no special right to take shares or exit first.
+An offer from an approved lender that the fund's steward marks as designated by the issuer, for instance the lender the issuer works with. Interfaces show it first. The mark says nothing about who funds the offer and gives no special right to take shares or exit first. The issuer itself should not fund offers on its own fund (see "Where does the money come from?").
 
 ### What happens when the fund issuer freezes the shares held by the contract?
 

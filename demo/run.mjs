@@ -326,7 +326,7 @@ async function board() {
   line("Outstanding / fund cap", `${fmt(fundState.outstanding)} / ${fmt(config.max_outstanding)} tEUR, ${fmt(config.max_principal_per_repo)} per repo`);
 
   for (const offer of await offers()) {
-    line(`Offer #${offer.id} ${offer.sponsor ? "sponsor" : "market"}`, `${fmt(offer.available)} tEUR available at ${(offer.rate_bps / 100).toFixed(2)} %`);
+    line(`Offer #${offer.id} ${offer.sponsor ? "designated" : "market"}`, `${fmt(offer.available)} tEUR available at ${(offer.rate_bps / 100).toFixed(2)} %`);
   }
   line("Entries", (await isPaused()) ? red("paused") : green("open"));
   for (const [label, id] of [["Live repo", state.ids.liveRepo], ["Staged repo", state.ids.stagedRepo]]) {
@@ -359,7 +359,7 @@ async function open() {
   }
   const term = 3 * 24 * 3600;
   line("Borrower pledges", `${fmt(LIVE_SHARES, 7, 0)} fund shares`);
-  line("Offer used", `#${offer.id}${offer.sponsor ? " (issuer's sponsor offer)" : " (market offer)"} at ${(offer.rate_bps / 100).toFixed(2)} %`);
+  line("Offer used", `#${offer.id}${offer.sponsor ? " (designated by the issuer, funded by an independent lender)" : " (market offer)"} at ${(offer.rate_bps / 100).toFixed(2)} %`);
   line("Borrows", `${fmt(principal)} tEUR, ${LIVE_BORROW_BPS / 100n} % of the ${fmt(q.max_principal)} allowed, term ${term / 3600} h`);
 
   const before = await balance(C.euro, pub("borrower"));
