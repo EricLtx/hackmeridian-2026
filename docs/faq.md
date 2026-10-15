@@ -172,8 +172,8 @@ Workspace lints deny `unsafe`, unchecked arithmetic, `unwrap`, `expect`, `panic!
 ### How is the price checked?
 
 1. **Freshness.** The NAV must be younger than the fund's maximum age, and not in the future.
-2. **Corridor.** The NAV must lie between the reference minus a small floor and the reference grown at a maximum yield since it was set. The reference never follows the feed blindly: anyone can move it along that model path, and it never falls. A faulty feed cannot drag it, even by publishing every ledger.
-3. **FX.** If the price is crossed through an FX feed, that rate must be fresh and within a band around the rate recorded at admission, and it adds its own haircut.
+2. **Corridor.** The NAV must lie between the reference minus a small floor and the reference grown at a maximum yield since it was set. The reference never follows the feed blindly: anyone can move it up along that model path, only the steward can lower it, and only a two-key re-anchor can set it elsewhere. A faulty feed cannot drag it, even by publishing every ledger.
+3. **FX.** If the price is crossed through an FX feed, that rate must be fresh and within a band around the reference rate (set at admission, by a re-anchor, or at the proposal that added the FX leg), and it adds its own haircut.
 
 ### Why interest per started hour?
 
@@ -210,7 +210,7 @@ The demo runner is described in [demo/README.md](../demo/README.md). It never re
 
 ### Where is the threat model?
 
-- **[securite.md](securite.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S19, maximum loss per scenario and the DORA mapping.
+- **[securite.md](securite.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S21, maximum loss per scenario and the DORA mapping.
 - **[modele-menace-stride.md](modele-menace-stride.md)** holds 21 STRIDE problems, the treatment of each and a first monitoring plan.
 
 Both are in French.
@@ -223,12 +223,12 @@ Privately, as described in [SECURITY.md](../SECURITY.md): GitHub's private vulne
 
 | Role | Can | Cannot |
 |---|---|---|
-| Governor, a multisig account | Propose upgrades and any loosening, tighten at once, admit or remove a fund with the steward, unpause | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent |
-| Guardian | Pause new offers and new repos; cancel pending proposals; hand its role over | Unpause; block repurchase, withdrawal or seizure |
+| Governor, a multisig account | Propose upgrades and any loosening, tighten at once, admit a fund with the steward, remove a fund alone, unpause | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent |
+| Guardian | Pause new offers and new repos; cancel pending proposals except a forced guardian change; remove a backup feed alone; hand its role over | Unpause; block repurchase, withdrawal or seizure; stop a governor handover |
 | Steward, one per fund | Approve lenders, tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring | Raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
 | Lender | Create and withdraw its offers; seize at maturity | Seize early; seize to an unapproved address |
 | Borrower | Open and repurchase its repos | Borrow above the haircut-adjusted value |
-| Anyone | Read; move the NAV reference along the model path | Move it outside the corridor |
+| Anyone | Read; move the NAV reference along the model path; apply a proposal once it is due; deliver held-back shares to their recorded beneficiary | Move the reference outside the corridor; apply a proposal early or change it |
 
 Every function that consumes an address's authority calls `require_auth` on that address. Governor handover takes two steps: the successor must sign to accept.
 
@@ -274,6 +274,6 @@ Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 - **A minimal web interface** in `web/` covers the market board, borrowing, positions, repurchase, lending and seizure at maturity, with the Freighter wallet on testnet. The scripted demo runs in a terminal, and every transaction can be checked on the testnet explorer.
 - **Version 1 scope:**
   - whole repurchase only, no partial repayment and no rollover;
-  - one NAV feed per fund;
+  - one NAV feed per fund, plus an optional backup feed;
   - positions and amounts are public on chain.
 - **The [roadmap](roadmap.md)** lists the steps from here to a guarded launch, and what each step must prove before the next one starts.

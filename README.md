@@ -49,8 +49,8 @@ sequenceDiagram
 - Fund shares and stablecoins are SEP-41 tokens. The share price comes from a SEP-40 NAV feed fixed at the fund's admission, crossed through a SEP-40 FX feed when the NAV is not in the loan currency.
 - One ledger entry per fund, per offer and per repo, and no loop over all positions: the cost of every operation stays constant whatever the number of open repos.
 - Issuer-agnostic: any permissioned fund share can be registered with its own oracle, haircut and allowlist. The contract address itself has to be allowlisted by the issuer, like any other holder, and so do lenders and borrowers.
-- The NAV is checked against a corridor predicted from a reference, not against the previous reading: a money market fund share grows slowly and predictably, so a jump is a faulty price, not a market move. The reference never falls and rises at most at a maximum yield, so a faulty feed cannot drag it.
-- Three roles: a governor (registry, risk envelope, upgrades), a guardian (pause only), and a steward per fund, the issuer, who approves lenders and tunes its fund inside the envelope. A fund is admitted only when the governor and its steward sign the same call. Error codes and exported types are append-only.
+- The NAV is checked against a corridor predicted from a reference, not against the previous reading: a money market fund share grows slowly and predictably, so a jump is a faulty price, not a market move. The reference follows the feed only along that model, never upward faster than a maximum yield; only the fund's steward can lower it, and only a two-key re-anchor can move it off the model, so a faulty feed cannot drag it.
+- Three roles: a governor (registry, risk envelope, upgrades), a guardian (pause new entries, cancel pending proposals, remove a backup feed, hand its role over), and a steward per fund, the issuer, who approves lenders and tunes its fund inside the envelope. A fund is admitted only when the governor and its steward sign the same call. Error codes and exported types are append-only.
 - Footprint: a repo is three transactions (offer, open, repurchase). The network's published estimates are about 0.2 Wh and 0.06 g CO2 per transaction (SDF and PwC, 2022; an independent 2021 measurement gives 0.222 Wh), so one repo costs well under one watt-hour. The design keeps it that way: constant cost per operation, no loops, minimal storage with TTL management, no polling.
 - Controls in place: an allowlist of accepted stablecoins; caps per repo, per fund and per currency; an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure; a time delay with a guardian veto on upgrades, feed changes and every loosening; shares delivered later, never blocked, when an issuer freezes them. Details in [docs/securite.md](docs/securite.md).
 - Keys: every role is an ordinary Stellar account, so the governor is a native multisig and any role can sit on hardware wallets that sign Soroban calls. Operations extend the contract instance but never its code entry, whose rent the operator pays.
@@ -59,12 +59,12 @@ sequenceDiagram
 
 The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 3.
 
-**Governance.** Every change that could loosen a check waits for a time delay (48 hours by default, set before the first fund is admitted and only able to grow), can be cancelled during that window, and expires seven days after it falls due. Tightening is immediate. Anyone may apply a change once it is due: the signatures were given when it was proposed.
+**Governance.** Upgrades, feed changes, re-anchoring, a new guardian, a longer maximum term, a looser risk envelope, looser fund limits and higher currency caps wait for a time delay (48 hours by default, settable until the first fund is admitted or the first offer is created, then only able to grow), can be cancelled during that window, and expire seven days after they fall due. Some changes stay immediate by design: tightening, `unpause`, the stablecoin registry, lender approvals, unfreezing a fund, the guardian handing its role over, and, for now, the governor handover (see the roadmap). Tightening is immediate. Anyone may apply a change once it is due: the signatures were given when it was proposed.
 
 | Function | Who | What it does |
 |---|---|---|
 | `__constructor(admin)` | deployer | Sets the governor, who is also the first guardian, and the default risk envelope |
-| `set_admin(new)`, `accept_admin()`, `cancel_admin()` | governor, then successor | Two-step governor handover; the new governor drops the old one's pending proposals |
+| `set_admin(new)`, `accept_admin()`, `cancel_admin()` | governor, then successor | Two-step governor handover, without delay for now; the new governor drops the proposals the old one made alone (upgrade, guardian, term, envelope, caps), not those co-signed by a steward |
 | `set_timelock_delay(secs)` | governor | Any value from 60 s to 30 days before the first admission, then only longer |
 | `propose_upgrade(hash)`, `upgrade(hash)`, `cancel_upgrade(caller)` | governor; guardian may cancel | Code change after the delay, exact hash only |
 | `set_max_term`, `set_envelope`, `set_currency_cap`, `set_guardian` (+ `apply_*`, `cancel_*`, `pending_*`) | governor | Tightening at once; loosening and a new guardian after the delay, cancellable by the guardian |
@@ -72,7 +72,7 @@ The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry poin
 | `set_stablecoin(token, currency)`, `remove_stablecoin(token)` | governor | Stablecoin registry |
 | `set_fund(fund, config)` (+ `apply_fund_change`, `cancel_fund_change`) | governor **and** steward | Two-key admission, immediate the first time; a replacement waits for the delay, keeps the price references, and needs the steward on record |
 | `propose_reanchor(fund, expected_nav, expected_fx)` (+ apply, cancel) | governor **and** steward | The only way to move a fund's price reference off its model: the signers name the values, the contract checks today's feeds agree, and installs those values after the delay if the feeds still follow the model |
-| `propose_fallback(fund, feed)` (+ apply, cancel, `remove_fallback`) | governor **and** steward | A backup NAV feed that stands in for a stale primary and must agree with a fresh one |
+| `propose_fallback(fund, feed)` (+ apply, cancel, `remove_fallback`) | governor **and** steward; removal also by the guardian alone | A backup NAV feed that stands in for a stale primary and must agree with a fresh one |
 | `remove_fund(fund)` | governor | Open repos keep their frozen terms |
 | `pause(caller)` / `unpause()` | guardian or governor / governor | Stops new offers and new repos; never exits |
 | `set_fund_limits` (+ apply, cancel), `approve_lender`, `freeze_fund`, `reset_reference`, `set_sponsor` | the fund's steward | Tunes its own fund inside the envelope; loosening its limits waits for the delay |
@@ -93,7 +93,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 
 - [x] Rust workspace, pinned toolchain, CI with security lints and dependency audit
 - [x] Administration, upgrade path, fund registry, SEP-40 price lookup, tests
-- [x] Security baseline with threat model, invariants and the framing decisions S1 to S19 (October 2026)
+- [x] Security baseline with threat model, invariants and the framing decisions S1 to S21 (October 2026)
 - [x] STRIDE threat model initiated with a first monitoring plan; CI green on GitHub (October 2026)
 - [x] Specification of the repo lifecycle (states, functions, errors, tests)
 - [x] Lifecycle: offers including sponsor offers, open, repurchase, seize, withdraw, with property tests on the invariants
@@ -193,7 +193,7 @@ stellar contract deploy \
 
 stellar contract invoke --id night_window --source-account alice --network testnet \
   -- version
-# 2
+# 3
 ```
 
 The deployed contract can be inspected on [stellar.expert/explorer/testnet](https://stellar.expert/explorer/testnet) or in [Stellar Lab](https://lab.stellar.org). `stellar contract invoke --id night_window -- -h` prints the generated command line for every function.

@@ -28,7 +28,7 @@ The hash to compare is the `wasmHash` of the contract instance's executable, as 
 
 | Actor | Trusted for | Bounded by |
 |---|---|---|
-| Governor (a native multisig account) | Registry, risk envelope, stablecoins, caps, upgrades | A time delay of at least the configured `timelock_delay` (48 hours by default, fixed before the first admission and only able to grow) on every loosening, upgrade and feed change; the guardian's veto; exits never blocked |
+| Governor (a native multisig account) | Registry, risk envelope, stablecoins, caps, upgrades | A time delay of at least the configured `timelock_delay` (48 hours by default, settable until the first admission or the first offer, then only able to grow) on upgrades, feed changes, re-anchoring, a new guardian and every loosening of a limit; the guardian's veto; exits never blocked. Immediate by design: tightening, `unpause`, the stablecoin registry, lender approvals, unfreezing, and the governor handover (a gap under review) |
 | Guardian | Pausing new entries, cancelling proposals | Cannot move funds, unpause or block an exit; can be replaced by the governor through a 30-day forced change it cannot cancel |
 | Steward of a fund (its issuer) | Approving lenders, tightening its fund, co-signing admission, replacement, backup feed and re-anchoring | Loosening its own limits waits for the delay; cannot raise its NAV reference |
 | NAV and FX feeds | Prices | Freshness, a corridor around a model path, an FX band, haircuts, caps; a backup feed must agree within a tolerance |
@@ -37,7 +37,7 @@ The hash to compare is the `wasmHash` of the contract instance's executable, as 
 
 ## Invariants the tests check
 
-- **I1:** each currency's outstanding total equals the sum of open principals in that currency.
+- **I1:** the contract's stablecoin balance is at least the sum of what the offers hold available; each currency's outstanding total equals the sum of open principals in that currency.
 - **I2:** for each fund, the shares the contract holds equal the shares of open repos plus the shares awaiting release.
 - An open repo's terms never change after opening.
 - `open_repo` touches a constant number of ledger entries: 16 read and 9 written, or 18 read with a backup feed configured. The test host asserts this over 200 repos.
@@ -67,7 +67,7 @@ None of these is a substitute for an external audit: the reviews were internal, 
 
 ## Known limits
 
-- The NAV base of an admitted fund cannot change by replacement: a feed in other units cannot lie on the old corridor. It needs a re-anchor proposal signed by the governor and the steward.
+- The NAV base of an admitted fund cannot change by replacement: a feed in other units cannot lie on the old corridor. It needs removal, re-admission (`set_fund`), a re-anchor proposal signed by the governor and the steward on the new feed, then `apply_fund_change` (test `readmission_off_the_path_goes_through_a_reanchor`).
 - A guardian can be replaced by the governor alone through a 30-day forced change: this keeps governance alive if the guardian key is lost, and gives 30 public days to react if the governor key is compromised.
 - The guardian alone may remove a backup feed. The contract then fails closed when the primary is stale.
 - Amounts and counterparties are public on chain.
