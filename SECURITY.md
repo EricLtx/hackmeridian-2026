@@ -36,3 +36,22 @@ Out of scope:
 - Arithmetic must be checked, and failure paths return typed errors; the lints that enforce this are denied at the workspace level.
 - Deadlines are stored values compared to the ledger timestamp, never inferred from storage TTLs.
 - CI runs formatting, Clippy with the security lints, the tests, the WASM build and a RustSec advisory check, with every third-party action pinned to a commit.
+
+## Bug bounty
+
+A paid bug bounty is in preparation and will open before any deposit of real value. Until it opens, reports go through private vulnerability reporting as described above, and credit is given in the fix. The rules below are the ones the paid programme will apply; reward amounts are published when it opens.
+
+**In scope:** the Open Window contract under `contracts/night-window/` at the commit tagged for audit, and any contract address this repository publishes as an official deployment.
+
+**Severity:**
+
+| Level | Examples |
+|---|---|
+| Critical | Theft or permanent freezing of stablecoins or fund shares held by the contract; a loan above the haircut-adjusted value of its collateral; applying a governance change without its time delay |
+| High | Blocking a repurchase, a withdrawal or a seizure that should succeed; moving a fund's price reference without the two signatures; bypassing the guardian's veto |
+| Medium | Griefing that costs users fees or rent without stealing funds; accounting drift that breaks an invariant without a direct loss |
+| Low | Incorrect events, misleading errors, issues with no impact on funds |
+
+**Out of scope:** the test contracts `fund-token` and `nav-oracle`, `demo/`, `web/`, third-party tokens and price feeds, the Stellar network and Soroban host (see Stellar's own programme), attacks that need a compromised governor and guardian together, front-running of public transactions, and denial of service by spamming the network.
+
+**Rules:** test only against a local host or your own testnet deployment, never against a deployment you do not own; do not access or move other people's funds; give us reasonable time to fix before any disclosure. Research done in good faith under these rules will not lead to legal action from the maintainers.
