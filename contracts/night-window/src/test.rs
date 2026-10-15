@@ -5194,9 +5194,9 @@ fn sole_lender_mode_leaves_the_offer_footprint_unchanged() {
     let (sole, _) = ready_from(sole);
     let (without, with) = (measure(&open_instance), measure(&sole));
     assert_eq!((without.0, without.1), (with.0, with.1));
-    // With one fund listed. The first draft of version 4 read 10 entries;
-    // the attestation check reads one more per listed fund.
-    assert_eq!((with.0, with.1), (11, 5));
+    // With one fund listed: 10 entries. The approval read carries the
+    // steward that granted it, so no attestation is read (rc2, second review).
+    assert_eq!((with.0, with.1), (10, 5));
     std::println!(
         "create_offer footprint: {} entries read, {} written, with or without a sole lender",
         with.0,
@@ -6427,10 +6427,11 @@ fn a_lost_trustee_key_blocks_upgrades_for_good() {
 // ---------------------------------------------------------------------------
 
 /// After a steward rotation, an approval the previous steward granted backs
-/// no new offer until the current steward co-signs the lender's attestation.
-/// Offers already made keep lending: `open_repo` reads no attestation.
+/// no new offer and no new loan on an existing offer, until the current
+/// steward co-signs the lender's attestation and approves it again (second
+/// review of rc2, M2).
 #[test]
-fn a_new_offer_needs_an_attestation_from_the_current_steward() {
+fn a_new_offer_needs_the_current_stewards_approval() {
     let (f, offer_id) = ready();
     let next_steward = Address::generate(&f.env);
     let mut config = replacement(&f);
@@ -6439,7 +6440,7 @@ fn a_new_offer_needs_an_attestation_from_the_current_steward() {
     advance(&f, DEFAULT_TIMELOCK_SECS);
     publish_nav(&f, NAV_EUR);
     f.client.apply_fund_change(&f.shares);
-    assert!(f.client.is_lender_approved(&f.shares, &f.lender));
+    assert!(!f.client.is_lender_approved(&f.shares, &f.lender));
     let create = |f: &Fixture| {
         f.client.try_create_offer(
             &f.lender,
@@ -6450,19 +6451,38 @@ fn a_new_offer_needs_an_attestation_from_the_current_steward() {
             &vec![&f.env, f.shares.clone()],
         )
     };
-    assert_eq!(create(&f), Err(Ok(Error::AttestationMissing)));
-    let repo_id = open(&f, offer_id);
-    assert_eq!(f.client.get_repo(&repo_id).unwrap().lender, f.lender);
+    assert_eq!(create(&f), Err(Ok(Error::LenderNotApproved)));
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &(64 * HOUR)
+        ),
+        Err(Ok(Error::LenderNotApproved))
+    );
 
+    // The current steward cannot approve without a fresh attestation.
+    assert_eq!(
+        f.client.try_approve_lender(&f.shares, &f.lender, &true),
+        Err(Ok(Error::AttestationMissing))
+    );
     f.client
         .attest_lender(&f.shares, &f.lender, &declaration(&f.env, 0x51));
     assert!(signers(&f).contains(&next_steward));
+    // Attested but not yet approved by the current steward: still no offer.
+    assert_eq!(create(&f), Err(Ok(Error::LenderNotApproved)));
+    f.client.approve_lender(&f.shares, &f.lender, &true);
+    assert!(f.client.is_lender_approved(&f.shares, &f.lender));
     assert!(create(&f).is_ok());
+    open(&f, offer_id);
 }
 
-/// The same after a recovery, and for every fund an offer lists.
+/// The same after a recovery: no new offer and no new loan.
 #[test]
-fn a_recovered_steward_must_attest_again_before_new_offers() {
+fn a_recovered_steward_must_approve_again_before_new_offers() {
     let (f, offer_id) = ready();
     appoint_guardian(&f);
     let backup = Address::generate(&f.env);
@@ -6480,29 +6500,19 @@ fn a_recovered_steward_must_attest_again_before_new_offers() {
             &DAY,
             &vec![&f.env, f.shares.clone()]
         ),
-        Err(Ok(Error::AttestationMissing))
+        Err(Ok(Error::LenderNotApproved))
     );
-    open(&f, offer_id);
-}
-
-/// The attestation check adds one read per listed fund to `create_offer`,
-/// and the read extends the attestation like an approval does.
-#[test]
-fn creating_an_offer_reads_and_extends_the_attestation() {
-    let (f, _) = ready();
-    let key = DataKey::LenderAttestation(f.shares.clone(), f.lender.clone());
-    f.oracle.keep_alive();
-    age_ledgers(&f);
-    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
-    f.client.create_offer(
-        &f.lender,
-        &f.eurc,
-        &ONE,
-        &RATE_BPS,
-        &DAY,
-        &vec![&f.env, f.shares.clone()],
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &(64 * HOUR)
+        ),
+        Err(Ok(Error::LenderNotApproved))
     );
-    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
 }
 
 // ---------------------------------------------------------------------------
@@ -6714,6 +6724,213 @@ fn steward_backup_swap_cancel_lender_check_and_steward_change() {
     ));
     assert_eq!(f.client.pending_steward_backup(&f.shares), None);
     assert_eq!(f.client.steward_backup(&f.shares), None);
+}
+
+// ---------------------------------------------------------------------------
+// Audit candidate rc2, second review (15 October 2026)
+// ---------------------------------------------------------------------------
+
+/// M1: a trustee hand-over drops the upgrade and the forced guardian change
+/// the previous trustee co-signed. The new trustee consents to nothing it
+/// did not sign, and the governor alone can apply nothing afterwards.
+#[test]
+fn handing_over_the_trustee_drops_what_the_previous_one_co_signed() {
+    let (f, trustee) = ready_with_trustee();
+    let hash = wasm_hash(&f.env, 6);
+    f.client.propose_upgrade(&hash);
+    let forced = Address::generate(&f.env);
+    f.client.force_guardian_change(&forced);
+    assert!(f.client.pending_upgrade().is_some());
+    assert!(f.client.pending_forced_guardian_change().is_some());
+
+    let next = Address::generate(&f.env);
+    f.client.hand_over_trustee(&next);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            UpgradeCancelled {
+                wasm_hash: hash.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            ForcedGuardianChangeCancelled {
+                guardian: forced.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            TrusteeChanged {
+                previous: trustee.clone(),
+                trustee: next.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+        ]
+    );
+    assert_eq!(f.client.trustee(), Some(next.clone()));
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+    advance(&f, MAX_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+    assert_eq!(
+        f.client.try_apply_forced_guardian_change(),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+/// L1: independence holds both ways. The trustee can be named to no other
+/// role, during bootstrap or after, and no backup or proposed governor can
+/// become the trustee.
+#[test]
+fn trustee_cannot_be_given_another_role() {
+    let f = bare();
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    let refused = Err(Ok(raised(Error::TrusteeNotIndependent)));
+    // During bootstrap a guardian would apply at once: refused all the same.
+    assert_eq!(f.client.try_set_guardian(&trustee), refused);
+    assert_eq!(f.client.try_set_guardian_backup(&trustee), refused);
+    assert_eq!(f.client.try_set_admin(&trustee), refused);
+
+    let (f, _) = ready_from(f);
+    appoint_guardian(&f);
+    assert_eq!(f.client.try_set_guardian(&trustee), refused);
+    assert_eq!(f.client.try_hand_over_guardian(&trustee), refused);
+    assert_eq!(f.client.try_force_guardian_change(&trustee), refused);
+    assert_eq!(f.client.try_set_guardian_backup(&trustee), refused);
+    assert_eq!(f.client.try_set_admin(&trustee), refused);
+    assert_eq!(f.client.pending_admin(), None);
+
+    let backup = Address::generate(&f.env);
+    f.client.set_guardian_backup(&backup);
+    assert_eq!(
+        f.client.try_hand_over_trustee(&backup),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    let proposed = Address::generate(&f.env);
+    f.client.set_admin(&proposed);
+    assert_eq!(
+        f.client.try_hand_over_trustee(&proposed),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    assert_eq!(f.client.trustee(), Some(trustee));
+}
+
+/// Test 7 of the second review: the positive control of the signature
+/// requirement, with exactly the governor and the trustee signing.
+#[test]
+fn naming_the_trustee_takes_the_governor_and_the_trustee() {
+    let f = bare();
+    let trustee = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (trustee.clone(),).into_val(&f.env);
+    sign_only(&f, &[&f.governor, &trustee], "set_trustee", args);
+    f.client.set_trustee(&trustee);
+    assert_eq!(f.client.trustee(), Some(trustee));
+}
+
+/// M2: a steward rotation ends the lending of the lenders the previous
+/// steward approved, on offers already made too, while the positions they
+/// opened before stay deliverable to them (decision S8).
+#[test]
+fn a_steward_rotation_stops_new_loans_but_not_the_seizure_of_old_ones() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    let next_steward = Address::generate(&f.env);
+    let mut config = replacement(&f);
+    config.steward = next_steward.clone();
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!f.client.is_lender_approved(&f.shares, &f.lender));
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &(64 * HOUR)
+        ),
+        Err(Ok(Error::LenderNotApproved))
+    );
+
+    // The repo opened before matures unpaid: the lender still receives the shares.
+    advance(&f, 65 * HOUR);
+    f.client.seize(&repo_id, &f.lender);
+    assert_eq!(
+        f.client.get_repo(&repo_id).unwrap().status,
+        RepoStatus::Defaulted
+    );
+
+    // The current steward attests and approves: lending resumes on the same offer.
+    f.client
+        .attest_lender(&f.shares, &f.lender, &declaration(&f.env, 0x52));
+    f.client.approve_lender(&f.shares, &f.lender, &true);
+    assert!(f.client.is_lender_approved(&f.shares, &f.lender));
+    publish_nav(&f, NAV_EUR);
+    open(&f, offer_id);
+}
+
+/// L2 and test 5 of the second review: once the governor cancels a backup
+/// replacement nothing applies it, and after a rotation the previous
+/// steward's proposal is gone and that steward can no longer cancel.
+#[test]
+fn a_cancelled_or_orphaned_backup_replacement_never_applies() {
+    let (f, _) = ready();
+    let backup = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &backup);
+    let other = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &other);
+    f.client
+        .cancel_steward_backup_change(&f.shares, &f.governor);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+    assert_eq!(f.client.steward_backup(&f.shares), Some(backup.clone()));
+
+    f.client.set_steward_backup(&f.shares, &other);
+    assert!(f.client.pending_steward_backup(&f.shares).is_some());
+    let next_steward = Address::generate(&f.env);
+    let mut config = replacement(&f);
+    config.steward = next_steward.clone();
+    publish_nav(&f, NAV_EUR);
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+    assert_eq!(
+        f.client
+            .try_cancel_steward_backup_change(&f.shares, &f.steward),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+/// Test 6 of the second review: under a trustee, an upgrade proposed by the
+/// governor and the trustee applies after the delay, and the trustee stays.
+#[test]
+fn an_upgrade_applies_under_a_trustee() {
+    let (f, trustee) = ready_with_trustee();
+    let hash = f.env.deployer().upload_contract_wasm(NIGHT_WINDOW_WASM);
+    f.client.propose_upgrade(&hash);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.governor) && signed.contains(&trustee));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.upgrade(&hash);
+    assert_eq!(
+        executable_hash(&f.env, &f.contract_id),
+        Some(hash.to_array())
+    );
+    assert_eq!(f.client.trustee(), Some(trustee));
+    f.client.version();
 }
 
 // ---------------------------------------------------------------------------

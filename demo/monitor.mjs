@@ -222,8 +222,8 @@ const DETECTORS = {
     for (const e of s.events.filter((ev) => ev.name === "guardian_change_forced")) {
       out.push({
         level: "critical",
-        message: `forced guardian change at ledger ${e.ledger}: the governor alone replaces the guardian at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(0, 16) : "?"} UTC`,
-        action: "verify with the governor's signers; if unexpected, treat as a key compromise",
+        message: `forced guardian change at ledger ${e.ledger}: the governor (with the trustee's consent, when one is named) replaces the guardian at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(0, 16) : "?"} UTC`,
+        action: "veto_forced",
         tx: e.txHash,
       });
     }
@@ -314,6 +314,14 @@ async function act(alerts, s, monitor = {}) {
       const r = await invoke(state, "guardian", C.openWindow, "veto_admin", [sv.address(keypair(state, "guardian").publicKey())]);
       console.log(`  ACTION   guardian vetoed the governor handover in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
       done.push("veto handover");
+    }
+  }
+  if (state.keys.trustee && alerts.some((a) => a.action === "veto_forced")) {
+    const pending = await read(state, C.openWindow, "pending_forced_guardian_change").catch(() => null);
+    if (pending && !(monitor.announcedGuardians ?? []).includes(pending.guardian)) {
+      const r = await invoke(state, "trustee", C.openWindow, "veto_forced_guardian_change", [sv.address(keypair(state, "trustee").publicKey())]);
+      console.log(`  ACTION   trustee vetoed the forced guardian change in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      done.push("veto forced guardian change");
     }
   }
   if (alerts.some((a) => a.action === "cancel")) {
@@ -566,6 +574,26 @@ async function rehearse() {
     await invoke(state, "operator", C.openWindow, "apply_reanchor", [fund]);
     const fs1 = await read(state, C.openWindow, "get_fund_state", [fund]);
     record("privileged", "S21", "two-key re-anchor of the price reference", fired, "applied after the delay by a third party", BigInt(fs1.reference_nav) === nav && BigInt(fs1.reference_fx) === fx);
+  }
+
+  if (runStep(13)) {
+    console.log("\n13. Forced guardian change (Elev.2): proposed with the governor and trustee keys, vetoed by the trustee");
+    const trustee = state.keys.trustee ? await read(state, C.openWindow, "trustee").catch(() => null) : null;
+    if (!trustee) {
+      console.log("  no trustee on this deployment (needs a `setup -- --fresh` on a contract with the trustee role); skipped");
+    } else {
+      const guardian0 = await read(state, C.openWindow, "guardian");
+      const proposed = await invoke(state, "governor", C.openWindow, "force_guardian_change", [sv.address(pub("operator"))]);
+      const proposedAt = Date.now();
+      const { s, alerts } = await pass(monitor);
+      const fired = alerts.some((a) => a.detector === "privileged" && a.level === "critical" && /forced guardian change/.test(a.message));
+      const done = await act(alerts, s, monitor);
+      const reacted = (Date.now() - proposedAt) / 1000;
+      const left = await read(state, C.openWindow, "pending_forced_guardian_change");
+      const guardian1 = await read(state, C.openWindow, "guardian");
+      console.log(`  proposal ${explorer(proposed.hash)}; ${done.join(", ") || "no action"} after ${reacted.toFixed(0)} s`);
+      record("privileged", "Elev.2", "forced guardian change proposed with the governor and trustee keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, 30 days before it could apply`, !left && guardian1 === guardian0);
+    }
   }
 
   saveMonitor(monitor);

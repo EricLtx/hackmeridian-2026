@@ -158,6 +158,7 @@ impl OpenWindow {
     /// contract errors.
     pub fn set_admin(env: Env, new_admin: Address) {
         let current = storage::require_governor(&env);
+        ensure_not_trustee(&env, &new_admin).unwrap_or_else(|error| panic_with_error!(&env, error));
         let eta = if storage::past_bootstrap(&env) {
             eta(&env).unwrap_or_else(|error| panic_with_error!(&env, error))
         } else {
@@ -217,7 +218,8 @@ impl OpenWindow {
     }
 
     // A hostile guardian that vetoes every handover is answered by
-    // `force_guardian_change`: complete it before handing the governor over.
+    // `force_guardian_change` (with the trustee's consent, when one is
+    // named): complete it before handing the governor over.
 
     /// Vetoes a governor handover: the guardian's answer to a governor
     /// quorum that proposes a successor it should not. `caller` must be the
@@ -398,6 +400,7 @@ impl OpenWindow {
     /// contract errors.
     pub fn set_guardian(env: Env, guardian: Address) {
         storage::require_governor(&env);
+        ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
         if !storage::past_bootstrap(&env) {
             install_guardian(&env, guardian);
             return;
@@ -460,6 +463,7 @@ impl OpenWindow {
     pub fn hand_over_guardian(env: Env, guardian: Address) {
         let current = storage::guardian(&env);
         current.require_auth();
+        ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
         let allowed = match storage::guardian_backup(&env) {
             Some(backup) => backup == guardian,
             None => current == storage::governor(&env),
@@ -475,6 +479,7 @@ impl OpenWindow {
     /// alone cannot choose where the veto goes. Replaces an earlier backup.
     pub fn set_guardian_backup(env: Env, backup: Address) {
         let governor = storage::require_governor(&env);
+        ensure_not_trustee(&env, &backup).unwrap_or_else(|error| panic_with_error!(&env, error));
         let guardian = storage::guardian(&env);
         if guardian != governor {
             guardian.require_auth();
@@ -499,6 +504,7 @@ impl OpenWindow {
     /// errors.
     pub fn force_guardian_change(env: Env, guardian: Address) {
         let governor = storage::require_governor(&env);
+        ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
         require_trustee(&env, &governor);
         let eta = env
             .ledger()
@@ -588,12 +594,19 @@ impl OpenWindow {
     }
 
     /// Passes the trustee role to `trustee`, at once. Requires the current
-    /// trustee and `trustee`: no other key names or removes a trustee.
+    /// trustee and `trustee`: no other key names or removes a trustee. A
+    /// pending upgrade or forced guardian change is dropped.
     pub fn hand_over_trustee(env: Env, trustee: Address) -> Result<(), Error> {
         let previous = storage::trustee(&env).ok_or(Error::Unauthorized)?;
         previous.require_auth();
         ensure_independent_trustee(&env, &trustee)?;
         trustee.require_auth();
+        // Second review of rc2, M1: what the previous trustee co-signed must
+        // not apply under the new one without its consent (a hand-over is
+        // often the answer to a stolen key).
+        let by = env.current_contract_address();
+        drop_pending_upgrade(&env, &by);
+        drop_pending_forced_guardian(&env, &by);
         storage::set_trustee(&env, &trustee);
         storage::bump_instance(&env);
         TrusteeChanged { previous, trustee }.publish(&env);
@@ -969,7 +982,9 @@ impl OpenWindow {
     /// Names the successor a steward recovery may install for this fund.
     /// Requires the fund's steward on record alone: the key holder names its
     /// own successor, so the governor and the guardian can never pick the
-    /// issuer's replacement. The backup signs too, proving its key exists.
+    /// issuer's replacement (the governor can cancel a replacement, so it
+    /// can block one, never choose one). The backup signs too, proving its
+    /// key exists.
     /// Must not be a lender approved on the fund. A first backup is set at
     /// once; replacing one waits for the time delay and applies through
     /// `apply_steward_backup_change`, the current backup staying valid until
@@ -1002,6 +1017,7 @@ impl OpenWindow {
                 install_steward_backup(&env, fund, backup);
             }
         }
+        storage::bump_instance(&env);
         Ok(())
     }
 
@@ -1013,12 +1029,18 @@ impl OpenWindow {
     /// grace period. Anyone may call it.
     pub fn apply_steward_backup_change(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_steward_backup(&env, &fund).ok_or(Error::NotProposed)?;
+        // Second review of rc2, L2: the proposer must still be the steward on
+        // record (a rotation or a recovery drops the proposal; this pins it).
+        if storage::steward_on_record(&env, &fund) != Some(pending.steward) {
+            return Err(Error::NotProposed);
+        }
         ensure_due(&env, pending.eta)?;
         if storage::lender_approved(&env, &fund, &pending.backup) {
             return Err(Error::StewardCannotLend);
         }
         storage::remove_pending_steward_backup(&env, &fund);
         install_steward_backup(&env, fund, pending.backup);
+        storage::bump_instance(&env);
         Ok(())
     }
 
@@ -1040,6 +1062,7 @@ impl OpenWindow {
         if steward {
             steward_alive(&env, &fund, &caller);
         }
+        storage::bump_instance(&env);
         Ok(())
     }
 
@@ -1638,7 +1661,7 @@ impl OpenWindow {
         } else {
             storage::remove_lender_attestation(&env, &fund, &lender);
         }
-        storage::set_lender_approved(&env, &fund, &lender, approved);
+        storage::set_lender_approved(&env, &fund, &lender, approved.then_some(&config.steward));
         LenderApproval {
             fund,
             lender,
@@ -1649,7 +1672,9 @@ impl OpenWindow {
     }
 
     pub fn is_lender_approved(env: Env, fund: Address, lender: Address) -> bool {
-        storage::lender_approved(&env, &fund, &lender)
+        storage::fund(&env, &fund).is_ok_and(|config| {
+            storage::lender_approver(&env, &fund, &lender) == Some(config.steward)
+        })
     }
 
     /// Records that `lender` and the fund's steward both signed the
@@ -1809,10 +1834,10 @@ impl OpenWindow {
     // -- Lifecycle ----------------------------------------------------------
 
     /// Lender deposits `amount` of `stablecoin` with their terms. The lender
-    /// must be approved by the steward of every fund listed, with an
-    /// attestation that steward co-signed, must not be the steward of any of
-    /// them, and in a single-lender instance must be the sole lender. Returns
-    /// the offer identifier.
+    /// must be approved by the current steward of every fund listed (an
+    /// approval implies the attestation that steward co-signed), must not be
+    /// the steward of any of them, and in a single-lender instance must be
+    /// the sole lender. Returns the offer identifier.
     pub fn create_offer(
         env: Env,
         lender: Address,
@@ -1860,13 +1885,14 @@ impl OpenWindow {
             if config.steward == lender {
                 return Err(Error::StewardCannotLend);
             }
-            if !storage::lender_approved(&env, &fund, &lender) {
+            // An approval records the steward that granted it (second review
+            // of rc2, M2): one granted under a steward since rotated or
+            // recovered backs no new offer and no new loan. The approval
+            // implies the attestation that steward co-signed, so no
+            // attestation is read here.
+            if storage::lender_approver(&env, &fund, &lender).as_ref() != Some(&config.steward) {
                 return Err(Error::LenderNotApproved);
             }
-            // An approval granted under a steward since rotated or recovered
-            // backs no new offer. Offers already made keep lending:
-            // `open_repo` reads no attestation, so its footprint stays.
-            ensure_attested(&env, &fund, &config, &lender)?;
         }
 
         token_io::pull(&env, &stablecoin, &lender, amount)?;
@@ -1955,10 +1981,12 @@ impl OpenWindow {
         if offer.lender == config.steward {
             return Err(Error::StewardCannotLend);
         }
-        // The steward may have revoked the lender since the offer was made:
-        // a seized position must always be deliverable (decision S8). The
-        // read extends the approval past this repo's end.
-        if !storage::lender_approved_extending(&env, &fund, &offer.lender) {
+        // The steward may have revoked the lender since the offer was made,
+        // or have been replaced: a loan needs the current steward's approval
+        // (second review of rc2, M2), while a seized position must always
+        // be deliverable (decision S8). The read extends the approval past
+        // this repo's end.
+        if !storage::lender_approved_by_extending(&env, &fund, &offer.lender, &config.steward) {
             return Err(Error::LenderNotApproved);
         }
         if shares <= 0 || principal <= 0 {
@@ -2377,7 +2405,18 @@ fn require_trustee(env: &Env, governor: &Address) {
 fn ensure_independent_trustee(env: &Env, trustee: &Address) -> Result<(), Error> {
     if is_governor_or_guardian(env, trustee)
         || storage::sole_lender(env).is_some_and(|lender| lender == *trustee)
+        || storage::guardian_backup(env).is_some_and(|backup| backup == *trustee)
+        || pending_admin_change(env).is_some_and(|pending| pending.admin == *trustee)
     {
+        return Err(Error::TrusteeNotIndependent);
+    }
+    Ok(())
+}
+
+/// Second review of rc2, L1: the independence of the trustee holds in both
+/// directions. No role, backup or governor handover may name the trustee.
+fn ensure_not_trustee(env: &Env, who: &Address) -> Result<(), Error> {
+    if is_trustee(env, who) {
         return Err(Error::TrusteeNotIndependent);
     }
     Ok(())

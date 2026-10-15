@@ -226,11 +226,22 @@ pub fn set_fund_state(env: &Env, fund: &Address, state: &FundState) {
     put(env, &DataKey::FundState(fund.clone()), state);
 }
 
+/// Whether an approval exists for `lender` on `fund`, whichever steward
+/// granted it. Seizures and redirections read this: a position opened under
+/// an approval stays deliverable after a steward change (decision S8).
 pub fn lender_approved(env: &Env, fund: &Address, lender: &Address) -> bool {
     env.storage()
         .persistent()
+        .has(&DataKey::Lender(fund.clone(), lender.clone()))
+}
+
+/// The steward that granted `lender`'s approval on `fund`, if any. Second
+/// review of rc2, M2: an approval records who granted it, so a loan needs
+/// the current steward's approval, not a predecessor's.
+pub fn lender_approver(env: &Env, fund: &Address, lender: &Address) -> Option<Address> {
+    env.storage()
+        .persistent()
         .get(&DataKey::Lender(fund.clone(), lender.clone()))
-        .unwrap_or(false)
 }
 
 // An approval is extended whenever it falls under 45 days: longer than the
@@ -256,13 +267,32 @@ pub fn lender_approved_extending(env: &Env, fund: &Address, lender: &Address) ->
     approved
 }
 
-pub fn set_lender_approved(env: &Env, fund: &Address, lender: &Address, approved: bool) {
+/// Whether `steward` is the one that approved `lender` on `fund`, read by an
+/// opening: the read extends the approval like `lender_approved_extending`.
+pub fn lender_approved_by_extending(
+    env: &Env,
+    fund: &Address,
+    lender: &Address,
+    steward: &Address,
+) -> bool {
+    match lender_approver(env, fund, lender) {
+        Some(approver) => {
+            bump_lender(env, &DataKey::Lender(fund.clone(), lender.clone()));
+            approver == *steward
+        }
+        None => false,
+    }
+}
+
+/// Records `steward`'s approval of `lender`, or removes the approval.
+pub fn set_lender_approved(env: &Env, fund: &Address, lender: &Address, by: Option<&Address>) {
     let key = DataKey::Lender(fund.clone(), lender.clone());
-    if approved {
-        env.storage().persistent().set(&key, &true);
-        bump_lender(env, &key);
-    } else {
-        env.storage().persistent().remove(&key);
+    match by {
+        Some(steward) => {
+            env.storage().persistent().set(&key, steward);
+            bump_lender(env, &key);
+        }
+        None => env.storage().persistent().remove(&key),
     }
 }
 

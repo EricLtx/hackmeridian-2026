@@ -1,7 +1,8 @@
 // Deploys and configures the Open Window demo on Stellar testnet.
 //
 //   npm run setup              resumes where the last run stopped
-//   npm run setup -- --fresh   new contracts (keeps the funded accounts)
+//   npm run setup -- --fresh   new contracts (keeps the funded accounts; the
+//                              previous state is copied to testnet-<id>.json)
 //   npm run setup -- --restage new short repo for the seizure scene
 //   npm run setup -- --fx=local     re-admit the fund on the local FX feed
 //   npm run setup -- --fx=reflector back to the Reflector FX feed
@@ -39,6 +40,8 @@ import {
   sleep,
   sv,
   writeDeployment,
+  STATE_DIR,
+  STATE_FILE,
 } from "./lib.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -49,7 +52,7 @@ import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, 
 // (steward) approves lenders but never funds offers on its own fund, which
 // EU money market fund rules forbid as sponsor support.
 // The keeper only pays storage rent (contract code, entries near archival): no role in the contract.
-const ROLES = ["governor", "guardian", "guardianBackup", "steward", "stewardBackup", "operator", "keeper", "euroIssuer", "provider", "lender", "borrower"];
+const ROLES = ["governor", "guardian", "guardianBackup", "trustee", "steward", "stewardBackup", "operator", "keeper", "euroIssuer", "provider", "lender", "borrower"];
 
 function step(label) {
   process.stdout.write(`\n▸ ${label}\n`);
@@ -93,6 +96,13 @@ async function refreshNav(state) {
 async function main() {
   const state = loadState();
   if (process.argv.includes("--fresh") || !state.done) {
+    // Keeps the previous deployment reachable: copy its state aside, named
+    // after its contract, so a rehearsed demo can be restored by renaming the file.
+    if (state.contracts?.openWindow && fs.existsSync(STATE_FILE)) {
+      const kept = path.join(STATE_DIR, `testnet-${state.contracts.openWindow.slice(0, 8)}.json`);
+      fs.copyFileSync(STATE_FILE, kept);
+      console.log(`previous deployment state kept in ${path.basename(kept)}`);
+    }
     state.contracts = {};
     state.ids = {};
     state.done = {};
@@ -216,6 +226,10 @@ async function main() {
     // The guardian may only hand its role to this backup, registered by governor and guardian together.
     await invoke(state, "governor", ow, "set_guardian_backup", [sv.address(pub("guardianBackup"))]);
     console.log("  guardian backup registered by the governor and the guardian");
+    // The trustee co-signs every upgrade and forced guardian change and can
+    // veto them: fixed during bootstrap, independent of the other roles.
+    await invoke(state, "governor", ow, "set_trustee", [sv.address(pub("trustee"))]);
+    console.log(`  trustee ${pub("trustee").slice(0, 8)}…: no upgrade without its signature`);
   });
 
   await once(state, "issuer", "Issuer: allowlist (holders and the contract), mint shares", async () => {
