@@ -19,11 +19,15 @@ Some investment funds now exist as tokens: a share of the fund is a digital toke
 
 ### Why not just sell the shares?
 
-Because the fund only buys shares back once per business day. Outside that window, on a Friday evening or a Sunday, there is no buyer at the fund's price. A repo does not need a buyer: the shares are only pledged, and the holder keeps their value.
+Because the fund only buys shares back once per business day. Outside that window, on a Friday evening or a Sunday, there is no buyer at the fund's price. A repo does not need a buyer: the shares move to the contract for a fixed term and come back at repurchase, so the holder keeps their economic value.
 
 ### Who holds the shares during the loan?
 
 The contract does: a program on the Stellar network that nobody can alter on the fly. It holds the shares until one of two things happens. Either the borrower repays and the shares go back to the borrower, or the borrower has not repaid at maturity and the lender may take them. No person holds the shares in between, not even the operator of Open Window.
+
+### What is the legal form of the transaction?
+
+It is being qualified with counsel. The mechanism is that of a repurchase agreement: the shares move for a fixed term and come back against principal and interest, and the lender keeps them if the borrower does not repurchase. Whether a given deployment is a repo with transfer of title, or a loan secured by the shares, depends on the parties and the agreements around the contract. That choice changes who must be licensed, what is reported and what happens in an insolvency, so nothing in this repository should be read as settling it.
 
 ### Where does the money come from?
 
@@ -35,7 +39,7 @@ A digital token that tracks a currency one for one, such as one euro, issued by 
 
 ### What if the borrower never pays back?
 
-From maturity on, the lender may take the pledged shares. The loan was smaller than the value of the shares from the start: the haircut, a safety margin, ensures it. The lender therefore holds more value than was lent.
+From maturity on, the lender may take the shares held for that repo. The loan was smaller than the value of the shares from the start: the haircut, a safety margin, ensures it. The lender therefore holds more value than was lent.
 
 ### What is testnet?
 
@@ -73,7 +77,7 @@ Yes. `withdraw_offer` returns any amount not currently lent, at any time, even w
 
 ### As a lender, what do I receive if the borrower defaults?
 
-The pledged fund shares, at maturity, sent to your address or to another address the fund issuer has approved. You must be an approved holder of that fund: the issuer approves lenders fund by fund, and the approval is checked again at every opening.
+The fund shares held for that repo, at maturity, sent to your address or to another address the fund issuer has approved. You must be an approved holder of that fund: the issuer approves lenders fund by fund, and the approval is checked again at every opening.
 
 ### As a fund issuer, what control do I keep?
 
