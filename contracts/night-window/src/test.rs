@@ -5517,26 +5517,32 @@ fn a_guardian_that_is_the_governor_hands_over_freely_and_a_new_guardian_drops_th
 
 /// Custody gap I14 and review H1: a lost steward key is replaced only by
 /// the backup the steward named, after thirty days, with the governor and a
-/// distinct guardian; anyone applies it.
+/// distinct guardian; the backup consents when named and accepts at the end.
 #[test]
 fn lost_steward_key_is_replaced_by_its_backup_after_thirty_days() {
     let (f, _) = ready();
     let guardian = appoint_guardian(&f);
     let new_steward = Address::generate(&f.env);
-    // Only the steward names its backup.
-    sign_only(
-        &f,
-        &[&f.governor, &guardian],
-        "set_steward_backup",
-        (f.shares.clone(), new_steward.clone()).into_val(&f.env),
-    );
-    assert!(f
-        .client
-        .try_set_steward_backup(&f.shares, &new_steward)
-        .is_err());
+    // Only the steward names its backup, and the backup consents: the
+    // governance keys cannot, nor can the steward alone (a typo would leave
+    // the fund unrecoverable).
+    let backup_args: soroban_sdk::Vec<Val> =
+        (f.shares.clone(), new_steward.clone()).into_val(&f.env);
+    for signing in [
+        std::vec![&f.governor, &guardian, &new_steward],
+        std::vec![&f.steward],
+    ] {
+        sign_only(&f, &signing, "set_steward_backup", backup_args.clone());
+        assert!(f
+            .client
+            .try_set_steward_backup(&f.shares, &new_steward)
+            .is_err());
+    }
     f.env.mock_all_auths();
     f.client.set_steward_backup(&f.shares, &new_steward);
-    assert_eq!(signers(&f), std::vec![f.steward.clone()]);
+    let signed = signers(&f);
+    assert_eq!(signed.len(), 2);
+    assert!(signed.contains(&f.steward) && signed.contains(&new_steward));
     assert_eq!(
         own_events(&f),
         std::vec![StewardBackupSet {
@@ -5592,9 +5598,19 @@ fn lost_steward_key_is_replaced_by_its_backup_after_thirty_days() {
         Err(Ok(Error::TimelockPending))
     );
     advance(&f, 1);
-    f.env.set_auths(&[]);
-    f.client.apply_steward_recovery(&f.shares);
-    assert!(f.env.auths().is_empty());
+    // The backup accepts the role, as a successor governor does; nobody
+    // else can apply it in its place.
+    let intruder = Address::generate(&f.env);
+    sign_only(
+        &f,
+        &[&intruder, &f.governor, &guardian],
+        "apply_steward_recovery",
+        (f.shares.clone(),).into_val(&f.env),
+    );
+    assert!(f.client.try_apply_steward_recovery(&f.shares).is_err());
+    f.env.mock_all_auths();
+    assert!(f.client.apply_steward_recovery(&f.shares));
+    assert_eq!(signers(&f), std::vec![new_steward.clone()]);
     assert_eq!(
         own_events(&f),
         std::vec![StewardRecovered {
@@ -5748,34 +5764,49 @@ fn any_steward_action_cancels_a_pending_recovery() {
 }
 
 /// Review M3: a recovery signed by governance keys that have since been
-/// replaced dies, whether the governor or the guardian changed.
+/// replaced dies, whether the governor or the guardian changed. The view
+/// stops showing it at once, and the apply removes it without the backup's
+/// signature.
 #[test]
 fn a_recovery_signed_by_replaced_governance_keys_dies() {
     let (f, _) = ready();
     appoint_guardian(&f);
     let backup = Address::generate(&f.env);
     f.client.set_steward_backup(&f.shares, &backup);
+    let removed = |f: &Fixture| {
+        f.env.set_auths(&[]);
+        assert!(!f.client.apply_steward_recovery(&f.shares));
+        assert_eq!(
+            own_events(f),
+            std::vec![StewardRecoveryCancelled {
+                fund: f.shares.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)]
+        );
+        f.env.mock_all_auths();
+        assert_eq!(
+            f.client.try_apply_steward_recovery(&f.shares),
+            Err(Ok(Error::NotProposed))
+        );
+    };
 
     f.client.propose_steward_recovery(&f.shares, &backup);
     let successor = Address::generate(&f.env);
     f.client.set_admin(&successor);
     advance(&f, f.client.timelock_delay());
     f.client.accept_admin();
+    assert_eq!(f.client.pending_steward_recovery(&f.shares), None);
     advance(&f, MAX_TIMELOCK_SECS);
-    assert_eq!(
-        f.client.try_apply_steward_recovery(&f.shares),
-        Err(Ok(Error::NotProposed))
-    );
+    removed(&f);
 
     f.client.propose_steward_recovery(&f.shares, &backup);
     let next_guardian = Address::generate(&f.env);
     f.client.set_guardian_backup(&next_guardian);
     f.client.hand_over_guardian(&next_guardian);
+    assert_eq!(f.client.pending_steward_recovery(&f.shares), None);
     advance(&f, MAX_TIMELOCK_SECS);
-    assert_eq!(
-        f.client.try_apply_steward_recovery(&f.shares),
-        Err(Ok(Error::NotProposed))
-    );
+    removed(&f);
     assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, f.steward);
 }
 
@@ -5857,14 +5888,54 @@ fn steward_recovery_is_cancelled_by_the_steward_or_the_governor_not_the_guardian
         .to_xdr(&f.env, &f.contract_id)]
     );
 
-    // A forgotten recovery expires like any proposal.
+    // A forgotten recovery expires like any proposal; the apply then
+    // removes it rather than leave it to archive.
     f.client.propose_steward_recovery(&f.shares, &new_steward);
     advance(&f, MAX_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
     assert_eq!(f.client.pending_steward_recovery(&f.shares), None);
+    assert!(!f.client.apply_steward_recovery(&f.shares));
     assert_eq!(
         f.client.try_apply_steward_recovery(&f.shares),
-        Err(Ok(Error::ProposalExpired))
+        Err(Ok(Error::NotProposed))
     );
+    // So does any steward action that finds an expired one.
+    f.client.propose_steward_recovery(&f.shares, &new_steward);
+    advance(&f, MAX_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    f.client.freeze_fund(&f.shares, &false);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            StewardRecoveryCancelled {
+                fund: f.shares.clone(),
+                by: f.steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundFrozen {
+                fund: f.shares.clone(),
+                frozen: false
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(
+        f.client.try_apply_steward_recovery(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+/// Review L3: a backup may wait years for the emergency it exists for;
+/// proposing the recovery reads it and extends it.
+#[test]
+fn proposing_a_recovery_extends_the_steward_backup() {
+    let (f, _) = ready();
+    appoint_guardian(&f);
+    let backup = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &backup);
+    let key = DataKey::StewardBackup(f.shares.clone());
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    f.client.propose_steward_recovery(&f.shares, &backup);
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
 }
 
 /// What the previous steward signed before the recovery goes with it: a

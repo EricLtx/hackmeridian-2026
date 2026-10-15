@@ -519,6 +519,15 @@ pub fn steward_backup(env: &Env, fund: &Address) -> Option<Address> {
         .get(&DataKey::StewardBackup(fund.clone()))
 }
 
+/// The steward's backup, read to propose a recovery. Reading it extends it:
+/// it may wait years for the emergency it exists for.
+pub fn steward_backup_extending(env: &Env, fund: &Address) -> Option<Address> {
+    let key = DataKey::StewardBackup(fund.clone());
+    let backup = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(backup)
+}
+
 pub fn set_steward_backup(env: &Env, fund: &Address, backup: &Address) {
     put(env, &DataKey::StewardBackup(fund.clone()), backup);
 }

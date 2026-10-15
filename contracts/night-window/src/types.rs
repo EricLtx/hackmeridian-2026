@@ -110,10 +110,10 @@ pub enum DataKey {
     /// before anything is at stake.
     SoleLender,
     /// Persistent: a lender's attestation for a fund, by fund and lender.
-    /// Kept when the approval is revoked.
+    /// Removed when the approval is revoked.
     LenderAttestation(Address, Address),
-    /// Persistent: replacement of a fund's steward, whose key is lost,
-    /// waiting for the longest delay.
+    /// Persistent: a lost steward key's replacement by the steward's
+    /// backup, waiting for the longest delay.
     PendingStewardRecovery(Address),
     /// Persistent: the successor a fund's steward named for itself, the only
     /// address a steward recovery may install.
@@ -464,6 +464,10 @@ pub struct PendingAdminChange {
     pub eta: u64,
 }
 
+// Reshaped after the first v4 draft (field `steward` added). Version 4 was
+// never released: instances are redeployed, never upgraded in place from a
+// draft, so no stored value has the old shape.
+
 /// What a lender and a fund's steward both signed: the hash of an off-chain
 /// declaration (eligibility, no link with the fund's manager, agreement
 /// reference). The document stays off-chain; no personal data goes on chain.
@@ -478,9 +482,13 @@ pub struct LenderAttestation {
     pub at: u64,
 }
 
-/// The steward's own backup, proposed by the governor and the guardian
-/// together for a lost steward key, waiting for the longest delay (custody
-/// gap I14).
+// Reshaped after the first v4 draft (fields `previous` and `generation`
+// added); same reason as `LenderAttestation`: no stored value has the old
+// shape.
+
+/// Replacement of a lost steward key by the backup the steward registered,
+/// proposed by the governor and the guardian, waiting for the longest delay
+/// (custody gap I14).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingStewardRecovery {

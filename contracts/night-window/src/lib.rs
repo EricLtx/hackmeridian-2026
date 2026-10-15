@@ -886,11 +886,14 @@ impl OpenWindow {
     /// Names the successor a steward recovery may install for this fund,
     /// at once. Requires the fund's steward on record alone: the key holder
     /// names its own successor, so the governor and the guardian can never
-    /// pick the issuer's replacement. Replaces an earlier backup. Must not be
-    /// a lender approved on the fund.
+    /// pick the issuer's replacement. The backup signs too, proving its key
+    /// exists. Replaces an earlier backup. Must not be a lender approved on
+    /// the fund.
     pub fn set_steward_backup(env: Env, fund: Address, backup: Address) -> Result<(), Error> {
         let steward = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
         steward.require_auth();
+        // A mistyped address would leave the fund unrecoverable.
+        backup.require_auth();
         if storage::lender_approved(&env, &fund, &backup) {
             return Err(Error::StewardCannotLend);
         }
@@ -930,7 +933,7 @@ impl OpenWindow {
         }
         guardian.require_auth();
         let previous = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
-        if storage::steward_backup(&env, &fund) != Some(new_steward.clone()) {
+        if storage::steward_backup_extending(&env, &fund) != Some(new_steward.clone()) {
             return Err(Error::NoStewardBackup);
         }
         if storage::lender_approved(&env, &fund, &new_steward) {
@@ -961,23 +964,29 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Installs the proposed steward once its thirty days have elapsed,
-    /// within the grace period. Anyone may call it. Proposals the previous
-    /// steward signed go with it: a pending replacement would otherwise put
-    /// the lost key back, and loosened limits, a re-anchor or a fallback
-    /// carry a signature that may now be an attacker's. The backup is
-    /// consumed.
-    pub fn apply_steward_recovery(env: Env, fund: Address) -> Result<(), Error> {
+    /// Installs the steward's backup once the thirty days have elapsed,
+    /// within the grace period; the backup signs, accepting the role.
+    /// Proposals the previous steward signed go. Returns false, removing the
+    /// proposal, when it can no longer apply (expired, steward or governance
+    /// changed); anyone may then call it.
+    pub fn apply_steward_recovery(env: Env, fund: Address) -> Result<bool, Error> {
         let pending = storage::pending_steward_recovery(&env, &fund).ok_or(Error::NotProposed)?;
-        ensure_due(&env, pending.eta)?;
-        let previous = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
-        // A proposal made against another steward, or signed by governance
-        // keys since replaced, is not this situation any more.
-        if previous != pending.previous
-            || storage::governance_generation(&env) != pending.generation
-        {
-            return Err(Error::NotProposed);
+        if env.ledger().timestamp() < pending.eta {
+            return Err(Error::TimelockPending);
         }
+        // A dead proposal is removed rather than left to archive; returning
+        // an error would roll the removal back.
+        if !recovery_can_apply(&env, &fund, &pending) {
+            storage::remove_pending_steward_recovery(&env, &fund);
+            StewardRecoveryCancelled {
+                fund,
+                by: env.current_contract_address(),
+            }
+            .publish(&env);
+            return Ok(false);
+        }
+        pending.steward.require_auth();
+        let previous = pending.previous.clone();
         // An approval may have been granted during the thirty days.
         if storage::lender_approved(&env, &fund, &pending.steward) {
             return Err(Error::StewardCannotLend);
@@ -1001,7 +1010,7 @@ impl OpenWindow {
             steward: pending.steward,
         }
         .publish(&env);
-        Ok(())
+        Ok(true)
     }
 
     /// Withdraws a proposed steward recovery. `caller` must be the fund's
@@ -1021,9 +1030,11 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The proposed steward recovery of a fund, unless it has expired.
+    /// The proposed steward recovery of a fund, unless it can no longer
+    /// apply.
     pub fn pending_steward_recovery(env: Env, fund: Address) -> Option<PendingStewardRecovery> {
-        storage::pending_steward_recovery(&env, &fund).filter(|p| is_live(&env, p.eta))
+        storage::pending_steward_recovery(&env, &fund)
+            .filter(|p| recovery_can_apply(&env, &fund, p))
     }
 
     // -- Re-anchoring ---------------------------------------------------------
@@ -2136,8 +2147,18 @@ fn is_steward_or_last(env: &Env, fund: &Address, who: &Address) -> bool {
         || storage::last_steward(env, fund).is_some_and(|s| s == *who)
 }
 
+/// Whether a steward recovery can still apply: not expired, and proposed
+/// against the steward still on record and the governance keys still in
+/// office (a recovery signed by replaced keys dies).
+fn recovery_can_apply(env: &Env, fund: &Address, pending: &PendingStewardRecovery) -> bool {
+    is_live(env, pending.eta)
+        && storage::governance_generation(env) == pending.generation
+        && storage::steward_on_record(env, fund).is_some_and(|s| s == pending.previous)
+}
+
 /// A steward-signed action on `fund` proves the steward key is alive: a
-/// pending recovery of that fund, meant for a lost key, goes.
+/// pending recovery of that fund, meant for a lost key, goes, whether it
+/// could still apply or not.
 fn steward_alive(env: &Env, fund: &Address, steward: &Address) {
     if storage::pending_steward_recovery(env, fund).is_some() {
         storage::remove_pending_steward_recovery(env, fund);
