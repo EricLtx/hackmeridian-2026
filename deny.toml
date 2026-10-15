@@ -1,0 +1,43 @@
+# cargo-deny: licences, security advisories, sources and duplicate versions of
+# the dependency tree. Run with `cargo deny check`; CI runs it on every push.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # `paste` is unmaintained; it is pulled in only by host-side test code of the
+  # Soroban SDK and is not part of the contract WASM (technical watch, 15 October 2026).
+  { id = "RUSTSEC-2024-0436", reason = "test-only dependency, not in the deployed WASM" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "Unlicense",
+  "CC0-1.0",
+  "BSL-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace members depend on each other by path.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -30,6 +30,13 @@ jobs:
       # `clippy --all-targets` compiles that test (contracts/night-window/build.rs).
       - name: Build WASM
         run: stellar contract build
+      # Code rent grows with the WASM size and the network limit is 128 KB:
+      # fail early if the contract outgrows its budget (decision S20).
+      - name: WASM size budget (120 KB)
+        run: |
+          size=$(stat -c%s target/wasm32v1-none/release/night_window.wasm)
+          echo "night_window.wasm: $size bytes"
+          test "$size" -le 122880 || { echo "::error::night_window.wasm is $size bytes, over the 122,880-byte budget"; exit 1; }
       - name: Lint (security lints are denied in Cargo.toml)
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
@@ -54,6 +61,15 @@ jobs:
       # Unit tests only: the testnet tests need the demo keys and run locally.
       - name: Test
         run: npm test
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Licences, advisories, sources and duplicate versions (deny.toml).
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
 
   audit:
     runs-on: ubuntu-latest

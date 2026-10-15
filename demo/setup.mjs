@@ -48,7 +48,8 @@ import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, 
 // The provider is an independent lender the issuer designates: the issuer
 // (steward) approves lenders but never funds offers on its own fund, which
 // EU money market fund rules forbid as sponsor support.
-const ROLES = ["governor", "guardian", "guardianBackup", "steward", "stewardBackup", "operator", "euroIssuer", "provider", "lender", "borrower"];
+// The keeper only pays storage rent (contract code, entries near archival): no role in the contract.
+const ROLES = ["governor", "guardian", "guardianBackup", "steward", "stewardBackup", "operator", "keeper", "euroIssuer", "provider", "lender", "borrower"];
 
 function step(label) {
   process.stdout.write(`\n▸ ${label}\n`);
@@ -171,7 +172,8 @@ async function main() {
   await once(state, "codeTtl", "Operator extends the contract code by 30 days (the contract never pays for its own code)", async () => {
     const wasm = fs.readFileSync(path.join(WASM_DIR, "night_window.wasm"));
     const hash = crypto.createHash("sha256").update(wasm).digest();
-    const r = await extendTtl(state, "operator", [codeKey(hash)], 30 * 17_280);
+    if (!state.keys.keeper) throw new Error("no keeper key: rerun setup from the Accounts step");
+    const r = await extendTtl(state, "keeper", [codeKey(hash)], 30 * 17_280);
     console.log(`  code ${hash.toString("hex").slice(0, 12)}… extended, fee ${(Number(r.fee ?? 0n) / 1e7).toFixed(2)} XLM`);
   });
 
