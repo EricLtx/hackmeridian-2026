@@ -40,7 +40,8 @@ Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique 
 | Proposition en attente | Opération d'administration ou de l'intendant | Un second signataire vérifie qu'elle était prévue avant son échéance | Aucun si prévue ; sinon annulation par le gardien ou l'intendant |
 | Parts retenues (`ReleaseDeferred`) | L'émetteur gèle le contrat ou retire un bénéficiaire de sa liste blanche | Contacter l'émetteur ; la dette est déjà soldée | Levée du gel, puis `release` par n'importe qui ; le bénéficiaire peut rediriger |
 | Code modifié | Mise à niveau appliquée | Vérifier qu'elle avait été annoncée et que le délai a couru | Revue du WASM déployé contre le code publié (`docs/audit-scope.md`) |
-| Passation du gouverneur proposée ou faite (`admin_proposed`, `admin_changed`) | Changement de signataires prévu, ou clés compromises : la passation n'a pas de délai | Vérification auprès de chaque signataire ; si imprévue, `cancel_admin` et rotation des clés | Nouveaux signataires confirmés |
+| Passation du gouverneur proposée ou faite (`admin_proposed`, `admin_changed`) | Changement de signataires prévu, ou clés compromises | Vérification auprès de chaque signataire ; si imprévue, veto du gardien (`veto_admin`, automatique avec `--act`) pendant le délai, puis rotation des clés | Nouveaux signataires confirmés |
+| Récupération d'intendant proposée (`steward_recovery_proposed`) | Clé d'intendant perdue, ou tentative de capture du fonds | Prévenir l'émetteur : toute action signée par sa clé annule la procédure | Clé de secours de l'émetteur installée après 30 jours, ou procédure annulée |
 | Remplacement forcé du gardien (`guardian_change_forced`) | Gardien perdu, ou gouverneur compromis | Vérification ; si imprévu, traiter comme une compromission de clé : 30 jours pour réagir | Gardien confirmé ou remplacement annulé par le gouverneur légitime |
 | Changement privilégié | Opération d'administration | Un second signataire vérifie qu'elle était prévue | Aucun si prévue ; sinon traiter comme une compromission de clé |
 | Entrée proche de l'archivage | TTL non prolongé | Prolongation (automatique avec `--act`) | Entrée revenue au-dessus du seuil |
@@ -69,7 +70,7 @@ La répétition rejoue chaque détecteur avec un déclencheur réel sur testnet,
 npm run monitor -- --rehearse
 ```
 
-Répétition du 15 octobre 2026, sur la version 3 avec gouverneur multisig et délai de 5 minutes :
+Répétition du 15 octobre 2026, sur la version 4 avec gouverneur multisig, prêteur unique (mode D3) et délai de 5 minutes :
 
 | Détecteur | Menace | Déclencheur | Alerte | Action | Restauré |
 |---|---|---|---|---|---|
@@ -82,6 +83,7 @@ Répétition du 15 octobre 2026, sur la version 3 avec gouverneur multisig et d�
 | Événements | Repud.1 | Aucun déclencheur réel possible : chaque pension émet son événement | non, vérification passée | aucune | sans objet |
 | Compromission de clé | Elev.2 | Mise à niveau non annoncée proposée avec les clés du gouverneur | oui, critique | annulation par le gardien 6 s après la proposition, 295 s avant son échéance ; `upgrade` avant le délai refusé (`TimelockPending`) | oui |
 | Gel par l'émetteur | DoS.5 | L'émetteur gèle le contrat, l'emprunteur rembourse | oui, critique | dette soldée, parts inscrites ; livraison refusée pendant le gel, réussie après | oui |
+| Passation du gouverneur avec clés volées (version 4) | Elev.2 | Le gouverneur propose une passation vers une adresse tierce | oui, critique | veto du gardien 11 s après la proposition, 290 s avant son échéance ; acceptation avant le délai refusée (`TimelockPending`) | oui |
 
 Rythme : une répétition complète avant chaque démonstration publique et chaque mise à niveau, puis une par mois en exploitation.
 

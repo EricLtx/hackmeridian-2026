@@ -123,7 +123,7 @@ Three external dependencies per fund, and one optional:
 - an FX feed if the NAV and the loan are in different currencies;
 - optionally, a backup SEP-40 NAV feed.
 
-The contract itself is about 100 KB of WASM (version 3), built with `soroban-sdk` 28; the network limit is 128 KB. An operator must also keep the contract's code entry alive (see the next answer).
+The contract itself is about 115 KB of WASM (version 4), built with `soroban-sdk` 28; the network limit is 128 KB. An operator must also keep the contract's code entry alive (see the next answer).
 
 ### How does it behave with storage archival?
 
@@ -181,7 +181,7 @@ The amount the borrower signs is fixed when the transaction is simulated, a few 
 
 ### How is it tested?
 
-188 host tests across the workspace, 145 of them for Open Window:
+218 host tests across the workspace, 175 of them for Open Window:
 
 - every error path;
 - an intruder refused on every privileged function;
@@ -223,9 +223,9 @@ Privately, as described in [SECURITY.md](../SECURITY.md): GitHub's private vulne
 
 | Role | Can | Cannot |
 |---|---|---|
-| Governor, a multisig account | Propose upgrades and any loosening, tighten at once, admit a fund with the steward, remove a fund alone, unpause | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent |
-| Guardian | Pause new offers and new repos; cancel pending proposals except a forced guardian change; remove a backup feed alone; hand its role over | Unpause; block repurchase, withdrawal or seizure; stop a governor handover |
-| Steward, one per fund | Approve lenders, tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring | Raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
+| Governor, a multisig account | Propose upgrades, a handover and any loosening, tighten at once, admit a fund with the steward, remove a fund alone, unpause, fix the sole lender before the first admission | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent; recover a steward without the guardian and outside the issuer's backup |
+| Guardian | Pause new offers and new repos; cancel pending proposals except a forced guardian change; veto a governor handover; remove a backup feed alone; hand its role to its registered backup | Unpause; block repurchase, withdrawal or seizure; hand its role to an address not registered with the governor |
+| Steward, one per fund | Attest and approve lenders, tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring, register its own backup key | Lend against its fund, directly or through a pre-v4 approval; raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
 | Lender | Create and withdraw its offers; seize at maturity | Seize early; seize to an unapproved address |
 | Borrower | Open and repurchase its repos | Borrow above the haircut-adjusted value |
 | Anyone | Read; move the NAV reference along the model path; apply a proposal once it is due; deliver held-back shares to their recorded beneficiary | Move the reference outside the corridor; apply a proposal early or change it |

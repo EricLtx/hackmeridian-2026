@@ -48,7 +48,7 @@ import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, 
 // The provider is an independent lender the issuer designates: the issuer
 // (steward) approves lenders but never funds offers on its own fund, which
 // EU money market fund rules forbid as sponsor support.
-const ROLES = ["governor", "guardian", "guardianBackup", "steward", "operator", "euroIssuer", "provider", "lender", "borrower"];
+const ROLES = ["governor", "guardian", "guardianBackup", "steward", "stewardBackup", "operator", "euroIssuer", "provider", "lender", "borrower"];
 
 function step(label) {
   process.stdout.write(`\n▸ ${label}\n`);
@@ -311,6 +311,12 @@ async function main() {
       }
     },
   );
+
+  await once(state, "stewardBackup", "Issuer: registers the backup key its fund can be recovered to", async () => {
+    // Only this address can ever replace a lost steward key, after 30 days, with governor and guardian.
+    await invoke(state, "steward", ow, "set_steward_backup", [sv.address(shares), sv.address(pub("stewardBackup"))]);
+    console.log("  steward backup registered by the issuer alone");
+  });
 
   await once(state, "lenders", "Lenders: attested by lender and issuer, then approved (the issuer never lends)", async () => {
     // The declaration (eligibility, independence from the fund) lives off chain; its hash is signed by both.

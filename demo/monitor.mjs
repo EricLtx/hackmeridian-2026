@@ -127,6 +127,8 @@ async function snapshot(monitor) {
     read(state, C.openWindow, "currency_cap", [sv.symbol(currency)]),
   ]);
   const priceError = await probe(state, "governor", C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(C.euro)]);
+  // Version 4: without a registered backup, a lost steward key can never be replaced.
+  const stewardBackup = await read(state, C.openWindow, "steward_backup", [fund]).catch(() => undefined);
 
   const openRepos = repos.filter((r) => statusOf(r) === "Open");
   const releases = [];
@@ -160,7 +162,7 @@ async function snapshot(monitor) {
   // The RPC serves events up to its latest ledger and for about a week back.
   const from = Math.min(Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000), ledger.latest);
   const events = await contractEvents(C.openWindow, from);
-  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, outstanding, cap, currency, priceError, ttl, wasmHash, events };
+  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events };
 }
 
 /** The detectors. Each returns alerts: { detector, threat, level, message, action }. */
@@ -207,6 +209,9 @@ const DETECTORS = {
         action: e.name === "admin_proposed" ? "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay and keys are rotated" : "verify; if unexpected, treat as a key compromise",
         tx: e.txHash,
       });
+    }
+    if (s.stewardBackup === null) {
+      out.push({ level: "warning", message: "the fund's steward has no registered backup: a lost key could never be replaced", action: "ask the issuer to call set_steward_backup" });
     }
     // The one change the guardian cannot veto: 30 days to react, from now.
     for (const e of s.events.filter((ev) => ev.name === "guardian_change_forced")) {
@@ -296,8 +301,16 @@ function report(s, alerts) {
 }
 
 /** The safe automatic actions: pause on a critical alert, cancel an unannounced upgrade, extend TTLs. */
-async function act(alerts, s) {
+async function act(alerts, s, monitor = {}) {
   const done = [];
+  if (alerts.some((a) => /veto_admin/.test(a.action ?? ""))) {
+    const pending = await read(state, C.openWindow, "pending_admin");
+    if (pending && !(monitor.announcedAdmins ?? []).includes(pending.admin)) {
+      const r = await invoke(state, "guardian", C.openWindow, "veto_admin", [sv.address(keypair(state, "guardian").publicKey())]);
+      console.log(`  ACTION   guardian vetoed the governor handover in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      done.push("veto handover");
+    }
+  }
   if (alerts.some((a) => a.action === "cancel")) {
     const pending = await read(state, C.openWindow, "pending_upgrade");
     if (pending) {
@@ -480,6 +493,23 @@ async function rehearse() {
     record("reconciliation", "DoS.5", "issuer freezes the contract, borrower repays", fired && balanced && delivered === false && released.value === true, "issuer lifts the freeze, anyone releases", !firedBy(after, "reconciliation"));
   }
 
+  if (runStep(10)) {
+    console.log("\n10. Governor handover with stolen keys (Elev.2, version 4): the guardian vetoes inside the delay");
+    const attacker = keypair(state, "operator").publicKey(); // stands for an address the attacker controls
+    const proposed = await invoke(state, "governor", C.openWindow, "set_admin", [sv.address(attacker)]);
+    const proposedAt = Date.now();
+    const pending = await read(state, C.openWindow, "pending_admin");
+    const early = await probe(state, "operator", C.openWindow, "accept_admin", []);
+    console.log(`  accept before the delay: ${early ? early.name : "accepted"}; proposal ${explorer(proposed.hash)}`);
+    const { s, alerts } = await pass(monitor);
+    const fired = alerts.some((a) => a.level === "critical" && /governor handover proposed/.test(a.message));
+    const done = await act(alerts, s, monitor);
+    const after = await read(state, C.openWindow, "pending_admin");
+    const governor = await read(state, C.openWindow, "admin");
+    const window = Number(pending.eta) - (await ledgerTime());
+    record("privileged", "Elev.2", "governor handover proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${((Date.now() - proposedAt) / 1000).toFixed(0)} s, ${window} s of the delay left`, !after && governor === pub("governor") && early?.name === "TimelockPending");
+  }
+
   saveMonitor(monitor);
   const file = path.join(STATE_DIR, `rehearsal-${new Date().toISOString().slice(0, 10)}.json`);
   fs.writeFileSync(file, JSON.stringify(results, null, 2));
@@ -501,7 +531,7 @@ async function main() {
   }
   for (;;) {
     const { s, alerts } = await pass(monitor);
-    if (ACT) await act(alerts, s);
+    if (ACT) await act(alerts, s, monitor);
     saveMonitor(monitor);
     if (!WATCH) return;
     await sleep(30_000);

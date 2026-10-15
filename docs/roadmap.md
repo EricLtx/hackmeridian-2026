@@ -96,7 +96,9 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
 | Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |
 | Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 6 seconds later, with 295 of the 300 seconds of the testnet delay left |
-| Internal reviews | Done | Three passes on version 3, every finding fixed with a test |
+| Internal reviews | Done | Three passes on version 3 and two on version 4, every finding fixed with a test |
+| Lenders independent of the fund | Done, version 4 | The issuer can never lend against its fund; lenders attested before approval; an instance can be fixed to a single regulated lender (mode D3); shown live in the demo |
+| Custody safeguards in the contract | Done, version 4 | Governor handover behind the delay with a guardian veto; guardian handover only to a registered backup; lost steward key recovered only to the issuer's own backup, after 30 days, with governor and guardian. Devices and signers are still to set up |
 | Audit package | Ready | [audit-scope.md](audit-scope.md) |
 | Third-party audit | Not started | Needs an auditor and a budget |
 | Bug bounty | Not started | Needs a budget sized to the value at stake |
