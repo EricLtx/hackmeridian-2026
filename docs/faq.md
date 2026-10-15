@@ -116,21 +116,22 @@ The testnet demo uses the Reflector fiat feed for EUR/USD.
 
 ### What does a deployment require from the network?
 
-Three external dependencies per fund:
+Three external dependencies per fund, and one optional:
 
 - a SEP-41 share token whose issuer allowlists the contract;
 - a SEP-40 NAV feed;
-- an FX feed if the NAV and the loan are in different currencies.
+- an FX feed if the NAV and the loan are in different currencies;
+- optionally, a backup SEP-40 NAV feed.
 
-The contract itself is about 47 KB of WASM, built with `soroban-sdk` 28.
+The contract itself is about 100 KB of WASM (version 3), built with `soroban-sdk` 28; the network limit is 128 KB. An operator must also keep the contract's code entry alive (see the next answer).
 
 ### How does it behave with storage archival?
 
-Every write of a persistent entry extends its TTL: when fewer than 30 days remain, it is extended to 120 days. Every privileged call extends the instance. Deadlines are timestamps stored in the repo and compared with the ledger time, never inferred from a TTL. An archived entry can be restored by any caller before use.
+Every write of a persistent entry extends its TTL: when fewer than 30 days remain, it is extended to 120 days. Every privileged call extends the contract instance, but never the code entry: code rent grows with its size, and a user crossing the threshold would otherwise pay it (on testnet, about 530 XLM for 75 KB of code, more than one transaction may carry). The operator extends the code itself, 30 days at a time, and the monitoring alerts when it nears expiry. Deadlines are timestamps stored in the repo and compared with the ledger time, never inferred from a TTL. An archived entry can be restored by any caller before use.
 
 ### Does its cost grow with usage?
 
-No. Each fund, offer and repo is one storage entry, and no function loops over positions. A test opens repos repeatedly and checks that the number of entries read and written stays the same: 17 read and 9 written for `open_repo`.
+No. Each fund, offer and repo is one storage entry, and no function loops over positions. A test opens repos repeatedly and checks that the number of entries read and written stays the same over 200 repos: 16 read and 9 written for `open_repo` (18 read with a backup feed), 12 read and 9 written for `repurchase`.
 
 ### What does it emit?
 
@@ -180,14 +181,16 @@ The amount the borrower signs is fixed when the transaction is simulated, a few 
 
 ### How is it tested?
 
-106 host tests across the workspace, 63 of them for Open Window:
+188 host tests across the workspace, 145 of them for Open Window:
 
 - every error path;
 - an intruder refused on every privileged function;
 - authorization trees checked;
 - events compared in XDR;
 - invariants checked after 300 random operations;
-- the constant-footprint test.
+- the constant-footprint and 200-repo load tests;
+- an upgrade to the real compiled WASM, through the time delay;
+- issuer freezes, allowlist removal, clawback and asset-contract deauthorization during a repo.
 
 An integration module runs the full cycle with the real share token and NAV feed contracts of this repository. CI runs format, clippy with warnings as errors, the tests, the WASM build and a RustSec advisory check on every push.
 
@@ -257,7 +260,7 @@ Open Window is designed to be operated as an ICT service a regulated entity can 
 
 - **Third-party audit:** not done; the package for it is ready in [audit-scope.md](audit-scope.md).
 - **Bug bounty:** not set up; it needs a budget sized to the value at stake.
-- **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where six of seven detectors fired on a real trigger ([procedure-incident.md](procedure-incident.md)); it is not yet run continuously on dedicated infrastructure.
+- **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where every detector with a possible real trigger fired on one ([procedure-incident.md](procedure-incident.md)); it is not yet run continuously on dedicated infrastructure.
 - **Static analysis:** Scout has run, with every alert justified in [securite.md](securite.md), section 7; the OpenZeppelin detectors have not run yet.
 - **Multisig governor in production:** in place on testnet as a 2-of-2 account; the outside signer's organisation is a decision for launch.
 

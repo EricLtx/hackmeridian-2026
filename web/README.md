@@ -31,7 +31,8 @@ npm run preview    # serves dist/
 - `src/chain.js` holds every network call. Reads are simulations from a null account, so the board needs no wallet. Writes are simulated first: a contract refusal is shown before the wallet is asked to sign. A transaction is reported failed only when that is definitive: it failed on chain, or the ledger closed past its validity window without it.
 - Positions come from scanning `get_repo` from id 1 until the first empty id. The `repo_opened` events (filtered on the borrower topic) add the opening transaction of each repo still inside the RPC's event retention window.
 - `src/terms.js` mirrors the contract's interest rule (every started hour, at least one, rounded up to the unit), so previews match what the contract charges.
-- `src/errors.js` names a contract error after the contract that raised it and turns it into a sentence.
+- `src/errors.js` names a contract error after the contract that raised it and turns it into a sentence; when a contract caught another contract's error, the error it returned is the one shown.
+- A closed repo whose shares the issuer still blocks shows the held-back amount and, for its beneficiary, a Release button that retries the delivery.
 
 ## Test
 

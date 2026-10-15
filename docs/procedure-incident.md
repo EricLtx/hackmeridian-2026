@@ -7,8 +7,8 @@ Ce document dit qui agit, comment et dans quel délai quand la surveillance d'Op
 | Rôle | Détient | Peut | Ne peut pas |
 |---|---|---|---|
 | Responsable d'incident | La décision | Déclarer l'incident, choisir l'action, communiquer | Agir seul sur une clé qu'il ne détient pas |
-| Gardien | La clé `guardian` | Suspendre les entrées (`pause`) | Lever la pause ; bloquer une sortie |
-| Gouverneur | La clé `governor` (multisig avant tout dépôt réel) | Lever la pause, retirer un fonds, mettre à niveau | Toucher une pension ouverte |
+| Gardien | La clé `guardian` | Suspendre les entrées (`pause`), annuler une proposition, céder son rôle | Lever la pause ; bloquer une sortie |
+| Gouverneur | La clé `governor`, compte multisig natif (2 sur 2 sur testnet, cible 2 sur 3 sur matériel dont un signataire extérieur) | Lever la pause, retirer un fonds, proposer une mise à niveau ou un assouplissement, remplacer seul le gardien après 30 jours | Toucher une pension ouverte ; appliquer quoi que ce soit avant le délai |
 | Intendant d'un fonds | La clé du fonds | Geler son fonds, révoquer un prêteur, abaisser la référence | Agir sur un autre fonds |
 | Opérateur de prix | La clé du flux NAV | Republier une valeur liquidative | Modifier le contrat |
 
@@ -40,6 +40,8 @@ Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique 
 | Proposition en attente | Opération d'administration ou de l'intendant | Un second signataire vérifie qu'elle était prévue avant son échéance | Aucun si prévue ; sinon annulation par le gardien ou l'intendant |
 | Parts retenues (`ReleaseDeferred`) | L'émetteur gèle le contrat ou retire un bénéficiaire de sa liste blanche | Contacter l'émetteur ; la dette est déjà soldée | Levée du gel, puis `release` par n'importe qui ; le bénéficiaire peut rediriger |
 | Code modifié | Mise à niveau appliquée | Vérifier qu'elle avait été annoncée et que le délai a couru | Revue du WASM déployé contre le code publié (`docs/audit-scope.md`) |
+| Passation du gouverneur proposée ou faite (`admin_proposed`, `admin_changed`) | Changement de signataires prévu, ou clés compromises : la passation n'a pas de délai | Vérification auprès de chaque signataire ; si imprévue, `cancel_admin` et rotation des clés | Nouveaux signataires confirmés |
+| Remplacement forcé du gardien (`guardian_change_forced`) | Gardien perdu, ou gouverneur compromis | Vérification ; si imprévu, traiter comme une compromission de clé : 30 jours pour réagir | Gardien confirmé ou remplacement annulé par le gouverneur légitime |
 | Changement privilégié | Opération d'administration | Un second signataire vérifie qu'elle était prévue | Aucun si prévue ; sinon traiter comme une compromission de clé |
 | Entrée proche de l'archivage | TTL non prolongé | Prolongation (automatique avec `--act`) | Entrée revenue au-dessus du seuil |
 | Plafond à 80 % ou rythme anormal d'ouvertures | Usage réel ou sondage | Examen ; pause si inexpliqué | Plafonds revus par l'intendant ou le gouverneur |

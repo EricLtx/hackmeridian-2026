@@ -22,8 +22,8 @@ This page shows two things. First, what the minimum viable product already prove
 | The lender is paid principal and interest, or gets the shares at maturity | Tests `repurchase_after_a_weekend_pays_interest_to_the_lender`, `seizure_waits_for_maturity_and_goes_to_an_approved_address`; demo scenes `repurchase` and `seize` |
 | The fund issuer keeps control of who holds its shares | Tests `issuer_must_whitelist_the_contract_before_any_repo`, `seizure_delivers_permissioned_shares_to_the_whitelisted_lender` |
 | Accounting stays exact under any sequence of operations | Test `invariants_hold_over_random_sequences`: invariants checked after 300 random operations |
-| Cost per operation does not grow with usage | Test `opening_a_repo_touches_a_constant_number_of_entries`: 17 entries read and 9 written, whatever the number of open repos |
-| The code meets its own security rules | CI on every push: format, clippy with warnings as errors, 106 tests, WASM build, RustSec advisories; independent review with every finding fixed and tested |
+| Cost per operation does not grow with usage | Tests `opening_a_repo_touches_a_constant_number_of_entries` and `many_repos_keep_a_constant_footprint_per_operation`: 16 entries read and 9 written by every `open_repo` over 200 repos |
+| The code meets its own security rules | CI on every push: format, WASM build, clippy with warnings as errors, 188 tests, web build and tests, RustSec advisories; internal reviews of versions 2 and 3 with every finding fixed and tested |
 
 The value for a holder is shown in the demo's last scene. It compares the measured latency with the earliest cash through a fund redemption, at four moments of the week. On a weekday after the cut-off, the redemption route takes about 42 hours. From a Friday evening it takes about 89 hours. Open Window answers within one ledger at any of those moments.
 
@@ -64,18 +64,18 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 |---|---|---|
 | Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; a manual run with Freighter is still to record |
 | Indexer | Partly | Positions are read from the contract and from RPC events; history beyond the RPC's retention of about seven days needs a dedicated indexer |
-| Monitoring | Done | Six of seven detectors fired on a real testnet trigger and the action was taken; the TTL threshold had to be forced, and the event trail has no possible real trigger ([procedure-incident.md](procedure-incident.md)) |
+| Monitoring | Done | Every detector with a possible real trigger fired on one on testnet and the action was taken, including a key-compromise and an issuer-freeze drill; the TTL threshold had to be forced, and the event trail has no possible real trigger ([procedure-incident.md](procedure-incident.md)) |
 | Incident procedure | Done | [procedure-incident.md](procedure-incident.md) |
 | Static analysis | Partly | Scout: 2 medium and 23 enhancement alerts, all justified; OpenZeppelin detectors not run yet |
 | Upgrade test | Done | `upgrade_to_the_built_wasm_keeps_offers_repos_and_roles` |
-| Load test | Done | `many_repos_keep_a_constant_footprint_per_operation`: 200 repos, 17 entries read and 9 written by every `open_repo` |
+| Load test | Done | `many_repos_keep_a_constant_footprint_per_operation`: 200 repos, 16 entries read and 9 written by every `open_repo` |
 
 ### Step 2: hardening for real assets
 
 **Adds:**
 - a multisig governor with an outside signer;
 - a time delay on upgrades and oracle changes;
-- on-chain handling of an issuer freeze during an open repo, version 1.1;
+- on-chain handling of an issuer freeze during an open repo;
 - a second NAV source or a fallback rule per fund;
 - a bug bounty sized to the value at stake, on top of the disclosure policy already published in `SECURITY.md`;
 - a third-party audit of the code that will run on mainnet.
@@ -91,7 +91,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 | Item | State | Evidence |
 |---|---|---|
-| Multisig governor | Done on testnet | 2-of-2 native account with an outside co-signer; both signing paths succeed, a single key is refused with `txBadAuth` |
+| Multisig governor | Done on testnet; custody not done | 2-of-2 native account with a co-signer; both signing paths succeed, a single key is refused with `txBadAuth`. The demo holds both keys on one machine: real custody (separate people and hardware devices) is the critical path to any deployment that holds value |
 | Time delay | Done, version 3 | Upgrades, feed changes, re-anchoring, a new guardian and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
 | Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |

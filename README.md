@@ -6,7 +6,7 @@
 
 An on-chain repo contract on Stellar. Holders of tokenized money market funds borrow stablecoins against their shares at any hour, for a fixed term and a fixed price, when the fund's redemption window is closed.
 
-> **Status:** early development (October 2026). Version 3 is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed and deferred share delivery. It runs on testnet; nothing is deployed on mainnet, and no external audit has been done yet. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
+> **Status:** early development (October 2026). Version 3 is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed and deferred share delivery. It runs on testnet; nothing is deployed on mainnet, and no external audit has been done yet. The critical path to any deployment that holds value is key custody: the governor, guardian and steward keys must sit with separate people on hardware devices, which the testnet demo does not do. The legal form of the transaction and the operator's status are being qualified with counsel. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
 
 ## Why
 
@@ -52,7 +52,8 @@ sequenceDiagram
 - The NAV is checked against a corridor predicted from a reference, not against the previous reading: a money market fund share grows slowly and predictably, so a jump is a faulty price, not a market move. The reference never falls and rises at most at a maximum yield, so a faulty feed cannot drag it.
 - Three roles: a governor (registry, risk envelope, upgrades), a guardian (pause only), and a steward per fund, the issuer, who approves lenders and tunes its fund inside the envelope. A fund is admitted only when the governor and its steward sign the same call. Error codes and exported types are append-only.
 - Footprint: a repo is three transactions (offer, open, repurchase). The network's published estimates are about 0.2 Wh and 0.06 g CO2 per transaction (SDF and PwC, 2022; an independent 2021 measurement gives 0.222 Wh), so one repo costs well under one watt-hour. The design keeps it that way: constant cost per operation, no loops, minimal storage with TTL management, no polling.
-- Controls in place: an allowlist of accepted stablecoins, caps per repo, per fund and per currency, and an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure. Planned before any real deposit: a multisig governor with a time delay on upgrades and oracle changes. Details in [docs/securite.md](docs/securite.md).
+- Controls in place: an allowlist of accepted stablecoins; caps per repo, per fund and per currency; an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure; a time delay with a guardian veto on upgrades, feed changes and every loosening; shares delivered later, never blocked, when an issuer freezes them. Details in [docs/securite.md](docs/securite.md).
+- Keys: every role is an ordinary Stellar account, so the governor is a native multisig and any role can sit on hardware wallets that sign Soroban calls. Operations extend the contract instance but never its code entry, whose rent the operator pays.
 
 ## Contract interface
 
@@ -100,26 +101,31 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Model-based NAV corridor, cross price through an FX feed with its own band and haircut
 - [x] Independent security review; every finding fixed or recorded, with a test per fix
 - [x] Demo contracts: allowlisted fund share token (`fund-token`) and operator-fed SEP-40 feed (`nav-oracle`)
-- [x] Monitoring plan implemented and rehearsed on testnet: six of seven detectors fired on a real trigger ([docs/procedure-incident.md](docs/procedure-incident.md))
+- [x] Monitoring plan implemented and rehearsed on testnet: every detector with a possible real trigger fired on one ([docs/procedure-incident.md](docs/procedure-incident.md))
 - [x] Upgrade test with the real WASM, 200-repo load test at constant cost, Scout static analysis with every alert justified
 - [x] Version 3 (October 2026): time delay on upgrades, feed changes and every loosening; guardian veto that the governor alone cannot remove inside a window; backup NAV feed; shares delivered later when the issuer blocks them, instead of a blocked exit
 - [x] Native multisig governor with an outside co-signer, on testnet; key-compromise and issuer-freeze drills rehearsed ([docs/procedure-incident.md](docs/procedure-incident.md))
 - [x] Three internal security reviews of version 3, every finding fixed with a test; audit package ready ([docs/audit-scope.md](docs/audit-scope.md))
 - [x] Testnet deployment with test fund tokens and a test oracle: a scripted live demo in [demo/](demo/README.md), with a fallback FX feed
 - [x] Minimal web interface with Freighter: market board, borrow, positions, repurchase, lend, withdraw, take the shares at maturity ([web/](web/README.md))
+- [x] Treasurer's return priced in the live demo with the contract's own interest rule
+- [ ] Key custody, the critical path: governor signers on separate hardware devices with one outside the team, a guardian restricted to pause and cancel, issuer stewards held in multisig
+- [ ] Contract hardening found while designing custody: a time delay on the governor handover, a guardian handover limited to a pre-registered backup, a recovery path for a lost steward key
+- [ ] Schema version and governed `migrate`; interface frozen at the audited tag
 - [ ] OpenZeppelin detectors for Soroban, and an indexer that keeps history beyond the RPC's retention
+- [ ] Legal qualification of the transaction and of the operator, with counsel
 - [ ] Third-party audit before any mainnet deployment, and a bug bounty sized to the value at stake
 
 ## Security
 
-[docs/securite.md](docs/securite.md) (French) holds the threat model, the contract invariants, the vulnerability classes mapped to this contract, the controls already in place and the decisions taken for the specification (price freshness and a model-based NAV corridor per fund, MiCA-only stablecoin allowlist, emergency pause limited to new entries, multisig administrator with a time delay, launch caps, first-loss buffer), and maps the contractual requirements an EU-regulated issuer must pass on to its ICT providers under DORA (Regulation (EU) 2022/2554, Article 30). [docs/modele-menace-stride.md](docs/modele-menace-stride.md) (French) is the STRIDE threat model with a first monitoring plan. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
+[docs/securite.md](docs/securite.md) (French) holds the threat model, the contract invariants, the vulnerability classes mapped to this contract, the controls already in place and the decisions taken for the specification (price freshness and a model-based NAV corridor per fund, MiCA-only stablecoin allowlist, emergency pause limited to new entries, multisig administrator with a time delay, launch caps, first-loss buffer), and maps the contractual requirements an EU-regulated issuer must pass on to its ICT providers under DORA (Regulation (EU) 2022/2554, Article 30). [docs/modele-menace-stride.md](docs/modele-menace-stride.md) (French) is the STRIDE threat model with its monitoring plan, rehearsed on testnet; [docs/procedure-incident.md](docs/procedure-incident.md) (French) says who acts on each alert; [docs/audit-scope.md](docs/audit-scope.md) is the package for external auditors. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
 
 The enforced part of the baseline:
 
 - `rust-toolchain.toml` pins Rust 1.98.1 with the `wasm32v1-none` target, `rustfmt` and `clippy`.
 - Workspace lints deny `unsafe_code`, unchecked arithmetic (`clippy::arithmetic_side_effects`), `unwrap`, `expect`, `panic!` and slice indexing in contract code. Tests opt out explicitly.
 - Overflow checks stay on in release and test profiles.
-- CI runs `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`, `stellar contract build` and a RustSec advisory check on `Cargo.lock`. Every third-party action is pinned to a commit SHA and kept current by Dependabot. `make lint`, `make audit` and `make scout` in `contracts/night-window/` reproduce the checks locally.
+- CI runs `cargo fmt --check`, `stellar contract build`, `cargo clippy --all-targets -D warnings`, `cargo test` (the upgrade test uploads the built WASM), the web interface's build and unit tests, and a RustSec advisory check on `Cargo.lock`. Every third-party action is pinned to a commit SHA and kept current by Dependabot. `make lint`, `make audit` and `make scout` in `contracts/night-window/` reproduce the checks locally.
 - Maintenance rule: the workspace stays within the two latest major versions of `soroban-sdk`, the ones that receive security fixes, and is rebuilt and retested at every Stellar protocol upgrade. Deadlines are stored as timestamps, never derived from storage TTLs, so changes in ledger timing do not affect them.
 
 ## Repository layout

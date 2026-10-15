@@ -94,7 +94,7 @@ Re-admission anchors the NAV reference on the live NAV, so run `repair` before `
 
 ## Monitoring
 
-`monitor.mjs` implements the monitoring plan of [docs/modele-menace-stride.md](../docs/modele-menace-stride.md), section 3.1. Seven detectors cover the price, the share reconciliation of invariant I2, privileged changes and code upgrades, the pause, storage time to live, exposure against caps, and the event trail of each repo. With `--act`, a critical price or reconciliation alert makes the guardian pause new entries, and entries near archival are extended. Nothing else is automatic: unpausing stays a decision for the governor. What to do for each alert is in [docs/procedure-incident.md](../docs/procedure-incident.md).
+`monitor.mjs` implements the monitoring plan of [docs/modele-menace-stride.md](../docs/modele-menace-stride.md), section 3.1. Seven detectors cover the price, the share reconciliation of invariant I2 (including shares held back by an issuer freeze), privileged changes, pending proposals, governor handovers, forced guardian changes and code upgrades, the pause, storage time to live (contract code included), exposure against caps, and the event trail of each repo. The rehearsal adds two drills: a key compromise (an unannounced upgrade proposal, cancelled by the guardian inside the delay) and an issuer freeze. With `--act`, a critical price or reconciliation alert makes the guardian pause new entries, and entries near archival are extended. Nothing else is automatic: unpausing stays a decision for the governor. What to do for each alert is in [docs/procedure-incident.md](../docs/procedure-incident.md).
 
 ## Outside wallets
 

@@ -31,6 +31,8 @@ Out of scope:
 
 - Every privileged function loads its role (governor, guardian, or the fund's steward) from storage and requires its authorization; a fund is admitted only with both the governor's and the steward's signatures.
 - Every function that consumes a party's authority requires that party's signature; repurchase and seizure load the parties from the stored repo, never from arguments.
+- Upgrades, feed changes, re-anchoring, a new guardian and every loosening of a limit wait for a time delay (48 hours by default), can be cancelled by the guardian, and expire seven days after they fall due; tightening is immediate.
+- When the share token refuses a transfer at repurchase or seizure, the debt still settles and the shares are recorded for later delivery to the recorded beneficiary only.
 - The emergency pause blocks only new offers and new repos; repurchase, withdrawal and seizure always work.
 - Prices come only from the feeds fixed at a fund's admission, are refused when stale, and must lie inside a model-based corridor; caps per repo, per fund and per currency bound the exposure.
 - Arithmetic must be checked, and failure paths return typed errors; the lints that enforce this are denied at the workspace level.
