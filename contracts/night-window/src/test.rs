@@ -131,7 +131,13 @@ fn leak<T>(value: T) -> &'static T {
 
 fn new_token(env: &Env) -> Address {
     let issuer = Address::generate(env);
-    env.register_stellar_asset_contract_v2(issuer).address()
+    let asset = env.register_stellar_asset_contract_v2(issuer);
+    // A permissioned issuer can revoke authorization, like a real fund share:
+    // needed to test an issuer deauthorizing the contract during a repo (S9).
+    asset
+        .issuer()
+        .set_flag(soroban_sdk::testutils::IssuerFlags::RevocableFlag);
+    asset.address()
 }
 
 fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {
@@ -4857,5 +4863,39 @@ fn operations_extend_the_instance_but_not_the_code() {
     assert_eq!(
         code_after, code_before,
         "the code entry is left to the operator"
+    );
+}
+
+/// Real permissioned shares are often a classic asset with authorization
+/// required, held through its Stellar Asset Contract. When the issuer
+/// deauthorizes the contract, the asset contract refuses the transfer: the
+/// repurchase must still settle and the shares wait, as with `fund-token`.
+#[test]
+fn asset_contract_deauthorizing_the_contract_defers_the_release() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    let shares_before = balance(&f.env, &f.shares, &f.borrower);
+    let issuer = StellarAssetClient::new(&f.env, &f.shares);
+
+    issuer.set_authorized(&f.contract_id, &false);
+    f.client.repurchase(&repo_id);
+    let pending = f
+        .client
+        .pending_release(&repo_id)
+        .expect("shares recorded as owed");
+    assert_eq!(pending.to, f.borrower);
+    assert_eq!(pending.shares, 10_000 * ONE);
+    assert!(
+        !f.client.release(&repo_id),
+        "still refused while deauthorized"
+    );
+    assert_eq!(balance(&f.env, &f.shares, &f.borrower), shares_before);
+
+    issuer.set_authorized(&f.contract_id, &true);
+    assert!(f.client.release(&repo_id));
+    assert_eq!(f.client.pending_release(&repo_id), None);
+    assert_eq!(
+        balance(&f.env, &f.shares, &f.borrower),
+        shares_before + 10_000 * ONE
     );
 }
