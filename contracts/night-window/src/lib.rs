@@ -16,8 +16,9 @@
 //!   the governor;
 //! - steward, one per fund (the issuer's key): approves attested lenders,
 //!   tunes its fund inside the envelope, freezes its fund, marks sponsor
-//!   offers; never lends on its fund (MMF Regulation, Art. 35); replaced
-//!   without its key only by the governor and the guardian after 30 days;
+//!   offers; never lends on its fund (MMF Regulation, Art. 35); a lost key
+//!   is replaced, after 30 days and with the governor and the guardian,
+//!   only by the backup the steward named;
 //! - lenders: independent of the fund's steward; in a sole-lender instance,
 //!   one lender fixed before anything is at stake;
 //! - anyone: refreshes a fund's NAV reference inside the corridor, applies a
@@ -183,6 +184,7 @@ impl OpenWindow {
         ensure_due(&env, pending.eta)?;
         let previous = storage::governor(&env);
         storage::set_governor(&env, &pending.admin);
+        storage::next_governance_generation(&env);
         remove_pending_admin(&env);
         drop_governor_proposals(&env, &pending.admin);
         storage::bump_instance(&env);
@@ -201,6 +203,9 @@ impl OpenWindow {
         drop_pending_admin(&env, &governor)
     }
 
+    // A hostile guardian that vetoes every handover is answered by
+    // `force_guardian_change`: complete it before handing the governor over.
+
     /// Vetoes a governor handover: the guardian's answer to a governor
     /// quorum that proposes a successor it should not. `caller` must be the
     /// guardian or the governor.
@@ -213,8 +218,7 @@ impl OpenWindow {
     }
 
     /// The proposed governor and when it may accept, unless the proposal has
-    /// expired. A handover proposed before version 4 shows with eta now: it
-    /// was proposed under rules that let it be accepted at once.
+    /// expired. One proposed before version 4 counts as expired.
     pub fn pending_admin(env: Env) -> Option<PendingAdminChange> {
         pending_admin_change(&env).filter(|p| is_live(&env, p.eta))
     }
@@ -703,6 +707,9 @@ impl OpenWindow {
         storage::currency_outstanding(&env, &currency)
     }
 
+    // The sole lender can never change: it must be an account whose signers
+    // rotate (native multisig or smart account), never a bare key.
+
     /// Makes this a single-lender instance (bilateral mode): from now on only
     /// `lender` may create offers, which anyone, supervisors included, can
     /// check on chain. Allowed once, before the first admission and the first
@@ -754,6 +761,8 @@ impl OpenWindow {
             if on_record != config.steward {
                 on_record.require_auth();
             }
+            // Either way the steward on record signed.
+            steward_alive(&env, &fund, &on_record);
         }
         let previous = storage::fund_state(&env, &fund).ok();
         let admitted = storage::has_fund(&env, &fund);
@@ -779,7 +788,7 @@ impl OpenWindow {
                     eta,
                 },
             );
-            storage::mark_funds_admitted(&env);
+            mark_funds_admitted(&env);
             storage::bump_instance(&env);
             FundChangeProposed { fund, eta }.publish(&env);
             return Ok(());
@@ -809,11 +818,15 @@ impl OpenWindow {
     /// the guardian or the fund's current steward.
     pub fn cancel_fund_change(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+        let steward = is_steward(&env, &fund, &caller);
+        if !is_governor_or_guardian(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if storage::pending_fund_change(&env, &fund).is_none() {
             return Err(Error::NotProposed);
+        }
+        if steward {
+            steward_alive(&env, &fund, &caller);
         }
         storage::remove_pending_fund_change(&env, &fund);
         // A removed fund's re-anchor was read from the re-admission being
@@ -870,14 +883,40 @@ impl OpenWindow {
 
     // -- Steward recovery -----------------------------------------------------
 
-    /// Proposes a new steward for a fund whose steward key is lost (custody
-    /// gap I14): without this path, a lost bare key would keep the fund out
-    /// for good. It takes the governor and the guardian together, and waits
-    /// for the longest delay, thirty days, during which the steward on record
-    /// or the governor can cancel it: a steward whose key still works sees
-    /// it coming and stops it. Works for a removed fund too, whose steward on
-    /// record gates its re-admission. The new steward must not be a lender
-    /// approved on the fund. Replaces an earlier proposal.
+    /// Names the successor a steward recovery may install for this fund,
+    /// at once. Requires the fund's steward on record alone: the key holder
+    /// names its own successor, so the governor and the guardian can never
+    /// pick the issuer's replacement. Replaces an earlier backup. Must not be
+    /// a lender approved on the fund.
+    pub fn set_steward_backup(env: Env, fund: Address, backup: Address) -> Result<(), Error> {
+        let steward = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
+        steward.require_auth();
+        if storage::lender_approved(&env, &fund, &backup) {
+            return Err(Error::StewardCannotLend);
+        }
+        steward_alive(&env, &fund, &steward);
+        storage::set_steward_backup(&env, &fund, &backup);
+        StewardBackupSet { fund, backup }.publish(&env);
+        Ok(())
+    }
+
+    /// The successor a fund's steward named, if any.
+    pub fn steward_backup(env: Env, fund: Address) -> Option<Address> {
+        storage::steward_backup(&env, &fund)
+    }
+
+    // Recovery answers a lost steward key. A stolen one is answered at once
+    // by `remove_fund`: the fund then cannot return without its issuer.
+
+    /// Proposes to install the steward's registered backup for a fund whose
+    /// steward key is lost (custody gap I14): without this path, a lost bare
+    /// key would keep the fund out for good. It takes the governor and the
+    /// guardian, two distinct keys, and waits for the longest delay, thirty
+    /// days. Any action the steward signs on the fund meanwhile proves its
+    /// key alive and cancels it; the steward on record or the governor can
+    /// also cancel it. It dies if the steward or a governance role changes
+    /// before it applies. Works for a removed fund too. Replaces an earlier
+    /// proposal.
     pub fn propose_steward_recovery(
         env: Env,
         fund: Address,
@@ -885,10 +924,15 @@ impl OpenWindow {
     ) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         let guardian = storage::guardian(&env);
-        if guardian != governor {
-            guardian.require_auth();
+        // One key holding both roles must not replace an issuer on its own.
+        if guardian == governor {
+            return Err(Error::Unauthorized);
         }
-        storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
+        guardian.require_auth();
+        let previous = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
+        if storage::steward_backup(&env, &fund) != Some(new_steward.clone()) {
+            return Err(Error::NoStewardBackup);
+        }
         if storage::lender_approved(&env, &fund, &new_steward) {
             return Err(Error::StewardCannotLend);
         }
@@ -902,6 +946,8 @@ impl OpenWindow {
             &fund,
             &PendingStewardRecovery {
                 steward: new_steward.clone(),
+                previous,
+                generation: storage::governance_generation(&env),
                 eta,
             },
         );
@@ -919,11 +965,19 @@ impl OpenWindow {
     /// within the grace period. Anyone may call it. Proposals the previous
     /// steward signed go with it: a pending replacement would otherwise put
     /// the lost key back, and loosened limits, a re-anchor or a fallback
-    /// carry a signature that may now be an attacker's.
+    /// carry a signature that may now be an attacker's. The backup is
+    /// consumed.
     pub fn apply_steward_recovery(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_steward_recovery(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
         let previous = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
+        // A proposal made against another steward, or signed by governance
+        // keys since replaced, is not this situation any more.
+        if previous != pending.previous
+            || storage::governance_generation(&env) != pending.generation
+        {
+            return Err(Error::NotProposed);
+        }
         // An approval may have been granted during the thirty days.
         if storage::lender_approved(&env, &fund, &pending.steward) {
             return Err(Error::StewardCannotLend);
@@ -939,6 +993,7 @@ impl OpenWindow {
             storage::set_fund(&env, &fund, &config);
         }
         storage::set_last_steward(&env, &fund, &pending.steward);
+        storage::remove_steward_backup(&env, &fund);
         storage::bump_instance(&env);
         StewardRecovered {
             fund,
@@ -1000,6 +1055,7 @@ impl OpenWindow {
         if steward != governor {
             steward.require_auth();
         }
+        steward_alive(&env, &fund, &steward);
         let config = pricing_config(&env, &fund)?;
         let (nav, fx) = read_anchor(&env, &fund, &config)?;
         let nav_value = nav.price.mantissa();
@@ -1132,11 +1188,15 @@ impl OpenWindow {
     /// guardian or the fund's steward on record.
     pub fn cancel_reanchor(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+        let steward = is_steward(&env, &fund, &caller);
+        if !is_governor_or_guardian(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_reanchor(&env, &fund, &caller) {
             return Err(Error::NotProposed);
+        }
+        if steward {
+            steward_alive(&env, &fund, &caller);
         }
         storage::bump_instance(&env);
         Ok(())
@@ -1161,6 +1221,7 @@ impl OpenWindow {
         storage::require_governor(&env);
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
+        steward_alive(&env, &fund, &config.steward);
         if storage::fallback(&env, &fund).is_none()
             && storage::fallback_count(&env) >= MAX_FALLBACKS
         {
@@ -1197,11 +1258,15 @@ impl OpenWindow {
     /// guardian or the fund's steward.
     pub fn cancel_fallback(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+        let steward = is_steward(&env, &fund, &caller);
+        if !is_governor_or_guardian(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if storage::pending_fallback(&env, &fund).is_none() {
             return Err(Error::NotProposed);
+        }
+        if steward {
+            steward_alive(&env, &fund, &caller);
         }
         storage::remove_pending_fallback(&env, &fund);
         storage::bump_instance(&env);
@@ -1228,6 +1293,7 @@ impl OpenWindow {
             } else {
                 return Err(Error::Unauthorized);
             }
+            steward_alive(&env, &fund, &steward);
         }
         if storage::fallback(&env, &fund).is_none() {
             return Err(Error::NoFallback);
@@ -1308,6 +1374,7 @@ impl OpenWindow {
     ) -> Result<(), Error> {
         let current = storage::fund(&env, &fund)?;
         current.steward.require_auth();
+        steward_alive(&env, &fund, &current.steward);
         let mut config = current.clone();
         config.haircut_bps = haircut_bps;
         config.max_principal_per_repo = max_principal_per_repo;
@@ -1370,11 +1437,15 @@ impl OpenWindow {
         caller: Address,
     ) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) && !is_steward(&env, &fund, &caller) {
+        let steward = is_steward(&env, &fund, &caller);
+        if !is_governor_or_guardian(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_fund_limits(&env, &fund, &caller) {
             return Err(Error::NotProposed);
+        }
+        if steward {
+            steward_alive(&env, &fund, &caller);
         }
         Ok(())
     }
@@ -1387,10 +1458,11 @@ impl OpenWindow {
     /// Approves or revokes a lender for a fund, from the issuer's own list of
     /// authorized holders: seized shares can then always reach the lender
     /// (decision S8). An approval needs the lender's attestation for the
-    /// fund (`attest_lender`), and the steward, current or on record, can
-    /// never approve itself: the issuer does not lend against its own fund
-    /// (MMF Regulation, Art. 35). A revocation needs neither and keeps the
-    /// attestation. Requires the fund's steward.
+    /// fund, co-signed by the current steward, and the steward can never
+    /// approve itself: the issuer does not lend against its own fund (MMF
+    /// Regulation, Art. 35). A revocation also removes the attestation, so a
+    /// return needs a fresh one; the events keep the trail. Requires the
+    /// fund's steward.
     pub fn approve_lender(
         env: Env,
         fund: Address,
@@ -1399,11 +1471,17 @@ impl OpenWindow {
     ) -> Result<(), Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
+        steward_alive(&env, &fund, &config.steward);
         if approved {
             ensure_not_steward(&env, &fund, &config, &lender)?;
-            if !storage::attested(&env, &fund, &lender) {
+            // An attestation co-signed by a replaced steward backs nothing.
+            if !storage::attestation_for_approval(&env, &fund, &lender)
+                .is_some_and(|attestation| attestation.steward == config.steward)
+            {
                 return Err(Error::AttestationMissing);
             }
+        } else {
+            storage::remove_lender_attestation(&env, &fund, &lender);
         }
         storage::set_lender_approved(&env, &fund, &lender, approved);
         LenderApproval {
@@ -1435,12 +1513,14 @@ impl OpenWindow {
         config.steward.require_auth();
         lender.require_auth();
         ensure_not_steward(&env, &fund, &config, &lender)?;
+        steward_alive(&env, &fund, &config.steward);
         storage::set_lender_attestation(
             &env,
             &fund,
             &lender,
             &LenderAttestation {
                 declaration: declaration.clone(),
+                steward: config.steward,
                 at: env.ledger().timestamp(),
             },
         );
@@ -1467,6 +1547,7 @@ impl OpenWindow {
     pub fn freeze_fund(env: Env, fund: Address, frozen: bool) -> Result<(), Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
+        steward_alive(&env, &fund, &config.steward);
         let mut state = storage::fund_state(&env, &fund)?;
         state.frozen = frozen;
         storage::set_fund_state(&env, &fund, &state);
@@ -1483,6 +1564,7 @@ impl OpenWindow {
     pub fn reset_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
+        steward_alive(&env, &fund, &config.steward);
         let mut state = storage::fund_state(&env, &fund)?;
         let fallback = storage::fallback_for_pricing(&env, &fund);
         let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
@@ -1491,11 +1573,13 @@ impl OpenWindow {
         Ok(set_reference(&env, &fund, &mut state, lowered, timestamp))
     }
 
-    /// Marks or unmarks an offer as its issuer's sponsor offer. The fund must
-    /// be accepted by the offer. Requires the fund's steward.
+    /// Marks an offer as designated by the fund's issuer. A label only: an
+    /// independent lender funds it, with no privilege. The offer must accept
+    /// the fund. Requires the fund's steward.
     pub fn set_sponsor(env: Env, offer_id: u64, fund: Address, sponsor: bool) -> Result<(), Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
+        steward_alive(&env, &fund, &config.steward);
         let mut offer = storage::offer(&env, offer_id)?;
         if !offer.funds.contains(&fund) {
             return Err(Error::FundNotInOffer);
@@ -1704,9 +1788,17 @@ impl OpenWindow {
         if coin.currency != config.currency {
             return Err(Error::CurrencyMismatch);
         }
+        // An offer made by the steward under an approval granted before
+        // version 4 never lends. Comparing with the configuration suffices:
+        // for an admitted fund the `LastSteward` record, when present, is the
+        // same address, and reading it would cost `open_repo` an entry.
+        if offer.lender == config.steward {
+            return Err(Error::StewardCannotLend);
+        }
         // The steward may have revoked the lender since the offer was made:
-        // a seized position must always be deliverable (decision S8).
-        if !storage::lender_approved(&env, &fund, &offer.lender) {
+        // a seized position must always be deliverable (decision S8). The
+        // read extends the approval past this repo's end.
+        if !storage::lender_approved_extending(&env, &fund, &offer.lender) {
             return Err(Error::LenderNotApproved);
         }
         if shares <= 0 || principal <= 0 {
@@ -1872,8 +1964,12 @@ impl OpenWindow {
             return Err(Error::NotMatured);
         }
         repo.lender.require_auth();
-        if !storage::lender_approved_for_exit(&env, &repo.fund, &to) {
+        if !storage::lender_approved_extending(&env, &repo.fund, &to) {
             return Err(Error::LenderNotApproved);
+        }
+        // Covers an approval of the steward granted before version 4.
+        if is_steward_or_last(&env, &repo.fund, &to) {
+            return Err(Error::StewardCannotLend);
         }
 
         release_outstanding(&env, &repo)?;
@@ -1936,8 +2032,11 @@ impl OpenWindow {
             RepoStatus::Repurchased => repo.borrower.require_auth(),
             RepoStatus::Defaulted => {
                 repo.lender.require_auth();
-                if !storage::lender_approved_for_exit(&env, &repo.fund, &to) {
+                if !storage::lender_approved_extending(&env, &repo.fund, &to) {
                     return Err(Error::LenderNotApproved);
+                }
+                if is_steward_or_last(&env, &repo.fund, &to) {
+                    return Err(Error::StewardCannotLend);
                 }
             }
             // Shares are only deferred when a repo closes.
@@ -1977,6 +2076,7 @@ fn install_max_term(env: &Env, max_term: u64) {
 /// the hostile one.
 fn install_guardian(env: &Env, guardian: Address) {
     storage::remove_guardian_backup(env);
+    storage::next_governance_generation(env);
     storage::set_guardian(env, &guardian);
     storage::bump_instance(env);
     GuardianChanged { guardian }.publish(env);
@@ -2027,18 +2127,56 @@ fn ensure_not_steward(
     Ok(())
 }
 
+/// Whether `who` is the fund's steward or its `LastSteward` record. For an
+/// admitted fund the two agree whenever the record exists (`install_fund`
+/// and `apply_steward_recovery` write both); the record alone covers a
+/// removed fund.
+fn is_steward_or_last(env: &Env, fund: &Address, who: &Address) -> bool {
+    storage::fund(env, fund).is_ok_and(|config| config.steward == *who)
+        || storage::last_steward(env, fund).is_some_and(|s| s == *who)
+}
+
+/// A steward-signed action on `fund` proves the steward key is alive: a
+/// pending recovery of that fund, meant for a lost key, goes.
+fn steward_alive(env: &Env, fund: &Address, steward: &Address) {
+    if storage::pending_steward_recovery(env, fund).is_some() {
+        storage::remove_pending_steward_recovery(env, fund);
+        StewardRecoveryCancelled {
+            fund: fund.clone(),
+            by: steward.clone(),
+        }
+        .publish(env);
+    }
+}
+
+/// Records that value can be at stake. On the first admission, a governor
+/// handover proposed during bootstrap goes: it was due at once, and from
+/// now on a handover must wait for the delay.
+fn mark_funds_admitted(env: &Env) {
+    if storage::funds_admitted(env) {
+        return;
+    }
+    storage::mark_funds_admitted(env);
+    if let Some(pending) = pending_admin_change(env) {
+        remove_pending_admin(env);
+        AdminProposalCancelled {
+            proposed: pending.admin,
+            by: env.current_contract_address(),
+        }
+        .publish(env);
+    }
+}
+
 /// The pending governor handover: the version 4 record, or a version 3
-/// `PendingAdmin` left by an upgrade, which was acceptable at once and is
-/// treated as due now.
+/// `PendingAdmin` left by an upgrade. The latter is never honoured: it was
+/// proposed without the delay, so it shows as expired (eta 0) and can only
+/// be cleared, by a cancellation, a veto or a new proposal.
 fn pending_admin_change(env: &Env) -> Option<PendingAdminChange> {
     if let Some(pending) = storage::instance_value(env, &DataKey::PendingAdminChange) {
         return Some(pending);
     }
     let admin = storage::instance_value(env, &DataKey::PendingAdmin)?;
-    Some(PendingAdminChange {
-        admin,
-        eta: env.ledger().timestamp(),
-    })
+    Some(PendingAdminChange { admin, eta: 0 })
 }
 
 fn remove_pending_admin(env: &Env) {
@@ -2501,11 +2639,22 @@ fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) 
     drop_pending_reanchor(env, &fund, &by);
     if storage::steward_on_record(env, &fund).is_some_and(|previous| previous != config.steward) {
         drop_pending_fallback(env, &fund, &by);
+        // A recovery and a backup concern the steward leaving office; the
+        // new one names its own backup.
+        if storage::pending_steward_recovery(env, &fund).is_some() {
+            storage::remove_pending_steward_recovery(env, &fund);
+            StewardRecoveryCancelled {
+                fund: fund.clone(),
+                by: by.clone(),
+            }
+            .publish(env);
+        }
+        storage::remove_steward_backup(env, &fund);
     }
     storage::set_fund(env, &fund, &config);
     storage::set_fund_state(env, &fund, &state);
     storage::set_last_steward(env, &fund, &config.steward);
-    storage::mark_funds_admitted(env);
+    mark_funds_admitted(env);
     storage::bump_instance(env);
     FundSet {
         fund,

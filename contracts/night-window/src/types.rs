@@ -115,6 +115,12 @@ pub enum DataKey {
     /// Persistent: replacement of a fund's steward, whose key is lost,
     /// waiting for the longest delay.
     PendingStewardRecovery(Address),
+    /// Persistent: the successor a fund's steward named for itself, the only
+    /// address a steward recovery may install.
+    StewardBackup(Address),
+    /// Instance: counts governor and guardian changes, so that a proposal
+    /// signed by keys since replaced can be recognised.
+    GovernanceGeneration,
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -465,17 +471,24 @@ pub struct PendingAdminChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LenderAttestation {
     pub declaration: BytesN<32>,
+    /// The steward who co-signed; an approval needs it to still be the
+    /// fund's steward.
+    pub steward: Address,
     /// Ledger timestamp of the signature.
     pub at: u64,
 }
 
-/// A new steward for a fund whose steward key is lost, proposed by the
-/// governor and the guardian together, waiting for the longest delay
-/// (custody gap I14).
+/// The steward's own backup, proposed by the governor and the guardian
+/// together for a lost steward key, waiting for the longest delay (custody
+/// gap I14).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingStewardRecovery {
     pub steward: Address,
+    /// The steward on record at the proposal; it must still be at the apply.
+    pub previous: Address,
+    /// Governance generation at the proposal; it must still be at the apply.
+    pub generation: u64,
     /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }

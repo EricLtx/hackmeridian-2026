@@ -403,6 +403,13 @@ pub struct GuardianBackupSet {
 }
 
 #[contractevent]
+pub struct StewardBackupSet {
+    #[topic]
+    pub fund: Address,
+    pub backup: Address,
+}
+
+#[contractevent]
 pub struct StewardRecoveryProposed {
     #[topic]
     pub fund: Address,

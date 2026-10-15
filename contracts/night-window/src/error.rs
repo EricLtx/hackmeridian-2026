@@ -108,4 +108,7 @@ pub enum Error {
     /// The sole lender can be chosen once, before the first admission and the
     /// first offer, and never changes.
     SoleLenderFixed = 44,
+    /// A steward recovery goes only to the backup the steward registered;
+    /// none is registered, or the recovery names another address.
+    NoStewardBackup = 45,
 }

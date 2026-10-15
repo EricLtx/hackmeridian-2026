@@ -233,14 +233,25 @@ pub fn lender_approved(env: &Env, fund: &Address, lender: &Address) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether `lender` is approved for `fund`, read on an exit path (seizure,
-/// redirection of seized shares). An approval is written once and may be
-/// read only months later by these exits: reading it extends it, so the
-/// approval an exit depends on does not age into archival.
-pub fn lender_approved_for_exit(env: &Env, fund: &Address, lender: &Address) -> bool {
+// An approval is extended whenever it falls under 45 days: longer than the
+// longest repo term (30 days) plus a margin, so an approval read when a repo
+// opens outlives that repo's maturity and its seizure.
+const LENDER_BUMP_THRESHOLD: u32 = 45 * DAY_IN_LEDGERS;
+
+fn bump_lender(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, LENDER_BUMP_THRESHOLD, BUMP_TO);
+}
+
+/// Whether `lender` is approved for `fund`, read by an opening, a seizure
+/// or a redirection of seized shares. An approval is written once and read
+/// months later: reading it extends it, so the approval a repo depends on
+/// does not age into archival before the repo ends.
+pub fn lender_approved_extending(env: &Env, fund: &Address, lender: &Address) -> bool {
     let approved = lender_approved(env, fund, lender);
     if approved {
-        bump(env, &DataKey::Lender(fund.clone(), lender.clone()));
+        bump_lender(env, &DataKey::Lender(fund.clone(), lender.clone()));
     }
     approved
 }
@@ -248,7 +259,8 @@ pub fn lender_approved_for_exit(env: &Env, fund: &Address, lender: &Address) -> 
 pub fn set_lender_approved(env: &Env, fund: &Address, lender: &Address, approved: bool) {
     let key = DataKey::Lender(fund.clone(), lender.clone());
     if approved {
-        put(env, &key, &true);
+        env.storage().persistent().set(&key, &true);
+        bump_lender(env, &key);
     } else {
         env.storage().persistent().remove(&key);
     }
@@ -470,11 +482,51 @@ pub fn set_last_steward(env: &Env, fund: &Address, steward: &Address) {
 
 /// The `LastSteward` record itself, without falling back on the current
 /// configuration. Absent for a fund admitted before version 3 and never
-/// replaced since.
+/// replaced since. Reading it extends it, as `steward_on_record` does.
 pub fn last_steward(env: &Env, fund: &Address) -> Option<Address> {
+    let key = DataKey::LastSteward(fund.clone());
+    let steward = env.storage().persistent().get(&key)?;
+    bump(env, &key);
+    Some(steward)
+}
+
+pub fn funds_admitted(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::FundsAdmitted)
+        .unwrap_or(false)
+}
+
+pub fn governance_generation(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::GovernanceGeneration)
+        .unwrap_or(0)
+}
+
+/// Marks a governor or guardian change. Saturating: a 64-bit count of role
+/// changes cannot overflow in practice.
+pub fn next_governance_generation(env: &Env) {
+    let next = governance_generation(env).saturating_add(1);
+    env.storage()
+        .instance()
+        .set(&DataKey::GovernanceGeneration, &next);
+}
+
+pub fn steward_backup(env: &Env, fund: &Address) -> Option<Address> {
     env.storage()
         .persistent()
-        .get(&DataKey::LastSteward(fund.clone()))
+        .get(&DataKey::StewardBackup(fund.clone()))
+}
+
+pub fn set_steward_backup(env: &Env, fund: &Address, backup: &Address) {
+    put(env, &DataKey::StewardBackup(fund.clone()), backup);
+}
+
+pub fn remove_steward_backup(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::StewardBackup(fund.clone()));
 }
 
 // -- Version 4: independent lenders and custody --------------------------------
@@ -511,17 +563,25 @@ pub fn lender_attestation(
         .get(&DataKey::LenderAttestation(fund.clone(), lender.clone()))
 }
 
-/// Whether a lender has an attestation for a fund, read to approve it. The
-/// read extends the attestation: it is the trail counsel and auditors follow,
-/// and it must live at least as long as the approval it backs, which this
-/// same call writes.
-pub fn attested(env: &Env, fund: &Address, lender: &Address) -> bool {
+/// A lender's attestation for a fund, read to approve it. The read extends
+/// the attestation: it is the trail counsel and auditors follow, and it must
+/// live at least as long as the approval it backs, which this same call
+/// writes.
+pub fn attestation_for_approval(
+    env: &Env,
+    fund: &Address,
+    lender: &Address,
+) -> Option<LenderAttestation> {
     let key = DataKey::LenderAttestation(fund.clone(), lender.clone());
-    if !env.storage().persistent().has(&key) {
-        return false;
-    }
+    let attestation = env.storage().persistent().get(&key)?;
     bump(env, &key);
-    true
+    Some(attestation)
+}
+
+pub fn remove_lender_attestation(env: &Env, fund: &Address, lender: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::LenderAttestation(fund.clone(), lender.clone()));
 }
 
 pub fn set_lender_attestation(
