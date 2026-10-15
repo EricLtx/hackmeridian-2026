@@ -396,6 +396,11 @@ async function guardrails() {
     sv.u64(24 * 3600),
   ];
 
+  console.log(dim("\n  0. Only independent lenders, only the instance's lender (mode D3)"));
+  const offerArgs = (role) => [sv.address(pub(role)), sv.address(C.euro), sv.i128(1_000n * ONE), sv.u32(300), sv.u64(24 * 3600), sv.vec([sv.address(C.shares)])];
+  await refused("a second lender, approved by the issuer, offers", "lender", ow, "create_offer", offerArgs("lender"), "NotSoleLender");
+  await refused("the fund's issuer tries to become a lender", "steward", ow, "attest_lender", [sv.address(C.shares), sv.address(pub("steward")), sv.bytes(Buffer.alloc(32))], "StewardCannotLend");
+
   console.log(dim("\n  1. Borrowing above the haircut-adjusted value"));
   await refused(`open_repo for ${fmt(BigInt(q.max_principal) + ONE)} tEUR`, "borrower", ow, "open_repo", openArgs(BigInt(q.max_principal) + ONE), "LoanTooLarge");
 
@@ -467,14 +472,14 @@ async function seize() {
   const now = await ledgerTime();
   line(`Repo #${state.ids.stagedRepo}`, `${fmt(repo.principal)} tEUR against ${fmt(repo.shares, 7, 0)} shares, not repaid`);
   if (now < Number(repo.maturity)) {
-    await refused("seize before maturity", "lender", C.openWindow, "seize", [id, sv.address(pub("lender"))], "NotMatured");
+    await refused("seize before maturity", "provider", C.openWindow, "seize", [id, sv.address(pub("provider"))], "NotMatured");
     line("Matures in", age(Number(repo.maturity) - now));
     return;
   }
-  await refused("seize to an address the issuer has not approved", "lender", C.openWindow, "seize", [id, sv.address(pub("guardian"))], "LenderNotApproved");
-  const before = await balance(C.shares, pub("lender"));
-  await tx("seize", "lender", C.openWindow, "seize", [id, sv.address(pub("lender"))]);
-  line("Lender shares", `${fmt(before, 7, 0)} → ${bold(fmt(await balance(C.shares, pub("lender")), 7, 0))}`);
+  await refused("seize to an address the issuer has not approved", "provider", C.openWindow, "seize", [id, sv.address(pub("guardian"))], "LenderNotApproved");
+  const before = await balance(C.shares, pub("provider"));
+  await tx("seize", "provider", C.openWindow, "seize", [id, sv.address(pub("provider"))]);
+  line("Lender shares", `${fmt(before, 7, 0)} → ${bold(fmt(await balance(C.shares, pub("provider")), 7, 0))}`);
 }
 
 async function value() {

@@ -38,11 +38,15 @@ async function main() {
     }
     console.log(`  holds ${fmt(SHARES_FOR_BORROWER, 7, 0)} fund shares`);
   } else {
-    const approved = await read(state, C.openWindow, "is_lender_approved", [sv.address(C.shares), sv.address(address)]);
-    if (!approved) {
-      await invoke(state, "steward", C.openWindow, "approve_lender", [sv.address(C.shares), sv.address(address), sv.bool(true)]);
+    // Since version 4 a lender needs an attestation signed by itself and the issuer, and this
+    // demo instance runs in mode D3: only its sole lender may make offers.
+    const sole = await read(state, C.openWindow, "sole_lender");
+    if (sole && sole !== address) {
+      console.log(`\n  This instance is run by a single lender (${sole.slice(0, 8)}…): other wallets cannot lend here.`);
+      console.log("  Onboard this wallet as a borrower instead, or deploy a separate instance with it as the sole lender.");
+      return;
     }
-    console.log("  approved as a lender for the demo fund");
+    console.log("  lender onboarding needs the wallet's own signature on `attest_lender`; not available from this script");
   }
 
   let euros;

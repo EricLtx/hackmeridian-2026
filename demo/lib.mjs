@@ -62,7 +62,8 @@ export const ERRORS = {
   25: "ArithmeticOverflow", 26: "OutsideEnvelope", 27: "FundFrozen", 28: "InvalidPrice",
   29: "DuplicateFund", 30: "Unauthorized", 31: "DelayCannotDecrease", 32: "NotProposed",
   33: "TimelockPending", 34: "ReleaseBlocked", 35: "PriceDivergence", 36: "NothingToRelease",
-  37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached",
+  37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached", 40: "StewardCannotLend", 41: "NotSoleLender",
+  42: "AttestationMissing", 43: "NotGuardianBackup", 44: "SoleLenderFixed",
 };
 
 /** Error tables of the other contracts the demo calls. */

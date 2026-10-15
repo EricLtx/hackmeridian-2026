@@ -66,6 +66,7 @@ const PRIVILEGED = new Set([
   "lender_approval", "fund_frozen", "sponsor_set", "timelock_delay_changed", "fund_change_cancelled",
   "fallback_set", "fallback_cancelled", "fallback_removed", "upgrade_cancelled", "upgraded",
   "reanchored", "reanchor_cancelled", "admin_proposal_cancelled", "release_redirected",
+  "sole_lender_set", "lender_attested", "guardian_backup_set", "steward_recovery_cancelled", "steward_recovered",
 ]);
 /** Proposals that take effect after the time delay: the window to verify and cancel (Elev.2). */
 const PROPOSALS = /_proposed$|_change_proposed$/;
@@ -194,12 +195,16 @@ const DETECTORS = {
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
       .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
-    // A governor handover takes effect as soon as the successor accepts: no delay, no veto.
+    // A lost-steward recovery takes the fund from its issuer in 30 days: the issuer must know at once.
+    for (const e of s.events.filter((ev) => ev.name === "steward_recovery_proposed")) {
+      out.push({ level: "critical", message: `steward recovery proposed at ledger ${e.ledger}`, action: "tell the issuer; its steward key cancels it if the key is not lost", tx: e.txHash });
+    }
+    // A governor handover waits for the delay since version 4; the guardian can veto it meanwhile.
     for (const e of s.events.filter((ev) => ev.name === "admin_proposed" || ev.name === "admin_changed")) {
       out.push({
         level: "critical",
         message: `${e.name === "admin_proposed" ? "governor handover proposed" : "governor changed"} at ledger ${e.ledger}`,
-        action: e.name === "admin_proposed" ? "verify with every signer; if unexpected, governor cancel_admin and rotate keys" : "verify; if unexpected, treat as a key compromise",
+        action: e.name === "admin_proposed" ? "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay and keys are rotated" : "verify; if unexpected, treat as a key compromise",
         tx: e.txHash,
       });
     }

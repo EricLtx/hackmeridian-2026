@@ -16,7 +16,8 @@ export const ERRORS = {
   25: "ArithmeticOverflow", 26: "OutsideEnvelope", 27: "FundFrozen", 28: "InvalidPrice",
   29: "DuplicateFund", 30: "Unauthorized", 31: "DelayCannotDecrease", 32: "NotProposed",
   33: "TimelockPending", 34: "ReleaseBlocked", 35: "PriceDivergence", 36: "NothingToRelease",
-  37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached",
+  37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached", 40: "StewardCannotLend", 41: "NotSoleLender",
+  42: "AttestationMissing", 43: "NotGuardianBackup", 44: "SoleLenderFixed",
 };
 
 /** Error tables of the other contracts a transaction can reach. */
@@ -150,6 +151,9 @@ const SENTENCES = {
     ReleaseBlocked: () => "The fund issuer still refuses the transfer of these shares. They stay reserved for you; retry once the issuer lifts its block.",
     NothingToRelease: () => "No shares are waiting for release on this repo.",
     TimelockPending: () => "This change is waiting for its time delay to pass.",
+    NotSoleLender: () => "This instance is run by a single lender: only that lender can make offers here.",
+    StewardCannotLend: () => "The fund's issuer cannot lend against its own fund.",
+    AttestationMissing: () => "The issuer must record this lender's declaration before approving it.",
   },
   "fund-token": {
     NotWhitelisted: (c) => `This wallet is not on the fund's allowlist.${c.command ? ` Ask the operator to run: ${c.command}` : " Ask the operator to onboard it."}`,

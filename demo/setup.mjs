@@ -48,7 +48,7 @@ import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_USD_AT_SETUP, 
 // The provider is an independent lender the issuer designates: the issuer
 // (steward) approves lenders but never funds offers on its own fund, which
 // EU money market fund rules forbid as sponsor support.
-const ROLES = ["governor", "guardian", "steward", "operator", "euroIssuer", "provider", "lender", "borrower"];
+const ROLES = ["governor", "guardian", "guardianBackup", "steward", "operator", "euroIssuer", "provider", "lender", "borrower"];
 
 function step(label) {
   process.stdout.write(`\n▸ ${label}\n`);
@@ -208,6 +208,12 @@ async function main() {
     // Only possible before the first fund is admitted: afterwards the delay can only grow.
     await invoke(state, "governor", ow, "set_timelock_delay", [sv.u64(DEMO_TIMELOCK_SECS)]);
     console.log(`  time delay on upgrades and fund changes: ${DEMO_TIMELOCK_SECS / 60} min`);
+    // Mode D3: one independent lender runs this instance; fixed now, never again.
+    await invoke(state, "governor", ow, "set_sole_lender", [sv.address(pub("provider"))]);
+    console.log(`  sole lender (mode D3): the provider ${pub("provider").slice(0, 8)}…`);
+    // The guardian may only hand its role to this backup, registered by governor and guardian together.
+    await invoke(state, "governor", ow, "set_guardian_backup", [sv.address(pub("guardianBackup"))]);
+    console.log("  guardian backup registered by the governor and the guardian");
   });
 
   await once(state, "issuer", "Issuer: allowlist (holders and the contract), mint shares", async () => {
@@ -306,17 +312,15 @@ async function main() {
     },
   );
 
-  await once(state, "lenders", "Steward: approves two independent lenders (it never lends itself)", async () => {
-    await invoke(state, "steward", ow, "approve_lender", [
-      sv.address(shares),
-      sv.address(pub("lender")),
-      sv.bool(true),
-    ]);
-    await invoke(state, "steward", ow, "approve_lender", [
-      sv.address(shares),
-      sv.address(pub("provider")),
-      sv.bool(true),
-    ]);
+  await once(state, "lenders", "Lenders: attested by lender and issuer, then approved (the issuer never lends)", async () => {
+    // The declaration (eligibility, independence from the fund) lives off chain; its hash is signed by both.
+    for (const role of ["provider", "lender"]) {
+      const declaration = crypto.createHash("sha256").update(`demo declaration of ${pub(role)} for ${shares}`).digest();
+      await invoke(state, role, ow, "attest_lender", [sv.address(shares), sv.address(pub(role)), sv.bytes(declaration)]);
+      await invoke(state, "steward", ow, "approve_lender", [sv.address(shares), sv.address(pub(role)), sv.bool(true)]);
+    }
+    console.log("  provider: attested and approved, the instance's sole lender");
+    console.log("  second lender: attested and approved by the issuer, but this instance only accepts the sole lender");
   });
 
   const funds = sv.vec([sv.address(shares)]);
@@ -341,10 +345,10 @@ async function main() {
     console.log(`  designated offer #${state.ids.sponsorOffer} 300,000 tEUR at 2.50 %, funded by the provider`);
   });
 
-  await once(state, "marketOffer", "Offers: a market offer", async () => {
+  await once(state, "marketOffer", "Offers: a second offer by the sole lender", async () => {
     if (state.ids.marketOffer !== undefined) return;
-    const market = await invoke(state, "lender", ow, "create_offer", [
-      sv.address(pub("lender")),
+    const market = await invoke(state, "provider", ow, "create_offer", [
+      sv.address(pub("provider")),
       sv.address(state.contracts.euro),
       sv.i128(OFFERS.market.amount),
       sv.u32(OFFERS.market.rateBps),
@@ -353,7 +357,7 @@ async function main() {
     ]);
     state.ids.marketOffer = Number(market.value);
     saveState(state);
-    console.log(`  market offer  #${state.ids.marketOffer} 150,000 tEUR at 3.50 %`);
+    console.log(`  second offer  #${state.ids.marketOffer} 150,000 tEUR at 3.50 %, same lender`);
   });
 
   await once(
