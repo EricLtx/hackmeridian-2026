@@ -61,7 +61,7 @@ const ALERT_FILE = path.join(STATE_DIR, "alerts.jsonl");
 
 /** Privileged changes: every one of them is reported (Elev.2). */
 const PRIVILEGED = new Set([
-  "admin_changed", "admin_proposed", "guardian_changed", "envelope_changed", "fund_set", "fund_removed",
+  "guardian_changed", "envelope_changed", "fund_set", "fund_removed",
   "stablecoin_set", "stablecoin_removed", "currency_cap_set", "max_term_changed", "fund_limits_set",
   "lender_approval", "fund_frozen", "sponsor_set", "timelock_delay_changed", "fund_change_cancelled",
   "fallback_set", "fallback_cancelled", "fallback_removed", "upgrade_cancelled", "upgraded",
@@ -194,6 +194,15 @@ const DETECTORS = {
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
       .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
+    // A governor handover takes effect as soon as the successor accepts: no delay, no veto.
+    for (const e of s.events.filter((ev) => ev.name === "admin_proposed" || ev.name === "admin_changed")) {
+      out.push({
+        level: "critical",
+        message: `${e.name === "admin_proposed" ? "governor handover proposed" : "governor changed"} at ledger ${e.ledger}`,
+        action: e.name === "admin_proposed" ? "verify with every signer; if unexpected, governor cancel_admin and rotate keys" : "verify; if unexpected, treat as a key compromise",
+        tx: e.txHash,
+      });
+    }
     // The one change the guardian cannot veto: 30 days to react, from now.
     for (const e of s.events.filter((ev) => ev.name === "guardian_change_forced")) {
       out.push({
