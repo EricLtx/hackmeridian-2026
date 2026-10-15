@@ -140,7 +140,7 @@ Chaque décision ci-dessous a été prise lors du peaufinement du cadrage, sur l
 | Scénario | Ce qui limite la perte | Perte maximale |
 |---|---|---|
 | Prix manipulé ou oracle compromis | Corridor fondé sur un modèle (S2), bande de change et décotes : une manipulation dans le corridor ne crée pas de sous-collatéralisation ; hors corridor, refus | Zéro dans le corridor ; plafond par fonds si l'oracle entier est compromis |
-| Clé admin compromise | Multisig natif ; délai de 48 h sur tout assouplissement et toute mise à niveau, avec veto du gardien que le gouverneur seul ne peut lever avant 30 jours (S7) ; sorties jamais bloquées (S6) ; annulation rejouée sur testnet 10 s après la proposition | Zéro si le gardien veille ; sinon les flux entrés après l'application |
+| Clé admin compromise | Multisig natif ; délai de 48 h sur tout assouplissement et toute mise à niveau, avec veto du gardien que le gouverneur seul ne peut lever avant 30 jours (S7) ; sorties jamais bloquées (S6) ; annulation rejouée sur testnet 6 s après la proposition | Zéro si le gardien veille ; sinon les flux entrés après l'application |
 | Gel ou reprise des parts par l'émetteur | Dette soldée, parts inscrites et livrées à la levée du gel (S9, version 3) ; sorties jamais bloquées | Retard de livraison ; en cas de reprise définitive, les parts reprises, au plus le plafond par fonds |
 | Bug du contrat | Pause des entrées ; sorties intactes ; tampon (S16) | Valeur bloquée au moment du bug, donc plafond total |
 | Prêteur non autorisé à recevoir les parts | Impossible par construction (S8) | Zéro |

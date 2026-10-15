@@ -95,7 +95,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Time delay | Done, version 3 | Upgrades, feed changes, re-anchoring, a new guardian and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
 | Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |
-| Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 10 seconds later, with 290 of the 300 seconds of the testnet delay left |
+| Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 6 seconds later, with 295 of the 300 seconds of the testnet delay left |
 | Internal reviews | Done | Three passes on version 3, every finding fixed with a test |
 | Audit package | Ready | [audit-scope.md](audit-scope.md) |
 | Third-party audit | Not started | Needs an auditor and a budget |

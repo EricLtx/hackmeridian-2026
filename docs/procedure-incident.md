@@ -78,7 +78,7 @@ Répétition du 15 octobre 2026, sur la version 3 avec gouverneur multisig et d�
 | Pause | DoS.4 | Pause par le gardien | oui | levée par le gouverneur | oui |
 | Archivage | DoS.2 | Seuil forcé à 130 jours : aucune entrée n'approche réellement l'archivage | oui | entrées prolongées à environ 140 jours | oui |
 | Événements | Repud.1 | Aucun déclencheur réel possible : chaque pension émet son événement | non, vérification passée | aucune | sans objet |
-| Compromission de clé | Elev.2 | Mise à niveau non annoncée proposée avec les clés du gouverneur | oui, critique | annulation par le gardien 11 s après la proposition, 290 s avant son échéance ; `upgrade` avant le délai refusé (`TimelockPending`) | oui |
+| Compromission de clé | Elev.2 | Mise à niveau non annoncée proposée avec les clés du gouverneur | oui, critique | annulation par le gardien 6 s après la proposition, 295 s avant son échéance ; `upgrade` avant le délai refusé (`TimelockPending`) | oui |
 | Gel par l'émetteur | DoS.5 | L'émetteur gèle le contrat, l'emprunteur rembourse | oui, critique | dette soldée, parts inscrites ; livraison refusée pendant le gel, réussie après | oui |
 
 Rythme : une répétition complète avant chaque démonstration publique et chaque mise à niveau, puis une par mois en exploitation.
