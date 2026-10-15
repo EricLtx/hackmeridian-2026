@@ -181,7 +181,7 @@ The amount the borrower signs is fixed when the transaction is simulated, a few 
 
 ### How is it tested?
 
-218 host tests across the workspace, 175 of them for Open Window:
+247 host tests across the workspace, 204 of them for Open Window:
 
 - every error path;
 - an intruder refused on every privileged function;
@@ -223,9 +223,10 @@ Privately, as described in [SECURITY.md](../SECURITY.md): GitHub's private vulne
 
 | Role | Can | Cannot |
 |---|---|---|
-| Governor, a multisig account | Propose upgrades, a handover and any loosening, tighten at once, admit a fund with the steward, remove a fund alone, unpause, fix the sole lender before the first admission | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent; recover a steward without the guardian and outside the issuer's backup |
+| Governor, a multisig account | Propose upgrades (with the trustee, when one is named), a handover and any loosening, tighten at once, admit a fund with the steward, remove a fund alone, unpause, fix the sole lender and the trustee before the first admission | Move anyone's funds or shares; change an open repo; apply anything before its delay; replace the guardian in less than 30 days without its consent; upgrade or force a guardian change without the trustee; recover a steward without the guardian and outside the issuer's backup; choose the issuer's backup (it can only cancel a replacement) |
 | Guardian | Pause new offers and new repos; cancel pending proposals except a forced guardian change; veto a governor handover; remove a backup feed alone; hand its role to its registered backup | Unpause; block repurchase, withdrawal or seizure; hand its role to an address not registered with the governor |
-| Steward, one per fund | Attest and approve lenders, tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring, register its own backup key | Lend against its fund, directly or through a pre-v4 approval; raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
+| Trustee, optional, fixed at deployment | Co-sign upgrades and forced guardian changes; veto them and a governor handover; hand its role to a successor who accepts (which drops what it had co-signed) | Hold any other role; propose anything; be removed or replaced by anyone else |
+| Steward, one per fund | Attest and approve lenders (approvals end with its tenure: a new steward approves again), tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring, register its own backup key and replace it after the delay | Lend against its fund, directly or through a pre-v4 approval; raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
 | Lender | Create and withdraw its offers; seize at maturity | Seize early; seize to an unapproved address |
 | Borrower | Open and repurchase its repos | Borrow above the haircut-adjusted value |
 | Anyone | Read; move the NAV reference along the model path; apply a proposal once it is due; deliver held-back shares to their recorded beneficiary | Move the reference outside the corridor; apply a proposal early or change it |

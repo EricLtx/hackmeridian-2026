@@ -589,7 +589,20 @@ export async function contractEvents(contractId, startLedger) {
     const request = cursor
       ? { filters: [{ type: "contract", contractIds: [contractId] }], cursor, limit: 200 }
       : { filters: [{ type: "contract", contractIds: [contractId] }], startLedger, limit: 200 };
-    const response = await net(() => server.getEvents(request), "events");
+    let response;
+    try {
+      response = await net(() => server.getEvents(request), "events");
+    } catch (error) {
+      // The public RPC keeps a window of events it announces in this error
+      // (sometimes well under a day): start from its oldest ledger instead.
+      const range = /startLedger must be within the ledger range: (\d+) - (\d+)/.exec(error.message ?? "");
+      if (!cursor && range && Number(range[1]) > startLedger) {
+        startLedger = Number(range[1]);
+        page -= 1;
+        continue;
+      }
+      throw error;
+    }
     for (const e of response.events) {
       const topics = e.topic.map((t) => scValToNative(t));
       out.push({ ledger: e.ledger, name: String(topics[0]), topics: topics.slice(1), data: scValToNative(e.value), txHash: e.txHash });
