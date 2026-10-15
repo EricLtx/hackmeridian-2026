@@ -19,6 +19,13 @@
 //!   offers; never lends on its fund (MMF Regulation, Art. 35); a lost key
 //!   is replaced, after 30 days and with the governor and the guardian,
 //!   only by the backup the steward named;
+//! - trustee (optional, named before anything is at stake, typically the
+//!   fund's issuer or an independent trustee): co-signs every upgrade and
+//!   forced guardian change and can veto them and a governor handover, so a
+//!   lender holding the governor and guardian roles (mode D3) cannot change
+//!   the code alone; it hands its role over only to a successor who signs.
+//!   A lost trustee key means no upgrade ever: no upgrade without independent
+//!   consent (decision S15);
 //! - lenders: independent of the fund's steward; in a sole-lender instance,
 //!   one lender fixed before anything is at stake;
 //! - anyone: refreshes a fund's NAV reference inside the corridor, applies a
@@ -49,8 +56,9 @@ pub use types::{
     AnchorFx, AnchorRate, Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg,
     LenderAttestation, Offer, PendingAdminChange, PendingCurrencyCapChange, PendingEnvelopeChange,
     PendingFallback, PendingFundChange, PendingFundLimitsChange, PendingGuardianChange,
-    PendingMaxTermChange, PendingReanchor, PendingRelease, PendingStewardRecovery, PendingUpgrade,
-    PriceData, PriceSource, Quote, Repo, RepoStatus, RiskEnvelope, StablecoinConfig,
+    PendingMaxTermChange, PendingReanchor, PendingRelease, PendingStewardBackup,
+    PendingStewardRecovery, PendingUpgrade, PriceData, PriceSource, Quote, Repo, RepoStatus,
+    RiskEnvelope, StablecoinConfig,
 };
 
 use events::*;
@@ -123,6 +131,11 @@ impl OpenWindow {
     }
 
     // -- Governor -----------------------------------------------------------
+
+    // Interface (ABI): functions, exported types, events and error codes
+    // freeze at the tag the external audit reviews; from then on they are
+    // append-only (see `types.rs`, `error.rs`). Version 4 is unreleased: the
+    // audit candidates (`audit-v4-rc*`) keep `version()` at 4.
 
     /// Version of the contract interface. Bump on every incompatible change.
     pub fn version() -> u32 {
@@ -208,10 +221,10 @@ impl OpenWindow {
 
     /// Vetoes a governor handover: the guardian's answer to a governor
     /// quorum that proposes a successor it should not. `caller` must be the
-    /// guardian or the governor.
+    /// guardian, the governor or the trustee.
     pub fn veto_admin(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) {
+        if !is_governor_or_guardian(&env, &caller) && !is_trustee(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         drop_pending_admin(&env, &caller)
@@ -252,9 +265,11 @@ impl OpenWindow {
     }
 
     /// Proposes new contract code, applicable by `upgrade` once the delay has
-    /// elapsed. Replaces any earlier proposal. Requires the governor.
+    /// elapsed. Replaces any earlier proposal. Requires the governor, and the
+    /// trustee when one is named.
     pub fn propose_upgrade(env: Env, wasm_hash: BytesN<32>) -> Result<(), Error> {
-        storage::require_governor(&env);
+        let governor = storage::require_governor(&env);
+        require_trustee(&env, &governor);
         let eta = eta(&env)?;
         storage::set_pending_upgrade(
             &env,
@@ -273,11 +288,11 @@ impl OpenWindow {
         storage::pending_upgrade(&env).filter(|p| is_live(&env, p.eta))
     }
 
-    /// Withdraws the proposed upgrade. `caller` must be the governor or the
-    /// guardian: the guardian's veto is what the delay is for.
+    /// Withdraws the proposed upgrade. `caller` must be the governor, the
+    /// guardian or the trustee: their veto is what the delay is for.
     pub fn cancel_upgrade(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) {
+        if !is_governor_or_guardian(&env, &caller) && !is_trustee(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         let pending = storage::pending_upgrade(&env).ok_or(Error::NotProposed)?;
@@ -479,10 +494,12 @@ impl OpenWindow {
     /// longest delay, thirty days in public, and only the governor can cancel
     /// it: the guardian it replaces has no veto here, or a lost key would
     /// freeze governance forever. Replaces an earlier forced change. Requires
-    /// the governor. The signature returns nothing like `set_guardian`, so
-    /// failures are raised as typed contract errors.
+    /// the governor, and the trustee when one is named. The signature returns
+    /// nothing like `set_guardian`, so failures are raised as typed contract
+    /// errors.
     pub fn force_guardian_change(env: Env, guardian: Address) {
-        storage::require_governor(&env);
+        let governor = storage::require_governor(&env);
+        require_trustee(&env, &governor);
         let eta = env
             .ledger()
             .timestamp()
@@ -527,6 +544,65 @@ impl OpenWindow {
     pub fn pending_forced_guardian_change(env: Env) -> Option<PendingGuardianChange> {
         storage::instance_value::<PendingGuardianChange>(&env, &DataKey::PendingForcedGuardian)
             .filter(|p| is_live(&env, p.eta))
+    }
+
+    /// Withdraws a forced guardian change. `caller` must be the governor or
+    /// the trustee.
+    pub fn veto_forced_guardian_change(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if caller != storage::governor(&env) && !is_trustee(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        if !drop_pending_forced_guardian(&env, &caller) {
+            return Err(Error::NotProposed);
+        }
+        storage::bump_instance(&env);
+        Ok(())
+    }
+
+    // -- Trustee ----------------------------------------------------------------
+
+    // A lost trustee key blocks every upgrade and forced guardian change for
+    // good: that is the point, no upgrade without independent consent. The
+    // trustee should be an account whose signers rotate (native multisig).
+
+    /// Names the trustee, whose signature every upgrade and forced guardian
+    /// change then needs, and who may cancel them and veto a governor
+    /// handover. Once, before the first admission and the first offer.
+    /// Requires the governor and the trustee. Proposals made without the
+    /// trustee go.
+    pub fn set_trustee(env: Env, trustee: Address) -> Result<(), Error> {
+        storage::require_governor(&env);
+        if storage::past_bootstrap(&env) || storage::trustee(&env).is_some() {
+            return Err(Error::TrusteeFixed);
+        }
+        ensure_independent_trustee(&env, &trustee)?;
+        trustee.require_auth();
+        let by = env.current_contract_address();
+        drop_pending_upgrade(&env, &by);
+        drop_pending_forced_guardian(&env, &by);
+        storage::set_trustee(&env, &trustee);
+        storage::bump_instance(&env);
+        TrusteeSet { trustee }.publish(&env);
+        Ok(())
+    }
+
+    /// Passes the trustee role to `trustee`, at once. Requires the current
+    /// trustee and `trustee`: no other key names or removes a trustee.
+    pub fn hand_over_trustee(env: Env, trustee: Address) -> Result<(), Error> {
+        let previous = storage::trustee(&env).ok_or(Error::Unauthorized)?;
+        previous.require_auth();
+        ensure_independent_trustee(&env, &trustee)?;
+        trustee.require_auth();
+        storage::set_trustee(&env, &trustee);
+        storage::bump_instance(&env);
+        TrusteeChanged { previous, trustee }.publish(&env);
+        Ok(())
+    }
+
+    /// The trustee, if one is named.
+    pub fn trustee(env: Env) -> Option<Address> {
+        storage::trustee(&env)
     }
 
     pub fn envelope(env: Env) -> RiskEnvelope {
@@ -721,6 +797,9 @@ impl OpenWindow {
         if storage::past_bootstrap(&env) || storage::sole_lender(&env).is_some() {
             return Err(Error::SoleLenderFixed);
         }
+        if storage::trustee(&env).is_some_and(|trustee| trustee == lender) {
+            return Err(Error::TrusteeNotIndependent);
+        }
         storage::set_sole_lender(&env, &lender);
         storage::bump_instance(&env);
         SoleLenderSet { lender }.publish(&env);
@@ -883,12 +962,18 @@ impl OpenWindow {
 
     // -- Steward recovery -----------------------------------------------------
 
-    /// Names the successor a steward recovery may install for this fund,
-    /// at once. Requires the fund's steward on record alone: the key holder
-    /// names its own successor, so the governor and the guardian can never
-    /// pick the issuer's replacement. The backup signs too, proving its key
-    /// exists. Replaces an earlier backup. Must not be a lender approved on
-    /// the fund.
+    // Replacing a backup waits so that a stolen steward key cannot swap it
+    // under a recovery: the governor sees the proposal and cancels it, and a
+    // recovery proposed meanwhile drops it.
+
+    /// Names the successor a steward recovery may install for this fund.
+    /// Requires the fund's steward on record alone: the key holder names its
+    /// own successor, so the governor and the guardian can never pick the
+    /// issuer's replacement. The backup signs too, proving its key exists.
+    /// Must not be a lender approved on the fund. A first backup is set at
+    /// once; replacing one waits for the time delay and applies through
+    /// `apply_steward_backup_change`, the current backup staying valid until
+    /// then.
     pub fn set_steward_backup(env: Env, fund: Address, backup: Address) -> Result<(), Error> {
         let steward = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
         steward.require_auth();
@@ -898,14 +983,75 @@ impl OpenWindow {
             return Err(Error::StewardCannotLend);
         }
         steward_alive(&env, &fund, &steward);
-        storage::set_steward_backup(&env, &fund, &backup);
-        StewardBackupSet { fund, backup }.publish(&env);
+        match storage::steward_backup(&env, &fund) {
+            Some(current) if current != backup => {
+                let eta = eta(&env)?;
+                storage::set_pending_steward_backup(
+                    &env,
+                    &fund,
+                    &PendingStewardBackup {
+                        backup: backup.clone(),
+                        steward,
+                        eta,
+                    },
+                );
+                StewardBackupChangeProposed { fund, backup, eta }.publish(&env);
+            }
+            _ => {
+                drop_pending_steward_backup(&env, &fund, &steward);
+                install_steward_backup(&env, fund, backup);
+            }
+        }
+        Ok(())
+    }
+
+    // A replacement never meets a recovery: proposing one is a steward
+    // action, which cancels a recovery, and proposing a recovery drops it.
+    // Nor does it outlive its steward: a rotation or a recovery drops it.
+
+    /// Installs a proposed backup once its delay has elapsed, within its
+    /// grace period. Anyone may call it.
+    pub fn apply_steward_backup_change(env: Env, fund: Address) -> Result<(), Error> {
+        let pending = storage::pending_steward_backup(&env, &fund).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        if storage::lender_approved(&env, &fund, &pending.backup) {
+            return Err(Error::StewardCannotLend);
+        }
+        storage::remove_pending_steward_backup(&env, &fund);
+        install_steward_backup(&env, fund, pending.backup);
+        Ok(())
+    }
+
+    /// Withdraws a proposed backup replacement. `caller` must be the fund's
+    /// steward on record or the governor.
+    pub fn cancel_steward_backup_change(
+        env: Env,
+        fund: Address,
+        caller: Address,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        let steward = is_steward(&env, &fund, &caller);
+        if !steward && caller != storage::governor(&env) {
+            return Err(Error::Unauthorized);
+        }
+        if !drop_pending_steward_backup(&env, &fund, &caller) {
+            return Err(Error::NotProposed);
+        }
+        if steward {
+            steward_alive(&env, &fund, &caller);
+        }
         Ok(())
     }
 
     /// The successor a fund's steward named, if any.
     pub fn steward_backup(env: Env, fund: Address) -> Option<Address> {
         storage::steward_backup(&env, &fund)
+    }
+
+    /// The proposed replacement of a fund's steward backup, unless it has
+    /// expired.
+    pub fn pending_steward_backup(env: Env, fund: Address) -> Option<PendingStewardBackup> {
+        storage::pending_steward_backup(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
 
     // Recovery answers a lost steward key. A stolen one is answered at once
@@ -918,8 +1064,9 @@ impl OpenWindow {
     /// days. Any action the steward signs on the fund meanwhile proves its
     /// key alive and cancels it; the steward on record or the governor can
     /// also cancel it. It dies if the steward or a governance role changes
-    /// before it applies. Works for a removed fund too. Replaces an earlier
-    /// proposal.
+    /// before it applies. A pending backup replacement, signed by a key
+    /// that may be the lost one, goes. Works for a removed fund too.
+    /// Replaces an earlier proposal.
     pub fn propose_steward_recovery(
         env: Env,
         fund: Address,
@@ -944,6 +1091,7 @@ impl OpenWindow {
             .timestamp()
             .checked_add(MAX_TIMELOCK_SECS)
             .ok_or(Error::ArithmeticOverflow)?;
+        drop_pending_steward_backup(&env, &fund, &governor);
         storage::set_pending_steward_recovery(
             &env,
             &fund,
@@ -1003,6 +1151,7 @@ impl OpenWindow {
         }
         storage::set_last_steward(&env, &fund, &pending.steward);
         storage::remove_steward_backup(&env, &fund);
+        drop_pending_steward_backup(&env, &fund, &by);
         storage::bump_instance(&env);
         StewardRecovered {
             fund,
@@ -1485,12 +1634,7 @@ impl OpenWindow {
         steward_alive(&env, &fund, &config.steward);
         if approved {
             ensure_not_steward(&env, &fund, &config, &lender)?;
-            // An attestation co-signed by a replaced steward backs nothing.
-            if !storage::attestation_for_approval(&env, &fund, &lender)
-                .is_some_and(|attestation| attestation.steward == config.steward)
-            {
-                return Err(Error::AttestationMissing);
-            }
+            ensure_attested(&env, &fund, &config, &lender)?;
         } else {
             storage::remove_lender_attestation(&env, &fund, &lender);
         }
@@ -1665,9 +1809,10 @@ impl OpenWindow {
     // -- Lifecycle ----------------------------------------------------------
 
     /// Lender deposits `amount` of `stablecoin` with their terms. The lender
-    /// must be approved by the steward of every fund listed, must not be the
-    /// steward of any of them, and in a single-lender instance must be the
-    /// sole lender. Returns the offer identifier.
+    /// must be approved by the steward of every fund listed, with an
+    /// attestation that steward co-signed, must not be the steward of any of
+    /// them, and in a single-lender instance must be the sole lender. Returns
+    /// the offer identifier.
     pub fn create_offer(
         env: Env,
         lender: Address,
@@ -1718,6 +1863,10 @@ impl OpenWindow {
             if !storage::lender_approved(&env, &fund, &lender) {
                 return Err(Error::LenderNotApproved);
             }
+            // An approval granted under a steward since rotated or recovered
+            // backs no new offer. Offers already made keep lending:
+            // `open_repo` reads no attestation, so its footprint stays.
+            ensure_attested(&env, &fund, &config, &lender)?;
         }
 
         token_io::pull(&env, &stablecoin, &lender, amount)?;
@@ -2160,14 +2309,78 @@ fn recovery_can_apply(env: &Env, fund: &Address, pending: &PendingStewardRecover
 /// pending recovery of that fund, meant for a lost key, goes, whether it
 /// could still apply or not.
 fn steward_alive(env: &Env, fund: &Address, steward: &Address) {
+    drop_pending_steward_recovery(env, fund, steward);
+}
+
+fn drop_pending_steward_recovery(env: &Env, fund: &Address, by: &Address) {
     if storage::pending_steward_recovery(env, fund).is_some() {
         storage::remove_pending_steward_recovery(env, fund);
         StewardRecoveryCancelled {
             fund: fund.clone(),
-            by: steward.clone(),
+            by: by.clone(),
         }
         .publish(env);
     }
+}
+
+fn drop_pending_steward_backup(env: &Env, fund: &Address, by: &Address) -> bool {
+    let Some(pending) = storage::pending_steward_backup(env, fund) else {
+        return false;
+    };
+    storage::remove_pending_steward_backup(env, fund);
+    StewardBackupChangeCancelled {
+        fund: fund.clone(),
+        backup: pending.backup,
+        by: by.clone(),
+    }
+    .publish(env);
+    true
+}
+
+fn install_steward_backup(env: &Env, fund: Address, backup: Address) {
+    storage::set_steward_backup(env, &fund, &backup);
+    StewardBackupSet { fund, backup }.publish(env);
+}
+
+/// Refuses `lender` unless its attestation for the fund was co-signed by the
+/// fund's current steward. Reading it extends it.
+fn ensure_attested(
+    env: &Env,
+    fund: &Address,
+    config: &FundConfig,
+    lender: &Address,
+) -> Result<(), Error> {
+    if storage::attestation_extending(env, fund, lender)
+        .is_some_and(|attestation| attestation.steward == config.steward)
+    {
+        return Ok(());
+    }
+    Err(Error::AttestationMissing)
+}
+
+fn is_trustee(env: &Env, caller: &Address) -> bool {
+    storage::trustee(env).is_some_and(|trustee| trustee == *caller)
+}
+
+/// Requires the trustee's signature when one is named, besides the
+/// governor's.
+fn require_trustee(env: &Env, governor: &Address) {
+    if let Some(trustee) = storage::trustee(env) {
+        if trustee != *governor {
+            trustee.require_auth();
+        }
+    }
+}
+
+/// A trustee consents independently: it holds no governance role and is not
+/// the sole lender.
+fn ensure_independent_trustee(env: &Env, trustee: &Address) -> Result<(), Error> {
+    if is_governor_or_guardian(env, trustee)
+        || storage::sole_lender(env).is_some_and(|lender| lender == *trustee)
+    {
+        return Err(Error::TrusteeNotIndependent);
+    }
+    Ok(())
 }
 
 /// Records that value can be at stake. On the first admission, a governor
@@ -2289,6 +2502,17 @@ fn drop_pending_max_term(env: &Env, by: &Address) -> bool {
     }
     .publish(env);
     true
+}
+
+fn drop_pending_upgrade(env: &Env, by: &Address) {
+    if let Some(pending) = storage::pending_upgrade(env) {
+        storage::remove_pending_upgrade(env);
+        UpgradeCancelled {
+            wasm_hash: pending.wasm_hash,
+            by: by.clone(),
+        }
+        .publish(env);
+    }
 }
 
 fn drop_pending_guardian(env: &Env, by: &Address) -> bool {
@@ -2446,14 +2670,7 @@ fn drop_pending_fund_limits(env: &Env, fund: &Address, by: &Address) -> bool {
 /// Fund replacements, fallbacks and fund limits carry a steward's signature
 /// and stay.
 fn drop_governor_proposals(env: &Env, by: &Address) {
-    if let Some(pending) = storage::pending_upgrade(env) {
-        storage::remove_pending_upgrade(env);
-        UpgradeCancelled {
-            wasm_hash: pending.wasm_hash,
-            by: by.clone(),
-        }
-        .publish(env);
-    }
+    drop_pending_upgrade(env, by);
     drop_pending_guardian(env, by);
     drop_pending_forced_guardian(env, by);
     drop_pending_max_term(env, by);
@@ -2662,14 +2879,8 @@ fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) 
         drop_pending_fallback(env, &fund, &by);
         // A recovery and a backup concern the steward leaving office; the
         // new one names its own backup.
-        if storage::pending_steward_recovery(env, &fund).is_some() {
-            storage::remove_pending_steward_recovery(env, &fund);
-            StewardRecoveryCancelled {
-                fund: fund.clone(),
-                by: by.clone(),
-            }
-            .publish(env);
-        }
+        drop_pending_steward_recovery(env, &fund, &by);
+        drop_pending_steward_backup(env, &fund, &by);
         storage::remove_steward_backup(env, &fund);
     }
     storage::set_fund(env, &fund, &config);
@@ -2843,3 +3054,5 @@ fn release_outstanding(env: &Env, repo: &Repo) -> Result<(), Error> {
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_math;

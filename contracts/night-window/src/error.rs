@@ -99,8 +99,8 @@ pub enum Error {
     /// The instance runs in sole-lender mode and the caller is not that
     /// lender.
     NotSoleLender = 41,
-    /// The lender has no attestation for this fund, signed by itself and the
-    /// fund's steward, so the steward cannot approve it.
+    /// The lender has no attestation for this fund signed by itself and the
+    /// fund's current steward: it can be neither approved nor offer on it.
     AttestationMissing = 42,
     /// A guardian may hand its role over only to the backup it registered
     /// with the governor.
@@ -111,4 +111,10 @@ pub enum Error {
     /// A steward recovery goes only to the backup the steward registered;
     /// none is registered, or the recovery names another address.
     NoStewardBackup = 45,
+    /// The trustee is named once, before the first admission and the first
+    /// offer; afterwards only the trustee hands its role over.
+    TrusteeFixed = 46,
+    /// The trustee must be neither the governor, the guardian nor the sole
+    /// lender.
+    TrusteeNotIndependent = 47,
 }

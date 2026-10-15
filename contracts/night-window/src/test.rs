@@ -30,6 +30,7 @@ enum MockKey {
     Decimals,
     Price(Asset),
     Broken,
+    Burning,
 }
 
 #[contract]
@@ -60,7 +61,24 @@ impl MockOracle {
         if env.storage().instance().has(&MockKey::Broken) {
             panic!("feed down");
         }
+        if env.storage().instance().has(&MockKey::Burning) {
+            // Hashes until the host stops it for exhausting the CPU budget.
+            // Bounded, so that a test host without a budget still ends.
+            let block = soroban_sdk::Bytes::from_array(&env, &[0u8; 1_024]);
+            for _ in 0..1_000_000 {
+                env.crypto().sha256(&block);
+            }
+        }
         env.storage().instance().get(&MockKey::Price(asset))
+    }
+
+    /// Makes `lastprice` burn the caller's CPU budget.
+    pub fn set_burning(env: Env, burning: bool) {
+        if burning {
+            env.storage().instance().set(&MockKey::Burning, &true);
+        } else {
+            env.storage().instance().remove(&MockKey::Burning);
+        }
     }
 
     /// Makes `lastprice` trap, like a feed whose contract is broken.
@@ -5176,6 +5194,9 @@ fn sole_lender_mode_leaves_the_offer_footprint_unchanged() {
     let (sole, _) = ready_from(sole);
     let (without, with) = (measure(&open_instance), measure(&sole));
     assert_eq!((without.0, without.1), (with.0, with.1));
+    // With one fund listed. The first draft of version 4 read 10 entries;
+    // the attestation check reads one more per listed fund.
+    assert_eq!((with.0, with.1), (11, 5));
     std::println!(
         "create_offer footprint: {} entries read, {} written, with or without a sole lender",
         with.0,
@@ -6084,4 +6105,825 @@ fn seizure_extends_the_approval_it_reads() {
     assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
     f.client.seize(&repo_id, &f.lender);
     assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Audit candidate rc2: trustee (independent consent to upgrades)
+// ---------------------------------------------------------------------------
+
+/// Mode D3: the lender runs the instance and holds the governor and the
+/// guardian roles (one key here); the fund's issuer is the trustee. Named
+/// during bootstrap, then the fixture is made ready.
+fn ready_with_trustee() -> (Fixture, Address) {
+    let f = bare();
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    let (f, _) = ready_from(f);
+    (f, trustee)
+}
+
+#[test]
+fn trustee_is_named_once_before_anything_is_at_stake() {
+    let f = bare();
+    let trustee = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (trustee.clone(),).into_val(&f.env);
+    for signer in [&f.governor, &trustee] {
+        sign_only(&f, &[signer], "set_trustee", args.clone());
+        assert!(f.client.try_set_trustee(&trustee).is_err());
+    }
+    f.env.mock_all_auths();
+    assert_eq!(f.client.trustee(), None);
+    f.client.set_trustee(&trustee);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.governor) && signed.contains(&trustee));
+    assert_eq!(
+        own_events(&f),
+        std::vec![TrusteeSet {
+            trustee: trustee.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.trustee(), Some(trustee.clone()));
+    // Only the trustee replaces itself.
+    let other = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_set_trustee(&other),
+        Err(Ok(Error::TrusteeFixed))
+    );
+    // The trustee cannot become the sole lender.
+    assert_eq!(
+        f.client.try_set_sole_lender(&trustee),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+
+    // Once value can be at stake, no trustee can be named any more.
+    let (g, _) = ready();
+    assert_eq!(
+        g.client.try_set_trustee(&Address::generate(&g.env)),
+        Err(Ok(Error::TrusteeFixed))
+    );
+    assert_eq!(g.client.trustee(), None);
+}
+
+/// A trustee holding a governance role, or lending, would consent to its
+/// own changes.
+#[test]
+fn trustee_must_be_independent() {
+    let f = bare();
+    assert_eq!(
+        f.client.try_set_trustee(&f.governor),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    let guardian = appoint_guardian(&f);
+    assert_eq!(
+        f.client.try_set_trustee(&guardian),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    f.client.set_sole_lender(&f.lender);
+    assert_eq!(
+        f.client.try_set_trustee(&f.lender),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    for successor in [&f.governor, &guardian, &f.lender] {
+        assert_eq!(
+            f.client.try_hand_over_trustee(successor),
+            Err(Ok(Error::TrusteeNotIndependent))
+        );
+    }
+}
+
+/// Mode D3: the lender's key holds the governor and the guardian roles. With
+/// a trustee, that key alone can neither propose an upgrade nor force a
+/// guardian change.
+#[test]
+fn with_a_trustee_an_upgrade_needs_its_signature() {
+    let (f, trustee) = ready_with_trustee();
+    assert_eq!(f.client.guardian(), f.governor);
+    let hash = wasm_hash(&f.env, 1);
+    let args: soroban_sdk::Vec<Val> = (hash.clone(),).into_val(&f.env);
+    sign_only(&f, &[&f.governor], "propose_upgrade", args.clone());
+    assert!(f.client.try_propose_upgrade(&hash).is_err());
+    sign_only(&f, &[&trustee], "propose_upgrade", args.clone());
+    assert!(f.client.try_propose_upgrade(&hash).is_err());
+    assert_eq!(f.client.pending_upgrade(), None);
+    sign_only(&f, &[&f.governor, &trustee], "propose_upgrade", args);
+    f.client.propose_upgrade(&hash);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.governor) && signed.contains(&trustee));
+    assert_eq!(f.client.pending_upgrade().unwrap().wasm_hash, hash);
+
+    let successor = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (successor.clone(),).into_val(&f.env);
+    sign_only(&f, &[&f.governor], "force_guardian_change", args.clone());
+    assert!(f.client.try_force_guardian_change(&successor).is_err());
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+    sign_only(&f, &[&f.governor, &trustee], "force_guardian_change", args);
+    f.client.force_guardian_change(&successor);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.governor) && signed.contains(&trustee));
+    assert!(f.client.pending_forced_guardian_change().is_some());
+}
+
+#[test]
+fn trustee_vetoes_an_upgrade_a_forced_guardian_and_a_governor_handover() {
+    let (f, trustee) = ready_with_trustee();
+    let intruder = Address::generate(&f.env);
+    let hash = wasm_hash(&f.env, 1);
+    f.client.propose_upgrade(&hash);
+    assert_eq!(
+        f.client.try_cancel_upgrade(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_upgrade(&trustee);
+    assert_eq!(f.env.auths()[0].0, trustee);
+    assert_eq!(
+        own_events(&f),
+        std::vec![UpgradeCancelled {
+            wasm_hash: hash.clone(),
+            by: trustee.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+
+    let successor = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_veto_forced_guardian_change(&trustee),
+        Err(Ok(Error::NotProposed))
+    );
+    f.client.force_guardian_change(&successor);
+    assert_eq!(
+        f.client.try_veto_forced_guardian_change(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.veto_forced_guardian_change(&trustee);
+    assert_eq!(f.env.auths()[0].0, trustee);
+    assert_eq!(
+        own_events(&f),
+        std::vec![ForcedGuardianChangeCancelled {
+            guardian: successor.clone(),
+            by: trustee.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    advance(&f, MAX_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_forced_guardian_change(),
+        Err(Ok(Error::NotProposed))
+    );
+    // The governor may withdraw its own forced change this way too.
+    f.client.force_guardian_change(&successor);
+    f.client.veto_forced_guardian_change(&f.governor);
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+
+    f.client.set_admin(&successor);
+    assert_eq!(
+        f.client.try_veto_admin(&intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.veto_admin(&trustee);
+    assert_eq!(
+        own_events(&f),
+        std::vec![AdminProposalCancelled {
+            proposed: successor.clone(),
+            by: trustee.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::Unauthorized)));
+    assert_eq!(f.client.admin(), f.governor);
+}
+
+#[test]
+fn trustee_hands_over_only_to_a_successor_who_signs() {
+    let (f, trustee) = ready_with_trustee();
+    let successor = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (successor.clone(),).into_val(&f.env);
+    for signing in [
+        std::vec![&trustee],
+        std::vec![&successor],
+        std::vec![&f.governor, &successor],
+    ] {
+        sign_only(&f, &signing, "hand_over_trustee", args.clone());
+        assert!(f.client.try_hand_over_trustee(&successor).is_err());
+    }
+    f.env.mock_all_auths();
+    f.client.hand_over_trustee(&successor);
+    let signed = signers(&f);
+    assert_eq!(signed.len(), 2);
+    assert!(signed.contains(&trustee) && signed.contains(&successor));
+    assert_eq!(
+        own_events(&f),
+        std::vec![TrusteeChanged {
+            previous: trustee.clone(),
+            trustee: successor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.trustee(), Some(successor.clone()));
+    // The previous trustee no longer acts.
+    f.client.propose_upgrade(&wasm_hash(&f.env, 2));
+    assert_eq!(
+        f.client.try_cancel_upgrade(&trustee),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_upgrade(&successor);
+    // Without a trustee there is nothing to hand over.
+    let (g, _) = ready();
+    assert_eq!(
+        g.client.try_hand_over_trustee(&Address::generate(&g.env)),
+        Err(Ok(Error::Unauthorized))
+    );
+}
+
+/// A proposal made during bootstrap without the trustee's consent does not
+/// survive its naming.
+#[test]
+fn naming_a_trustee_drops_proposals_made_without_it() {
+    let f = bare();
+    let hash = wasm_hash(&f.env, 3);
+    f.client.propose_upgrade(&hash);
+    let successor = Address::generate(&f.env);
+    f.client.force_guardian_change(&successor);
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            UpgradeCancelled {
+                wasm_hash: hash,
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            ForcedGuardianChangeCancelled {
+                guardian: successor,
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            TrusteeSet { trustee }.to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+}
+
+/// The intended property: once a trustee is named, no key or sequence of
+/// governance changes removes it. A lost trustee key means no upgrade ever
+/// (decision S15 in practice); exits are unaffected.
+#[test]
+fn a_lost_trustee_key_blocks_upgrades_for_good() {
+    let (f, trustee) = ready_with_trustee();
+    let offer_id = 1;
+    let repo_id = open(&f, offer_id);
+    // A new governor and a new guardian change nothing.
+    let governor = Address::generate(&f.env);
+    f.client.set_admin(&governor);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.accept_admin();
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.apply_guardian_change();
+    assert_eq!(f.client.trustee(), Some(trustee.clone()));
+    assert_eq!(
+        f.client.try_set_trustee(&governor),
+        Err(Ok(Error::TrusteeFixed))
+    );
+    let hash = wasm_hash(&f.env, 4);
+    sign_only(
+        &f,
+        &[&governor, &guardian],
+        "propose_upgrade",
+        (hash.clone(),).into_val(&f.env),
+    );
+    assert!(f.client.try_propose_upgrade(&hash).is_err());
+    let replacement_trustee = Address::generate(&f.env);
+    sign_only(
+        &f,
+        &[&governor, &guardian, &replacement_trustee],
+        "hand_over_trustee",
+        (replacement_trustee.clone(),).into_val(&f.env),
+    );
+    assert!(f
+        .client
+        .try_hand_over_trustee(&replacement_trustee)
+        .is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(f.client.trustee(), Some(trustee));
+    // Exits never needed it.
+    f.client.repurchase(&repo_id);
+}
+
+// ---------------------------------------------------------------------------
+// Audit candidate rc2: approvals bound to the current steward
+// ---------------------------------------------------------------------------
+
+/// After a steward rotation, an approval the previous steward granted backs
+/// no new offer until the current steward co-signs the lender's attestation.
+/// Offers already made keep lending: `open_repo` reads no attestation.
+#[test]
+fn a_new_offer_needs_an_attestation_from_the_current_steward() {
+    let (f, offer_id) = ready();
+    let next_steward = Address::generate(&f.env);
+    let mut config = replacement(&f);
+    config.steward = next_steward.clone();
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    f.client.apply_fund_change(&f.shares);
+    assert!(f.client.is_lender_approved(&f.shares, &f.lender));
+    let create = |f: &Fixture| {
+        f.client.try_create_offer(
+            &f.lender,
+            &f.eurc,
+            &(1_000 * ONE),
+            &RATE_BPS,
+            &(7 * DAY),
+            &vec![&f.env, f.shares.clone()],
+        )
+    };
+    assert_eq!(create(&f), Err(Ok(Error::AttestationMissing)));
+    let repo_id = open(&f, offer_id);
+    assert_eq!(f.client.get_repo(&repo_id).unwrap().lender, f.lender);
+
+    f.client
+        .attest_lender(&f.shares, &f.lender, &declaration(&f.env, 0x51));
+    assert!(signers(&f).contains(&next_steward));
+    assert!(create(&f).is_ok());
+}
+
+/// The same after a recovery, and for every fund an offer lists.
+#[test]
+fn a_recovered_steward_must_attest_again_before_new_offers() {
+    let (f, offer_id) = ready();
+    appoint_guardian(&f);
+    let backup = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &backup);
+    f.client.propose_steward_recovery(&f.shares, &backup);
+    advance(&f, MAX_TIMELOCK_SECS);
+    f.client.apply_steward_recovery(&f.shares);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_create_offer(
+            &f.lender,
+            &f.eurc,
+            &ONE,
+            &RATE_BPS,
+            &DAY,
+            &vec![&f.env, f.shares.clone()]
+        ),
+        Err(Ok(Error::AttestationMissing))
+    );
+    open(&f, offer_id);
+}
+
+/// The attestation check adds one read per listed fund to `create_offer`,
+/// and the read extends the attestation like an approval does.
+#[test]
+fn creating_an_offer_reads_and_extends_the_attestation() {
+    let (f, _) = ready();
+    let key = DataKey::LenderAttestation(f.shares.clone(), f.lender.clone());
+    f.oracle.keep_alive();
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    f.client.create_offer(
+        &f.lender,
+        &f.eurc,
+        &ONE,
+        &RATE_BPS,
+        &DAY,
+        &vec![&f.env, f.shares.clone()],
+    );
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Audit candidate rc2: replacing a steward backup waits for the delay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn replacing_a_steward_backup_waits_for_the_delay() {
+    let (f, _) = ready();
+    let first = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &first);
+    assert_eq!(f.client.steward_backup(&f.shares), Some(first.clone()));
+
+    let second = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (f.shares.clone(), second.clone()).into_val(&f.env);
+    sign_only(&f, &[&f.steward], "set_steward_backup", args);
+    assert!(f.client.try_set_steward_backup(&f.shares, &second).is_err());
+    f.env.mock_all_auths();
+    f.client.set_steward_backup(&f.shares, &second);
+    let signed = signers(&f);
+    assert!(signed.contains(&f.steward) && signed.contains(&second));
+    let eta = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardBackupChangeProposed {
+            fund: f.shares.clone(),
+            backup: second.clone(),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_steward_backup(&f.shares),
+        Some(PendingStewardBackup {
+            backup: second.clone(),
+            steward: f.steward.clone(),
+            eta
+        })
+    );
+    // The current backup stays the only one until the apply.
+    assert_eq!(f.client.steward_backup(&f.shares), Some(first.clone()));
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.env.set_auths(&[]);
+    f.client.apply_steward_backup_change(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardBackupSet {
+            fund: f.shares.clone(),
+            backup: second.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.steward_backup(&f.shares), Some(second.clone()));
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+    f.env.mock_all_auths();
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+
+    // Confirming the current backup cancels a pending replacement.
+    let third = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &third);
+    f.client.set_steward_backup(&f.shares, &second);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            StewardBackupChangeCancelled {
+                fund: f.shares.clone(),
+                backup: third.clone(),
+                by: f.steward.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            StewardBackupSet {
+                fund: f.shares.clone(),
+                backup: second.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+
+    // A replacement not applied in its grace period expires.
+    f.client.set_steward_backup(&f.shares, &third);
+    advance(&f, DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::ProposalExpired))
+    );
+}
+
+/// The thief of a steward key swaps the backup for its own: the governor
+/// cancels the swap, or governance proposes a recovery to the backup still in
+/// place, which drops the swap.
+#[test]
+fn a_stolen_steward_key_cannot_swap_the_backup_under_a_recovery() {
+    let (f, _) = ready();
+    let guardian = appoint_guardian(&f);
+    let backup = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &backup);
+    let thief = Address::generate(&f.env);
+
+    f.client.set_steward_backup(&f.shares, &thief);
+    let intruder = Address::generate(&f.env);
+    for caller in [&guardian, &intruder, &thief] {
+        assert_eq!(
+            f.client.try_cancel_steward_backup_change(&f.shares, caller),
+            Err(Ok(Error::Unauthorized))
+        );
+    }
+    f.client
+        .cancel_steward_backup_change(&f.shares, &f.governor);
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        own_events(&f),
+        std::vec![StewardBackupChangeCancelled {
+            fund: f.shares.clone(),
+            backup: thief.clone(),
+            by: f.governor.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client
+            .try_cancel_steward_backup_change(&f.shares, &f.governor),
+        Err(Ok(Error::NotProposed))
+    );
+
+    // During the delay, only the backup in place can be recovered to, and
+    // proposing that recovery drops the swap.
+    f.client.set_steward_backup(&f.shares, &thief);
+    assert_eq!(
+        f.client.try_propose_steward_recovery(&f.shares, &thief),
+        Err(Ok(Error::NoStewardBackup))
+    );
+    f.client.propose_steward_recovery(&f.shares, &backup);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            StewardBackupChangeCancelled {
+                fund: f.shares.clone(),
+                backup: thief.clone(),
+                by: f.governor.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            StewardRecoveryProposed {
+                fund: f.shares.clone(),
+                steward: backup.clone(),
+                eta: f.env.ledger().timestamp() + MAX_TIMELOCK_SECS
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+    advance(&f, MAX_TIMELOCK_SECS - DEFAULT_TIMELOCK_SECS);
+    f.client.apply_steward_recovery(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, backup);
+}
+
+/// The steward cancels its own swap (a steward action, which also proves its
+/// key alive); a swap whose backup was approved as a lender meanwhile is
+/// refused; a steward change drops the swap.
+#[test]
+fn steward_backup_swap_cancel_lender_check_and_steward_change() {
+    let (f, _) = ready();
+    let first = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &first);
+    let second = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &second);
+    f.client.cancel_steward_backup_change(&f.shares, &f.steward);
+    assert_eq!(f.env.auths()[0].0, f.steward);
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+
+    f.client.set_steward_backup(&f.shares, &second);
+    admit_lender(&f.client, &f.env, &f.shares, &second);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_steward_backup_change(&f.shares),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    assert_eq!(f.client.steward_backup(&f.shares), Some(first.clone()));
+
+    let third = Address::generate(&f.env);
+    f.client.set_steward_backup(&f.shares, &third);
+    let mut config = replacement(&f);
+    config.steward = Address::generate(&f.env);
+    publish_nav(&f, NAV_EUR);
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    f.client.apply_fund_change(&f.shares);
+    assert!(own_events(&f).events().contains(
+        &StewardBackupChangeCancelled {
+            fund: f.shares.clone(),
+            backup: third,
+            by: f.contract_id.clone()
+        }
+        .to_xdr(&f.env, &f.contract_id)
+    ));
+    assert_eq!(f.client.pending_steward_backup(&f.shares), None);
+    assert_eq!(f.client.steward_backup(&f.shares), None);
+}
+
+// ---------------------------------------------------------------------------
+// Technical watch (15 October 2026)
+// ---------------------------------------------------------------------------
+
+/// The ledger up to which a persistent entry of the contract lives, read
+/// from the ledger snapshot: unlike `entry_ttl`, this works for an archived
+/// entry too.
+fn live_until(f: &Fixture, key: &DataKey) -> u32 {
+    use soroban_sdk::xdr::{LedgerKey, ScAddress, ScVal};
+    use soroban_sdk::TryFromVal;
+    let address = ScAddress::from(&f.contract_id);
+    let key: Val = key.into_val(&f.env);
+    let key = ScVal::try_from_val(&f.env, &key).unwrap();
+    f.env
+        .to_ledger_snapshot()
+        .ledger_entries
+        .iter()
+        .find_map(|(ledger_key, (_, live_until))| match ledger_key.as_ref() {
+            LedgerKey::ContractData(data) if data.contract == address && data.key == key => {
+                *live_until
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// (a) Exits on archived entries. The TTL policy keeps every entry an exit
+/// needs live for the life of a repo: the repo is written with 120 days, the
+/// approval extended to at least 45 days at the opening, and a term lasts 30
+/// days at most. Past that, nobody touching the contract for 120 days
+/// archives them. Since protocol 23 (CAP-66) an invocation restores the
+/// archived persistent entries of its footprint itself, at the caller's
+/// expense, and the test host models that: the exit works, and the restore
+/// shows as extra written entries. On a network without automatic
+/// restoration, any account would first submit a RestoreFootprint operation
+/// for the same entries; nothing in the contract needs them live.
+#[test]
+fn exits_work_on_archived_entries() {
+    // The policy, in ledgers of 5 seconds.
+    let lender_threshold = 45 * 17_280;
+    assert!(MAX_TERM_CEILING_SECS / 5 < u64::from(lender_threshold));
+    assert!(lender_threshold < BUMP_TO_LEDGERS);
+    let (f, offer_id) = ready();
+    let repurchased = open(&f, offer_id);
+    let seized = open(&f, offer_id);
+    let opened_at = f.env.ledger().sequence();
+    let repo_key = DataKey::Repo(seized);
+    let lender_key = DataKey::Lender(f.shares.clone(), f.lender.clone());
+    assert_eq!(live_until(&f, &repo_key), opened_at + BUMP_TO_LEDGERS);
+    assert!(live_until(&f, &lender_key) >= opened_at + lender_threshold);
+
+    // A reference exit on live entries, in a twin fixture.
+    let (g, g_offer) = ready();
+    let g_repo = open(&g, g_offer);
+    advance(&g, HOUR);
+    g.client.repurchase(&g_repo);
+    let live = footprint(&g.env);
+
+    // Nobody touches anything for 121 days.
+    f.env.ledger().with_mut(|ledger| {
+        ledger.sequence_number += BUMP_TO_LEDGERS + 17_280;
+        ledger.timestamp += 121 * DAY;
+    });
+    let now = f.env.ledger().sequence();
+    for key in [&repo_key, &DataKey::Repo(repurchased), &lender_key] {
+        assert!(live_until(&f, key) < now, "archived");
+    }
+    f.client.repurchase(&repurchased);
+    let restored = footprint(&f.env);
+    assert!(
+        restored.1 > live.1,
+        "{} entries written, {} without archival",
+        restored.1,
+        live.1
+    );
+    assert_eq!(
+        f.client.get_repo(&repurchased).unwrap().status,
+        RepoStatus::Repurchased
+    );
+    f.client.seize(&seized, &f.lender);
+    assert_eq!(
+        f.client.get_repo(&seized).unwrap().status,
+        RepoStatus::Defaulted
+    );
+    // The exit extended what it restored.
+    assert_eq!(live_until(&f, &repo_key), now + BUMP_TO_LEDGERS);
+    assert_eq!(live_until(&f, &lender_key), now + BUMP_TO_LEDGERS);
+    std::println!(
+        "repurchase on archived entries: {} read, {} written (live: {} read, {} written)",
+        restored.0,
+        restored.1,
+        live.0,
+        live.1
+    );
+}
+
+/// `ready_with_fallback` plus a distinct guardian; both feeds then publish
+/// again, so that only the fallback's behaviour decides.
+fn ready_with_fallback_and_guardian() -> (Fixture, u64, MockOracleClient<'static>, Address) {
+    let (f, offer_id, feed) = ready_with_fallback();
+    let guardian = appoint_guardian(&f);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    (f, offer_id, feed, guardian)
+}
+
+/// (b) A backup feed that burns the CPU budget. `try_` calls do not catch
+/// budget exhaustion (documented host limit): the whole call fails although
+/// the primary feed is fresh, not only the backup's reading. Even the test
+/// client's `try_` cannot return it: the host escalates the exhaustion to a
+/// panic, caught here. The test host is unusable after that panic, so the
+/// remedy is shown by the next test.
+#[test]
+fn a_fallback_that_burns_the_budget_fails_the_whole_call() {
+    let (f, offer_id, feed, _) = ready_with_fallback_and_guardian();
+    open(&f, offer_id);
+    feed.set_burning(&true);
+    let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(10_000 * ONE),
+            &(10_000 * ONE),
+            &(64 * HOUR),
+        );
+    }))
+    .expect_err("the opening fails as a whole");
+    let message = payload
+        .downcast_ref::<std::string::String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(message.contains("Budget, ExceededLimit"), "{message}");
+}
+
+/// (b, continued) The guardian alone removes the burning backup, at once,
+/// and pricing works again on the primary feed.
+#[test]
+fn removing_a_burning_fallback_restores_pricing() {
+    let (f, offer_id, feed, guardian) = ready_with_fallback_and_guardian();
+    feed.set_burning(&true);
+    f.client.remove_fallback(&f.shares, &guardian);
+    assert_eq!(signers(&f), std::vec![guardian]);
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+    assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).price, NAV_EUR);
+    open(&f, offer_id);
+}
+
+/// (c) Two large NAV moves in a row, each at the very top of the corridor at
+/// its own time. The corridor is measured from the reference, which follows
+/// the model path, never the NAV: the floor tolerance is granted once, not
+/// accumulated, and a second move measured from the first NAV is refused.
+#[test]
+fn two_moves_at_the_top_of_the_corridor_cannot_ratchet_the_reference() {
+    let (f, _) = ready();
+    let config = fund_config(&f);
+    let corridor = |reference: i128, from: u64, to: u64| {
+        math::corridor(
+            reference,
+            from,
+            to,
+            config.corridor_floor_bps,
+            config.max_yield_bps,
+        )
+        .unwrap()
+        .1
+    };
+    let path = |reference: i128, from: u64, to: u64| {
+        math::model_path(reference, from, to, config.max_yield_bps).unwrap()
+    };
+    let (t1, t2) = (T0 + DAY, T0 + 2 * DAY);
+
+    advance(&f, DAY);
+    let first = corridor(NAV_EUR, T0, t1);
+    publish_nav(&f, first);
+    assert_eq!(f.client.quote(&f.shares, &ONE, &f.eurc).price, first);
+    f.client.refresh_reference(&f.shares);
+    let reference = f.client.get_fund_state(&f.shares).unwrap().reference_nav;
+    assert_eq!(reference, path(NAV_EUR, T0, t1));
+    assert!(reference < first);
+
+    advance(&f, DAY);
+    let ratchet = corridor(first, t1, t2);
+    publish_nav(&f, ratchet);
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+
+    let second = corridor(reference, t1, t2);
+    assert!(second < ratchet);
+    publish_nav(&f, second);
+    f.client.refresh_reference(&f.shares);
+    let reference = f.client.get_fund_state(&f.shares).unwrap().reference_nav;
+    assert_eq!(reference, path(path(NAV_EUR, T0, t1), t1, t2));
+    // Chaining two steps of the path compounds the yield, a second-order
+    // excess (about 2e-8 here), far below the floor (1e-3).
+    let single = path(NAV_EUR, T0, t2);
+    assert!(reference >= single && reference - single < NAV_EUR / 1_000_000);
+    // A third move measured from the second NAV is refused as well.
+    advance(&f, DAY);
+    publish_nav(&f, corridor(second, t2, t2 + DAY));
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
 }

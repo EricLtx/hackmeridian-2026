@@ -20,3 +20,8 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 # Integration tests against the demo contracts, compiled natively.
 fund-token = { path = "../fund-token" }
 nav-oracle = { path = "../nav-oracle" }
+# Property tests of the fixed-point arithmetic (src/test_math.rs). Pinned:
+# 1.11.0 was published on 24 March 2026; 1.12.0 (10 October 2026) was less
+# than two weeks old when this was added. No fork or timeout features: the
+# properties are pure functions.
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }

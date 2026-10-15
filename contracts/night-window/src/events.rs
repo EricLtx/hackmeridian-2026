@@ -431,3 +431,32 @@ pub struct StewardRecovered {
     pub previous: Address,
     pub steward: Address,
 }
+
+// -- Audit candidate rc2: trustee and steward backup replacement ---------------
+
+#[contractevent]
+pub struct TrusteeSet {
+    pub trustee: Address,
+}
+
+#[contractevent]
+pub struct TrusteeChanged {
+    pub previous: Address,
+    pub trustee: Address,
+}
+
+#[contractevent]
+pub struct StewardBackupChangeProposed {
+    #[topic]
+    pub fund: Address,
+    pub backup: Address,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct StewardBackupChangeCancelled {
+    #[topic]
+    pub fund: Address,
+    pub backup: Address,
+    pub by: Address,
+}

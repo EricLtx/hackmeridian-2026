@@ -8,8 +8,8 @@ use crate::error::Error;
 use crate::types::{
     DataKey, FallbackFeed, FundConfig, FundState, LenderAttestation, Offer,
     PendingCurrencyCapChange, PendingFallback, PendingFundChange, PendingFundLimitsChange,
-    PendingReanchor, PendingRelease, PendingStewardRecovery, PendingUpgrade, Repo, RiskEnvelope,
-    StablecoinConfig,
+    PendingReanchor, PendingRelease, PendingStewardBackup, PendingStewardRecovery, PendingUpgrade,
+    Repo, RiskEnvelope, StablecoinConfig,
 };
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
@@ -572,11 +572,11 @@ pub fn lender_attestation(
         .get(&DataKey::LenderAttestation(fund.clone(), lender.clone()))
 }
 
-/// A lender's attestation for a fund, read to approve it. The read extends
-/// the attestation: it is the trail counsel and auditors follow, and it must
-/// live at least as long as the approval it backs, which this same call
-/// writes.
-pub fn attestation_for_approval(
+/// A lender's attestation for a fund, read to approve the lender or to accept
+/// its offer. The read extends the attestation: it is the trail counsel and
+/// auditors follow, and it must live at least as long as the approval it
+/// backs.
+pub fn attestation_extending(
     env: &Env,
     fund: &Address,
     lender: &Address,
@@ -604,6 +604,30 @@ pub fn set_lender_attestation(
         &DataKey::LenderAttestation(fund.clone(), lender.clone()),
         attestation,
     );
+}
+
+pub fn pending_steward_backup(env: &Env, fund: &Address) -> Option<PendingStewardBackup> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingStewardBackup(fund.clone()))
+}
+
+pub fn set_pending_steward_backup(env: &Env, fund: &Address, pending: &PendingStewardBackup) {
+    put(env, &DataKey::PendingStewardBackup(fund.clone()), pending);
+}
+
+pub fn remove_pending_steward_backup(env: &Env, fund: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::PendingStewardBackup(fund.clone()));
+}
+
+pub fn trustee(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Trustee)
+}
+
+pub fn set_trustee(env: &Env, trustee: &Address) {
+    env.storage().instance().set(&DataKey::Trustee, trustee);
 }
 
 pub fn pending_steward_recovery(env: &Env, fund: &Address) -> Option<PendingStewardRecovery> {

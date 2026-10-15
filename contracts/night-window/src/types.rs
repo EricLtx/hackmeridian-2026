@@ -1,5 +1,8 @@
-//! Types exported in the contract interface. The interface freezes at the
-//! first public testnet deployment; from then on, add, never reshape.
+// Types exported in the contract interface. The interface freezes at the tag
+// the external audit reviews; from then on it is append-only: new types, new
+// enum variants at the end and new functions, never a reshaped or removed
+// one. Until that tag, types first released in version 3 or 4 may still
+// change; a stored type keeps its key (see `DataKey`).
 
 use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
@@ -121,6 +124,10 @@ pub enum DataKey {
     /// Instance: counts governor and guardian changes, so that a proposal
     /// signed by keys since replaced can be recognised.
     GovernanceGeneration,
+    /// Instance: the trustee, whose consent upgrades need.
+    Trustee,
+    /// Persistent: replacement of a steward's backup, waiting for its delay.
+    PendingStewardBackup(Address),
 }
 
 /// Limits that no fund configuration may exceed, set by the governor.
@@ -497,6 +504,18 @@ pub struct PendingStewardRecovery {
     pub previous: Address,
     /// Governance generation at the proposal; it must still be at the apply.
     pub generation: u64,
+    /// Ledger timestamp from which anyone may apply it.
+    pub eta: u64,
+}
+
+/// Replacement of a fund's steward backup, waiting for the time delay. The
+/// current backup stays valid until it applies.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingStewardBackup {
+    pub backup: Address,
+    /// The steward who proposed it. A steward change drops the proposal.
+    pub steward: Address,
     /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
