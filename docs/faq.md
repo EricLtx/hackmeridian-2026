@@ -135,7 +135,7 @@ No. Each fund, offer and repo is one storage entry, and no function loops over p
 
 ### What does it emit?
 
-One event per state change, with identifiers and addresses as topics: offers, repos, repurchases, seizures, every administrative change, price reference updates and pauses. An indexer can rebuild the full history from events alone.
+One event per state change, with identifiers and addresses as topics: offers, repos, repurchases, seizures, every administrative change, price reference updates and pauses. An indexer can rebuild the full history from events alone; the repository ships one (`indexer/`), an append-only journal under a hash chain that any party can recompute, with a per-repo register and the reporting columns the chain can fill.
 
 ### Can it be upgraded?
 

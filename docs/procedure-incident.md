@@ -28,7 +28,9 @@ Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique 
 | Niveau | Délai de réaction | Exemples |
 |---|---|---|
 | Critique | Pause ou annulation automatique, responsable joint en 15 minutes | Prix refusé par le contrat, écart de rapprochement des parts (I2), parts retenues par l'émetteur, proposition de mise à niveau non annoncée, code du contrat modifié, entrée archivée |
-| Avertissement | Examen avant l'échéance de la proposition | Proposition en attente (fonds, secours, recalage, gardien, enveloppe, limites, plafond), changement privilégié, pause en cours, plafond utilisé à 80 %, NAV de plus de 24 heures, entrée à moins de 14 jours de l'archivage |
+| Avertissement | Examen avant l'échéance de la proposition | Proposition en attente (fonds, secours, recalage, gardien, enveloppe, limites, plafond), changement privilégié, pause en cours, plafond utilisé à 80 %, NAV de plus de 24 heures, entrée à moins de 14 jours de l'archivage, cours de change inchangé depuis plus de 60 heures, flotteur du keeper sous un mois de loyer |
+
+Robustesse de la surveillance elle-même : `STELLAR_RPC_URLS` liste plusieurs RPC essayés dans l'ordre (le RPC public a répondu « compte introuvable » sur un compte existant à trois reprises en treize heures le 17 octobre 2026) ; `HEARTBEAT_URL` envoie un signal de vie après chaque passe réussie à un service externe qui alerte quand la surveillance s'arrête ; une passe en échec est journalisée et rejouée trente secondes plus tard.
 
 ## 3. Conduite à tenir par alerte
 
@@ -46,6 +48,8 @@ Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique 
 | Changement privilégié | Opération d'administration | Un second signataire vérifie qu'elle était prévue | Aucun si prévue ; sinon traiter comme une compromission de clé |
 | Entrée proche de l'archivage | TTL non prolongé | Prolongation (automatique avec `--act`) | Entrée revenue au-dessus du seuil |
 | Plafond à 80 % ou rythme anormal d'ouvertures | Usage réel ou sondage | Examen ; pause si inexpliqué | Plafonds revus par l'intendant ou le gouverneur |
+| Cours de change inchangé depuis plus de 60 heures | Marché des changes fermé (week-end prolongé, jour férié) ; flux figé | Vérifier la fermeture du marché ; l'exposition reste bornée par la bande et la décote de change (S22 à venir : bande ≤ décote) ; pause si le flux est figé un jour de marché | Le cours bouge à la réouverture ; sinon bascule sur le flux de secours (`setup -- --fx=local` en démonstration) |
+| Flotteur du keeper sous le seuil | Loyer payé sans recharge | Recharge depuis la trésorerie (le keeper n'a aucun rôle dans le contrat) | Solde revenu au-dessus d'un mois de loyer |
 
 Commandes utiles, depuis `demo/` :
 
@@ -90,5 +94,6 @@ Rythme : une répétition complète avant chaque démonstration publique et chaq
 ## 6. Limites connues
 
 - La pause automatique utilise la clé du gardien sur la machine de surveillance : avant tout dépôt réel, cette clé doit être isolée et limitée à la pause, ce qu'elle est déjà dans le contrat.
-- La surveillance lit l'historique d'événements du RPC public, conservé environ sept jours : un indexeur dédié est prévu à l'étape 1 de la [feuille de route](roadmap.md).
+- La surveillance lit l'historique d'événements du RPC public, conservé environ sept jours. L'historique complet est tenu à part par `indexer/` (journal append-only sous chaîne de hachage, vues registre et SFTR), à lancer régulièrement ; la surveillance ne le consulte pas encore.
+- Par défaut la surveillance n'interroge qu'un RPC ; un second fournisseur se configure par `STELLAR_RPC_URLS` et reste à choisir avant toute exploitation réelle.
 - Le détecteur de rapprochement couvre un fonds ; il s'étend fonds par fonds quand d'autres fonds sont admis.

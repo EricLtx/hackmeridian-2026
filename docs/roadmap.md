@@ -63,7 +63,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Item | State | Evidence |
 |---|---|---|
 | Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; a manual run with Freighter is still to record |
-| Indexer | Partly | Positions are read from the contract and from RPC events; history beyond the RPC's retention of about seven days needs a dedicated indexer |
+| Indexer | Done, first version (17 October 2026) | `indexer/` keeps every contract event in an append-only journal under a SHA-256 hash chain (`verify` recomputes it), behind a persistent cursor, and exports CSV, a per-repo register and the SFTR columns the chain can fill; the web interface's History page reads its export. Not yet consulted by the monitor; runs on the operator's machine |
 | Monitoring | Done | Every detector with a possible real trigger fired on one on testnet and the action was taken, including a key-compromise and an issuer-freeze drill; the TTL threshold had to be forced, and the event trail has no possible real trigger ([procedure-incident.md](procedure-incident.md)) |
 | Incident procedure | Done | [procedure-incident.md](procedure-incident.md) |
 | Static analysis | Partly | Scout: 2 medium and 23 enhancement alerts, all justified; OpenZeppelin detectors not run yet |
@@ -91,7 +91,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 | Item | State | Evidence |
 |---|---|---|
-| Multisig governor | Done on testnet; custody not done | 2-of-2 native account with a co-signer; both signing paths succeed, a single key is refused with `txBadAuth`. The demo holds both keys on one machine: real custody (separate people and hardware devices) is the critical path to any deployment that holds value |
+| Multisig governor | Done on testnet; custody not done | 2-of-2 native account with a co-signer; both signing paths succeed, a single key is refused with `txBadAuth`. The demo holds both keys on one machine: real custody (separate people and hardware devices) is the critical path to any deployment that holds value. Since 17 October 2026 the ceremony is tooled (`npm run keys`: unsigned atomic setOptions plan, read-back, testnet rehearsal with minutes) and the key policy is summarised in [securite.md](securite.md), section 6.4 |
 | Time delay | Done, version 3 | Upgrades, feed changes, re-anchoring, a new guardian and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
 | Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |

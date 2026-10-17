@@ -10,7 +10,7 @@ What an external auditor needs to review Open Window version 4 (audit candidate 
 | Its host tests, as evidence | `contracts/night-window/src/test.rs` |
 | Build configuration | `Cargo.toml`, `rust-toolchain.toml`, `contracts/night-window/Cargo.toml`, `contracts/night-window/build.rs` |
 
-Out of scope: `contracts/fund-token/` and `contracts/nav-oracle/`, which are test doubles of a permissioned share token and an operator NAV feed; `demo/` and `web/`, which are off-chain tooling; the Stellar network, the Soroban host and `soroban-sdk`.
+Out of scope: `contracts/fund-token/` and `contracts/nav-oracle/`, which are test doubles of a permissioned share token and an operator NAV feed; `demo/`, `indexer/` and `web/`, which are off-chain tooling; the Stellar network, the Soroban host and `soroban-sdk`.
 
 ## Build and check the deployed code
 

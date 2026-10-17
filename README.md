@@ -141,10 +141,11 @@ The enforced part of the baseline:
 │   ├── night-window/        # Open Window, the repo contract, and its host-side tests (src/test.rs)
 │   ├── fund-token/          # demo: SEP-41 share token restricted to an issuer allowlist
 │   └── nav-oracle/          # demo: SEP-40 feed an operator publishes a NAV to
-├── demo/                    # testnet demo runner, wallet onboarding and monitoring (Node.js)
-├── web/                     # minimal web interface (Vite, plain JavaScript, Freighter)
+├── demo/                    # testnet demo runner, wallet onboarding, monitoring, key-ceremony tooling (Node.js)
+├── indexer/                 # append-only event journal under a hash chain; register and SFTR views
+├── web/                     # minimal web interface (Vite, plain JavaScript, Freighter), history page
 ├── docs/
-│   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S19 (French)
+│   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S22 (French)
 │   ├── modele-menace-stride.md # STRIDE threat model and monitoring plan (French)
 │   ├── procedure-incident.md # incident procedure and monitoring rehearsal (French)
 │   ├── faq.md               # questions and answers for five audiences
@@ -152,9 +153,9 @@ The enforced part of the baseline:
 │   ├── stellar-platform.md  # overview of the Stellar platform (French)
 │   └── claude-tooling.md    # AI tooling: plugins, skills, MCP (French)
 ├── .github/
-│   ├── workflows/ci.yml     # format, lint, test, WASM build, RustSec audit
+│   ├── workflows/ci.yml     # format, lint, test, WASM build and size budget, cargo-deny, RustSec audit, link check
 │   └── dependabot.yml       # weekly bumps of pinned actions and crates
-├── .claude/settings.json    # Stellar plugin shared through the repo
+├── .claude/                 # Stellar plugin shared through the repo; hook refusing to stage private folders
 ├── .mcp.json                # Raven MCP server (Stellar docs and live data)
 ├── AGENTS.md / CLAUDE.md    # instructions for AI agents
 ├── rust-toolchain.toml      # pinned Rust version, target and components
@@ -220,6 +221,15 @@ npm run demo
 ```sh
 cd web && npm install && npm run dev
 cd demo && npm run onboard -- G...YOUR_ADDRESS     # --role=lender for a lender
+```
+
+The History page lists every repo and event since the deployment from the export of [indexer/](indexer/README.md), an append-only journal of the contract's events kept under a hash chain beyond the RPC's retention of about seven days:
+
+```sh
+cd indexer && npm install
+npm run index                       # read new events behind a persistent cursor
+npm run verify                      # recompute the hash chain
+npm run export -- --json --web      # feed web/public/history.json
 ```
 
 ## Documentation

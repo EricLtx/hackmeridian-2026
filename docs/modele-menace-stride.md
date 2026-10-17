@@ -140,8 +140,10 @@ Le plan découle du modèle : chaque menace qui ne peut pas être rendue impossi
 | DoS.1, DoS.6 | Nombre de pensions ouvertes par heure, montant par pension, total bloqué | Dépassement des plafonds S18, ou rythme anormal | Alerte ; pause des entrées |
 | DoS.5 | Solde du contrat en parts par fonds comparé à la somme des pensions ouvertes (I2) | Écart non nul | Alerte immédiate : gel ou reprise probable par l'émetteur |
 | Repud.1 | Absence d'événement attendu après une transaction réussie | Toute occurrence | Alerte ; investigation |
+| Tamper.1 (change) | Cours de change publié avec un horodatage frais mais une valeur inchangée (marché fermé : le contrôle d'âge ne le voit pas) | Inchangé depuis plus de 60 heures | Avertissement ; vérifier la fermeture du marché ; la bande et la décote de change bornent l'exposition |
+| DoS.2 (loyer) | Solde du compte keeper qui paie les prolongations | Moins d'un mois de loyer | Avertissement ; recharge depuis la trésorerie |
 
-Outils envisagés : Hypernative (guide SDF de juillet 2026, deux exemples publiés) ou OctoPos ; alertes vers le responsable d'incident ; rapport préliminaire sous 48 heures en cas d'incident, post-mortem public.
+**Mise en œuvre au 17 octobre 2026** : `demo/monitor.mjs` porte neuf détecteurs et quinze exercices rejoués sur testnet (`npm run monitor -- --rehearse`), avec réaction automatique sur les alertes critiques (`--act`), un repli sur plusieurs RPC (`STELLAR_RPC_URLS`) et un signal de vie optionnel (`HEARTBEAT_URL`). L'historique d'événements au-delà de la rétention du RPC est tenu par `indexer/` (journal append-only sous chaîne de hachage, vérifiable). Outils envisagés pour l'exploitation sur infrastructure dédiée : Hypernative (guide SDF de juillet 2026, deux exemples publiés) ou OctoPos ; alertes vers le responsable d'incident ; rapport préliminaire sous 48 heures en cas d'incident, post-mortem public.
 
 ## 4. Avons-nous bien travaillé ?
 

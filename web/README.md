@@ -4,6 +4,8 @@ A minimal interface for the Open Window contract on Stellar testnet: the market 
 
 The interface reads the deployment from `public/deployment.testnet.json` at runtime. The demo's `npm run setup` rewrites that file; no address is hard-coded in the code.
 
+`history.html` is the History page: every repo (lender of record, borrower, fund, shares, principal, rate, dates, state) and the latest events with a link to each transaction, read from `public/history.json`. That file is written by the indexer (`cd indexer && npm run export -- --json --web`) and is git-ignored; without it the page says so.
+
 ## Run
 
 ```sh
