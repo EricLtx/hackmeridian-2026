@@ -29,6 +29,7 @@ npm run demo -- --only=repair    # unpause, fix the NAV, close the live repo
 npm run onboard -- G...ADDRESS   # let an outside wallet use the web interface (--role=lender for a lender)
 npm run monitor -- --watch --act # monitoring: alerts every 30 s, pause on a critical alert, TTL extension
 npm run monitor -- --rehearse    # fire every detector with a real trigger, act, restore
+npm run keys -- --rehearse       # key ceremony: --plan builds the unsigned multisig setOptions transaction, --readback checks an account, --rehearse replays it on testnet
 ```
 
 `setup` records each completed step in the state file. When the network drops, rerun the same command: finished steps are skipped, and the steps that move funds check balances first, so nothing is paid or minted twice.

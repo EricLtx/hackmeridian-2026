@@ -11,7 +11,8 @@
     "onboard": "node onboard.mjs",
     "monitor": "node monitor.mjs",
     "measure": "node measure.mjs",
-    "fxlog": "node fxlog.mjs"
+    "fxlog": "node fxlog.mjs",
+    "keys": "node keys.mjs"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
