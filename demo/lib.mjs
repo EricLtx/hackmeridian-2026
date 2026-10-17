@@ -34,10 +34,48 @@ export const STATE_DIR = path.join(here, ".state");
 export const STATE_FILE = path.join(STATE_DIR, "testnet.json");
 export const WASM_DIR = path.join(ROOT, "target", "wasm32v1-none", "release");
 
-export const RPC_URL = process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org";
+/**
+ * RPC endpoints, tried in order. `STELLAR_RPC_URLS` lists several (comma
+ * separated); `STELLAR_RPC_URL` names one; the default is the public SDF
+ * testnet RPC alone. With several endpoints, a call that fails with a
+ * network error, a 429/5xx or a transient inconsistency ("Account not found"
+ * for a live account) is retried on the next endpoint, which then stays
+ * active. Every endpoint must serve the same network.
+ */
+export const RPC_URLS = (process.env.STELLAR_RPC_URLS ?? process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org")
+  .split(",").map((u) => u.trim()).filter(Boolean);
+export const RPC_URL = RPC_URLS[0];
 export const PASSPHRASE = Networks.TESTNET;
 export const FRIENDBOT = "https://friendbot.stellar.org";
-export const server = new rpc.Server(RPC_URL);
+const servers = RPC_URLS.map((url) => new rpc.Server(url));
+let activeRpc = 0;
+/** The endpoint currently in use. */
+export const activeRpcUrl = () => RPC_URLS[activeRpc];
+/**
+ * The RPC client. With one endpoint it is the plain client; with several, a
+ * proxy that fails over to the next endpoint on a transient error, so every
+ * caller keeps using `server.<method>` unchanged.
+ */
+export const server = servers.length === 1
+  ? servers[0]
+  : new Proxy(servers[0], {
+    get(_, prop) {
+      const value = servers[activeRpc][prop];
+      if (typeof value !== "function") return value;
+      return async (...callArgs) => {
+        for (let tried = 0; ; tried += 1) {
+          try {
+            return await servers[activeRpc][prop](...callArgs);
+          } catch (error) {
+            if (tried >= servers.length - 1 || !(isTransient(error) || /Account not found/i.test(error?.message ?? ""))) throw error;
+            const from = RPC_URLS[activeRpc];
+            activeRpc = (activeRpc + 1) % servers.length;
+            process.stderr.write(`  (rpc: ${String(prop)} failed on ${from}: ${String(error?.message ?? error).slice(0, 80)}; switching to ${RPC_URLS[activeRpc]})\n`);
+          }
+        }
+      };
+    },
+  });
 
 /** Reflector fiat FX feed on testnet (base USD, 14 decimals, 5-minute ticks). */
 export const REFLECTOR_FX_TESTNET = "CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W";

@@ -34,6 +34,10 @@ async function pass() {
     };
     appendFileSync(OUT, JSON.stringify(row) + "\n");
     console.log(`[${at}] EUR/USD ${row.price.toFixed(6)}  feed ${new Date(ts * 1000).toISOString()}  age ${(row.ageSecs / 60).toFixed(1)} min`);
+    // Heartbeat after a successful pass, when a push URL is configured.
+    if (process.env.HEARTBEAT_FX_URL) {
+      await fetch(process.env.HEARTBEAT_FX_URL, { signal: AbortSignal.timeout(10_000) }).catch((e) => console.error(`  (heartbeat not delivered: ${e.message})`));
+    }
   } catch (e) {
     const row = { at, error: String(e?.message ?? e).slice(0, 200) };
     appendFileSync(OUT, JSON.stringify(row) + "\n");

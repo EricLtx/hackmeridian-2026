@@ -15,6 +15,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { Keypair, xdr } from "@stellar/stellar-sdk";
 import {
   ONE,
   STATE_DIR,
@@ -55,7 +56,23 @@ const LIMITS = {
   navWarnHours: 24, // warn two hours before the contract refuses a 26-hour-old NAV
   capWarnRatio: 0.8, // warn when outstanding passes 80 % of a cap
   opensPerHour: 20, // an unusual rate of new repos
+  // The FX feed republishes a frozen rate with a fresh timestamp while the
+  // market is closed (observed on the testnet feed over a weekend): the
+  // contract's age check cannot see it, only the band and the haircut bound
+  // it. Warn when the rate has not moved for longer than a weekend.
+  fxFrozenHours: 60,
+  keeperMinXlm: 20, // below this float the keeper cannot pay a month of rent
 };
+/** Heartbeat: an HTTP GET after every successful pass, when `HEARTBEAT_URL` is set (Healthchecks.io, Uptime Kuma push, ...). */
+const HEARTBEAT_URL = process.env.HEARTBEAT_URL;
+async function heartbeat() {
+  if (!HEARTBEAT_URL) return;
+  try {
+    await fetch(HEARTBEAT_URL, { method: "GET", signal: AbortSignal.timeout(10_000) });
+  } catch (error) {
+    console.error(`  (heartbeat not delivered: ${error.message})`);
+  }
+}
 const LEDGER_SECS = 5;
 /** Largest extension of the code entry in one transaction, in days. */
 const CODE_STEP_DAYS = 30;
@@ -134,6 +151,15 @@ async function snapshot(monitor) {
   const priceError = await probe(state, "governor", C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(C.euro)]);
   // Version 4: without a registered backup, a lost steward key can never be replaced.
   const stewardBackup = await read(state, C.openWindow, "steward_backup", [fund]).catch(() => undefined);
+  // The FX leg, when the fund's price is crossed through an FX feed.
+  const fxLeg = Array.isArray(config.source) && config.source[0] === "Cross" ? config.source[1] : null;
+  const fxAsset = fxLeg ? (fxLeg.asset[0] === "Other" ? asset.other(String(fxLeg.asset[1])) : asset.stellar(String(fxLeg.asset[1]))) : null;
+  const fx = fxLeg ? await read(state, fxLeg.oracle, "lastprice", [fxAsset]).catch(() => null) : null;
+  // The keeper pays the rent: its float must cover the coming month.
+  const keeperPub = keypair(state, keeperRole()).publicKey();
+  const keeperKey = xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(keeperPub).xdrAccountId() }));
+  const keeperEntry = await ledgerEntries([keeperKey]).catch(() => null);
+  const keeperXlm = keeperEntry?.entries[0]?.value?.account?.balance != null ? Number(keeperEntry.entries[0].value.account.balance) / 1e7 : null;
 
   const openRepos = repos.filter((r) => statusOf(r) === "Open");
   const releases = [];
@@ -167,7 +193,7 @@ async function snapshot(monitor) {
   // The RPC serves events up to its latest ledger and for about a week back.
   const from = Math.min(Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000), ledger.latest);
   const events = await contractEvents(C.openWindow, from);
-  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events };
+  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm };
 }
 
 /** The detectors. Each returns alerts: { detector, threat, level, message, action }. */
@@ -275,6 +301,32 @@ const DETECTORS = {
     const opens = s.events.filter((e) => e.name === "repo_opened").length;
     if (opens / hours > LIMITS.opensPerHour) out.push({ level: "warning", message: `${opens} repos opened in ${(hours * 60).toFixed(0)} min`, action: "pause if unexplained" });
     return out.map((a) => ({ detector: "exposure", threat: "DoS.1", ...a }));
+  },
+  fx(s, monitor) {
+    // Tamper.1, FX leg: a rate that keeps its value while its timestamp is
+    // refreshed passes the age check. Track since when the published rate
+    // has not moved; warn past a weekend. The band and the FX haircut bound
+    // the loss meanwhile.
+    if (!s.fx) return [];
+    const price = String(s.fx.price);
+    const seen = monitor.fx ?? {};
+    if (seen.price !== price) monitor.fx = { price, since: Number(s.fx.timestamp), feedTimestamp: Number(s.fx.timestamp) };
+    else monitor.fx = { ...seen, feedTimestamp: Number(s.fx.timestamp) };
+    const frozenHours = (s.now - monitor.fx.since) / 3600;
+    const limit = monitor.fxFrozenHoursOverride ?? LIMITS.fxFrozenHours;
+    if (frozenHours < limit) return [];
+    return [{
+      detector: "fx", threat: "Tamper.1", level: "warning",
+      message: `FX rate unchanged for ${frozenHours.toFixed(1)} h while its timestamp is ${((s.now - Number(s.fx.timestamp)) / 60).toFixed(0)} min old: the age check cannot see a frozen market`,
+      action: "verify the market is closed; the FX band and haircut bound the exposure",
+    }];
+  },
+  keeper(s, monitor) {
+    // DoS.2: the keeper's float pays the rent extensions; an empty keeper means no extension.
+    if (s.keeperXlm === null) return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} account not readable`, action: "check the account" }];
+    const min = monitor.keeperMinXlmOverride ?? LIMITS.keeperMinXlm;
+    if (s.keeperXlm >= min) return [];
+    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM`, action: "top up the keeper from treasury" }];
   },
   events(s) {
     // Every repo opened inside the event window must have its repo_opened event (Repud.1).
@@ -597,6 +649,30 @@ async function rehearse() {
   }
 
   saveMonitor(monitor);
+  if (runStep(14)) {
+    console.log("\n14. FX leg (Tamper.1): the exchange-rate feed keeps republishing the same rate with a fresh timestamp");
+    // The live feed cannot be frozen on demand: the drill lowers the threshold
+    // to zero so that the rate observed on two consecutive passes, identical
+    // as it is while the market is closed, raises the alert; then restores it.
+    const before = await clean();
+    monitor.fxFrozenHoursOverride = 0;
+    const { alerts } = await pass(monitor);
+    delete monitor.fxFrozenHoursOverride;
+    const fired = firedBy(alerts, "fx");
+    const after = await clean();
+    record("fx", "Tamper.1", "FX rate unchanged across passes (threshold lowered to 0 h)", fired, "verify market closure; band and haircut bound it", !firedBy(after, "fx") || firedBy(before, "fx"));
+  }
+
+  if (runStep(15)) {
+    console.log("\n15. Keeper float (DoS.2): the rent-paying account falls below a month of rent");
+    monitor.keeperMinXlmOverride = Number.POSITIVE_INFINITY;
+    const { alerts } = await pass(monitor);
+    delete monitor.keeperMinXlmOverride;
+    const fired = firedBy(alerts, "keeper");
+    const after = await clean();
+    record("keeper", "DoS.2", "keeper threshold raised above its balance", fired, "top up from treasury", !firedBy(after, "keeper"));
+  }
+
   const file = path.join(STATE_DIR, `rehearsal-${new Date().toISOString().slice(0, 10)}.json`);
   fs.writeFileSync(file, JSON.stringify(results, null, 2));
   console.log(`\nRehearsal written to ${path.relative(process.cwd(), file)}`);
@@ -620,6 +696,7 @@ async function main() {
       const { s, alerts } = await pass(monitor);
       if (ACT) await act(alerts, s, monitor);
       saveMonitor(monitor);
+      await heartbeat();
     } catch (error) {
       // In watch mode a failed pass (public RPC hiccup, "Account not found"
       // on a live account, timeout) is logged and retried, never fatal: the

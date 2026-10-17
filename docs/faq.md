@@ -88,9 +88,9 @@ The fund shares held for that repo, at maturity, sent to your address or to anot
 - **Admission.** Your fund can only be admitted with your signature and the governor's, on the same transaction.
 - **Custody.** The contract must be on your allowlist like any other holder, so nothing moves without your consent.
 
-### What is a sponsor offer?
+### What is a designated offer?
 
-An offer from an approved lender that the fund's steward marks as designated by the issuer, for instance the lender the issuer works with. Interfaces show it first. The mark says nothing about who funds the offer and gives no special right to take shares or exit first. The issuer itself should not fund offers on its own fund (see "Where does the money come from?").
+An offer from an approved lender that the fund's steward marks as designated by the issuer (`set_sponsor` in the interface, a name kept for compatibility), for instance the lender the issuer works with. Interfaces show it first. The mark says nothing about who funds the offer and gives no special right to take shares or exit first. The issuer itself should not fund offers on its own fund (see "Where does the money come from?").
 
 ### What happens when the fund issuer freezes the shares held by the contract?
 
@@ -174,6 +174,10 @@ Workspace lints deny `unsafe`, unchecked arithmetic, `unwrap`, `expect`, `panic!
 1. **Freshness.** The NAV must be younger than the fund's maximum age, and not in the future.
 2. **Corridor.** The NAV must lie between the reference minus a small floor and the reference grown at a maximum yield since it was set. The reference never follows the feed blindly: anyone can move it up along that model path, only the steward can lower it, and only a two-key re-anchor can set it elsewhere. A faulty feed cannot drag it, even by publishing every ledger.
 3. **FX.** If the price is crossed through an FX feed, that rate must be fresh and within a band around the reference rate (set at admission, by a re-anchor, or at the proposal that added the FX leg), and it adds its own haircut.
+
+### Does the exchange-rate feed publish on weekends?
+
+On the testnet feed observed from Friday night to Sunday (17 and 18 October 2026), yes: a new rate every five minutes, with a fresh timestamp, but the same value all weekend, since the currency market is closed. A freshness check cannot tell a closed market from a live one. That is why the FX leg has its own band around the reference rate and its own haircut: together they bound what a rate frozen on Friday can be worth by Sunday night, whatever the feed says. The monitoring also warns when the published rate has not moved for longer than a weekend.
 
 ### Why interest per started hour?
 

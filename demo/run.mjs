@@ -537,7 +537,7 @@ async function roiPanel(roi) {
   const borrow = toUnits(roi.borrow);
   const yearly = roi.reserve * roi.fundYield;
   const rates = [
-    ...(await offers()).map((o) => [`offer #${o.id}${o.sponsor ? " sponsor" : ""}, on chain`, o.rate_bps]),
+    ...(await offers()).map((o) => [`offer #${o.id}${o.sponsor ? " designated" : ""}, on chain`, o.rate_bps]),
     ...Object.entries(roi.scenarioRates ?? {}).map(([name, r]) => [`scenario ${name}`, Math.round(r * 10_000)]),
   ];
   console.log(dim(`\n  Return for a treasurer: reserve ${fmtEur(roi.reserve)} kept in the fund at ${(roi.fundYield * 100).toFixed(2)} % (${fmtEur(yearly)} a year), ${fmtEur(roi.borrow)} borrowed for ${hours} h when needed`));

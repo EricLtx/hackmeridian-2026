@@ -83,3 +83,17 @@ jobs:
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  links:
+    # Internal links of the documentation (README, docs/, demo/, web/). External
+    # URLs are not fetched: the check is deterministic and never fails on a
+    # third-party outage. Advisory until the end of the October 2026 freeze.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Markdown links (offline)
+        uses: lycheeverse/lychee-action@885c65f3dc543b57c898c8099f4e08c8afd178a2 # v2.6.1
+        with:
+          args: --offline --no-progress --include-fragments './README.md' './SECURITY.md' './AGENTS.md' './docs/**/*.md' './demo/README.md' './web/README.md'
+          fail: true
