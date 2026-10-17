@@ -7,6 +7,8 @@
 //                                    pause on a critical alert, extend TTLs
 //   npm run monitor -- --rehearse    fires each detector with a real trigger
 //                                    on testnet, takes the action, restores
+//   npm run monitor -- --witness     a second watch from another machine:
+//                                    alerts, never acts; own files, own heartbeat
 //
 // A detector never moves funds. The only actions are the guardian's pause,
 // which blocks new entries and never exits, and a TTL extension, which
@@ -18,6 +20,8 @@ import path from "node:path";
 import { Keypair, xdr } from "@stellar/stellar-sdk";
 import {
   ONE,
+  ROOT,
+  RPC_URLS,
   STATE_DIR,
   WASM_DIR,
   codeKey,
@@ -31,6 +35,7 @@ import {
   fmt,
   invoke,
   keypair,
+  latestLedgers,
   ledgerEntries,
   ledgerTime,
   loadState,
@@ -43,9 +48,22 @@ import {
 import { FUND_SETTINGS, navAt } from "./config.mjs";
 
 const args = process.argv.slice(2);
-const WATCH = args.includes("--watch");
+/** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
+const WITNESS = args.includes("--witness");
+const WATCH = args.includes("--watch") || WITNESS;
 const ACT = args.includes("--act");
 const REHEARSE = args.includes("--rehearse");
+if (WITNESS && (ACT || REHEARSE)) {
+  console.error(`--witness never submits a transaction: drop ${ACT ? "--act" : "--rehearse"}, or run without --witness on the acting instance.`);
+  process.exit(1);
+}
+if (WITNESS) {
+  // Every line of a witness is tagged, so two instances feeding one log stay apart.
+  for (const method of ["log", "error"]) {
+    const write = console[method].bind(console);
+    console[method] = (...parts) => write(parts.join(" ").replace(/^(\n?)/, "$1[witness] "));
+  }
+}
 /** Rehearsal steps to run, e.g. --steps=4,5,6,7; all by default. */
 const STEPS = args.find((a) => a.startsWith("--steps="))?.slice(8).split(",").map(Number);
 const runStep = (n) => !STEPS || STEPS.includes(n);
@@ -62,9 +80,10 @@ const LIMITS = {
   // it. Warn when the rate has not moved for longer than a weekend.
   fxFrozenHours: 60,
   keeperMinXlm: 20, // below this float the keeper cannot pay a month of rent
+  rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
 };
-/** Heartbeat: an HTTP GET after every successful pass, when `HEARTBEAT_URL` is set (Healthchecks.io, Uptime Kuma push, ...). */
-const HEARTBEAT_URL = process.env.HEARTBEAT_URL;
+/** Heartbeat: an HTTP GET after every successful pass, when `HEARTBEAT_URL` is set (Healthchecks.io, Uptime Kuma push, ...); a witness has its own. */
+const HEARTBEAT_URL = WITNESS ? process.env.HEARTBEAT_WITNESS_URL : process.env.HEARTBEAT_URL;
 async function heartbeat() {
   if (!HEARTBEAT_URL) return;
   try {
@@ -76,8 +95,11 @@ async function heartbeat() {
 const LEDGER_SECS = 5;
 /** Largest extension of the code entry in one transaction, in days. */
 const CODE_STEP_DAYS = 30;
-const MONITOR_FILE = path.join(STATE_DIR, "monitor.json");
-const ALERT_FILE = path.join(STATE_DIR, "alerts.jsonl");
+// A witness keeps its own state and alert files: it never shares the acting instance's.
+const MONITOR_FILE = path.join(STATE_DIR, WITNESS ? "monitor-witness.json" : "monitor.json");
+const ALERT_FILE = path.join(STATE_DIR, WITNESS ? "alerts-witness.jsonl" : "alerts.jsonl");
+/** The indexer's journal (indexer/README.md): the second source for the event trail, when a copy is kept on this machine. `INDEXER_STATE_DIR` points at a copy kept elsewhere (the indexer's `--state <dir>`). */
+const JOURNAL_DIR = process.env.INDEXER_STATE_DIR ?? path.join(ROOT, "indexer", ".state");
 
 /** Privileged changes: every one of them is reported (Elev.2). */
 const PRIVILEGED = new Set([
@@ -110,6 +132,59 @@ function loadMonitor() {
 }
 function saveMonitor(m) {
   fs.writeFileSync(MONITOR_FILE, JSON.stringify(m, null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// The indexer's journal, read incrementally (Repud.2 cross-check)
+// ---------------------------------------------------------------------------
+//
+// `indexer/.state/events-YYYY-MM.jsonl` holds one JSON line per event with
+// `txHash`, `id` (the RPC event id) and `ledger`. Only the files of the
+// current and the previous month are read, from the byte where the last pass
+// stopped; the keys `txHash:id` seen so far stay in memory. `pending` holds
+// the RPC events the journal did not cover yet, re-checked on later passes.
+
+const JOURNAL = { seen: new Set(), lastLedger: null, offsets: new Map(), pending: new Map() };
+
+/** Reads the new lines of the journal; returns `{ lastLedger, seen }` or null when there is no journal. */
+function readJournal(contractId) {
+  if (!fs.existsSync(JOURNAL_DIR)) return null;
+  const now = new Date();
+  const months = [0, 1].map((back) => {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  });
+  for (const month of months.reverse()) {
+    const file = path.join(JOURNAL_DIR, `events-${month}.jsonl`);
+    if (!fs.existsSync(file)) continue;
+    const start = JOURNAL.offsets.get(file) ?? 0;
+    const size = fs.statSync(file).size;
+    if (size <= start) continue;
+    const fd = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(size - start);
+    try {
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+    // Only whole lines count: a line still being appended waits for the next pass.
+    const end = buffer.lastIndexOf("\n");
+    if (end < 0) continue;
+    for (const row of buffer.toString("utf8", 0, end).split("\n")) {
+      if (row.trim() === "") continue;
+      let line;
+      try {
+        line = JSON.parse(row);
+      } catch {
+        continue; // `npm run verify` in indexer/ reports a malformed line; this is not its job
+      }
+      if (line.contract !== contractId) continue;
+      JOURNAL.seen.add(`${line.txHash}:${line.id}`);
+      if (JOURNAL.lastLedger === null || line.ledger > JOURNAL.lastLedger) JOURNAL.lastLedger = line.ledger;
+    }
+    JOURNAL.offsets.set(file, start + end + 1);
+  }
+  return { lastLedger: JOURNAL.lastLedger, seen: JOURNAL.seen };
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +268,10 @@ async function snapshot(monitor) {
   // The RPC serves events up to its latest ledger and for about a week back.
   const from = Math.min(Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000), ledger.latest);
   const events = await contractEvents(C.openWindow, from);
-  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm };
+  // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
+  const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
+  const journal = readJournal(C.openWindow);
+  return { now, latest: ledger.latest, from, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal };
 }
 
 /** The detectors. Each returns alerts: { detector, threat, level, message, action }. */
@@ -335,6 +413,49 @@ const DETECTORS = {
     return s.repos
       .filter((r) => Number(r.opened_at) > windowStart + 60 && !seen.has(r.id))
       .map((r) => ({ detector: "events", threat: "Repud.1", level: "warning", message: `repo #${r.id} has no repo_opened event`, action: "investigate" }));
+  },
+  rpc(s) {
+    // Infra.1: the monitor reads one RPC and trusts it. With several configured,
+    // their heads are compared every pass: a silent endpoint, or two endpoints
+    // more than `rpcLedgerGap` ledgers apart, mean one of them is lagging or
+    // not on the same chain. The threat model's STRIDE table has no row for
+    // the reading infrastructure; "Infra.1" names it until that row exists.
+    if (!s.rpcHeights) return [];
+    const out = s.rpcHeights
+      .filter((h) => h.error)
+      .map((h) => ({ level: "warning", message: `RPC ${h.url} did not answer getLatestLedger: ${h.error}`, action: "check the endpoint; the pass used another one" }));
+    const answered = s.rpcHeights.filter((h) => !h.error);
+    if (answered.length >= 2) {
+      const top = answered.reduce((a, b) => (b.sequence > a.sequence ? b : a));
+      const low = answered.reduce((a, b) => (b.sequence < a.sequence ? b : a));
+      const gap = top.sequence - low.sequence;
+      if (gap > LIMITS.rpcLedgerGap) {
+        out.push({ level: "warning", message: `RPC heads ${gap} ledgers apart: ${low.url} at ${low.sequence}, ${top.url} at ${top.sequence}`, action: "the lagging endpoint is stale or on another network; drop it from STELLAR_RPC_URLS if it persists" });
+      }
+    }
+    return out.map((a) => ({ detector: "rpc", threat: "Infra.1", ...a }));
+  },
+  journal(s) {
+    // Repud.2: every event the RPC served must be in the indexer's journal once
+    // the journal covers its ledger. An event the journal does not cover yet
+    // waits in `pending` and is checked on a later pass; one older than the
+    // RPC's retention is dropped unchecked.
+    if (!s.journal) return [];
+    for (const e of s.events) {
+      if (e.id) JOURNAL.pending.set(`${e.txHash}:${e.id}`, { name: e.name, ledger: e.ledger, txHash: e.txHash });
+    }
+    const out = [];
+    for (const [key, e] of JOURNAL.pending) {
+      if (s.journal.lastLedger === null || e.ledger > s.journal.lastLedger) {
+        if (e.ledger < s.latest - 17_000) JOURNAL.pending.delete(key);
+        continue;
+      }
+      JOURNAL.pending.delete(key);
+      if (!s.journal.seen.has(key)) {
+        out.push({ detector: "journal", threat: "Repud.2", level: "warning", message: `event ${e.name} at ledger ${e.ledger} missing from the indexer journal`, action: "run the indexer, then compare; a persistent gap means a tampered or stalled journal", tx: e.txHash });
+      }
+    }
+    return out;
   },
 };
 
@@ -698,6 +819,7 @@ async function main() {
     console.log(`Upgrade ${announce} recorded as announced.`);
     return;
   }
+  if (RPC_URLS.length === 1) console.log("single RPC endpoint, no cross-check (set STELLAR_RPC_URLS to compare two)");
   for (;;) {
     try {
       const { s, alerts } = await pass(monitor);

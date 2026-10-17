@@ -619,7 +619,29 @@ export async function extendTtl(state, sourceRole, keys, ledgers) {
   return { hash, seconds, fee };
 }
 
-/** Contract events since `startLedger`, decoded: `{ ledger, name, topics, data, txHash }`. */
+/**
+ * The latest ledger of every configured endpoint, asked in parallel: one
+ * `{ url, sequence }` or `{ url, error }` per endpoint, in `RPC_URLS` order.
+ * Bypasses the failover proxy on purpose: a cross-check needs every answer.
+ */
+export async function latestLedgers(timeoutMs = 10_000) {
+  return Promise.all(servers.map(async (s, i) => {
+    let timer;
+    try {
+      const latest = await Promise.race([
+        s.getLatestLedger(),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${timeoutMs / 1000} s`)), timeoutMs); }),
+      ]);
+      return { url: RPC_URLS[i], sequence: Number(latest.sequence) };
+    } catch (error) {
+      return { url: RPC_URLS[i], error: String(error?.message ?? error).split("\n")[0].slice(0, 80) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }));
+}
+
+/** Contract events since `startLedger`, decoded: `{ ledger, name, topics, data, txHash, id }`; `id` is the RPC event id, the key of the indexer's journal. */
 export async function contractEvents(contractId, startLedger) {
   const out = [];
   let cursor;
@@ -643,7 +665,7 @@ export async function contractEvents(contractId, startLedger) {
     }
     for (const e of response.events) {
       const topics = e.topic.map((t) => scValToNative(t));
-      out.push({ ledger: e.ledger, name: String(topics[0]), topics: topics.slice(1), data: scValToNative(e.value), txHash: e.txHash });
+      out.push({ ledger: e.ledger, name: String(topics[0]), topics: topics.slice(1), data: scValToNative(e.value), txHash: e.txHash, id: e.id });
     }
     // The RPC scans at most about 10,000 ledgers per request and returns a
     // cursor at the end of the scanned stretch even when it holds no event:

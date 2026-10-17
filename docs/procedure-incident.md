@@ -94,6 +94,7 @@ Rythme : une répétition complète avant chaque démonstration publique et chaq
 ## 6. Limites connues
 
 - La pause automatique utilise la clé du gardien sur la machine de surveillance : avant tout dépôt réel, cette clé doit être isolée et limitée à la pause, ce qu'elle est déjà dans le contrat.
-- La surveillance lit l'historique d'événements du RPC public, conservé environ sept jours. L'historique complet est tenu à part par `indexer/` (journal append-only sous chaîne de hachage, vues registre et SFTR), à lancer régulièrement ; la surveillance ne le consulte pas encore.
-- Par défaut la surveillance n'interroge qu'un RPC ; un second fournisseur se configure par `STELLAR_RPC_URLS` et reste à choisir avant toute exploitation réelle.
+- La surveillance lit l'historique d'événements du RPC public, conservé environ sept jours. L'historique complet est tenu à part par `indexer/` (journal append-only sous chaîne de hachage, ancré sur le registre, vues registre et SFTR), à lancer régulièrement ; la surveillance compare à chaque passe les événements du RPC au journal quand il couvre le ledger (Repud.2).
+- Par défaut la surveillance n'interroge qu'un RPC ; avec `STELLAR_RPC_URLS`, elle compare la hauteur de ledger des endpoints à chaque passe (Infra.1) et bascule sur erreur. Le second fournisseur reste à choisir avant toute exploitation réelle.
+- Une seconde instance en mode témoin (`npm run monitor -- --witness`, sur un autre poste) alerte avec ses propres fichiers et son propre signal de vie, sans jamais agir : deux témoins, un seul acteur.
 - Le détecteur de rapprochement couvre un fonds ; il s'étend fonds par fonds quand d'autres fonds sont admis.
