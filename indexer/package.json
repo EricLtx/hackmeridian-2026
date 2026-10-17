@@ -1,0 +1,17 @@
+{
+  "name": "open-window-indexer",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Append-only event journal of the Open Window contract, with a hash chain and registry exports",
+  "scripts": {
+    "index": "node index.mjs",
+    "verify": "node verify.mjs",
+    "export": "node export.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@stellar/stellar-sdk": "17.2.1"
+  }
+}

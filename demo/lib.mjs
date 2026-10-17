@@ -645,8 +645,16 @@ export async function contractEvents(contractId, startLedger) {
       const topics = e.topic.map((t) => scValToNative(t));
       out.push({ ledger: e.ledger, name: String(topics[0]), topics: topics.slice(1), data: scValToNative(e.value), txHash: e.txHash });
     }
-    if (response.events.length < 200) break;
-    cursor = response.cursor;
+    // The RPC scans at most about 10,000 ledgers per request and returns a
+    // cursor at the end of the scanned stretch even when it holds no event:
+    // a short page only ends the read once the cursor has reached the
+    // latest ledger (the cursor is `<toid>-<index>`, ledger in the toid's
+    // top 32 bits).
+    const next = response.cursor;
+    if (!next || next === cursor) break;
+    const reachedLedger = /^(\d+)-/.exec(String(next)) ? Number(BigInt(/^(\d+)-/.exec(String(next))[1]) >> 32n) : null;
+    if (response.events.length < 200 && (reachedLedger === null || !response.latestLedger || reachedLedger >= response.latestLedger)) break;
+    cursor = next;
   }
   return out;
 }

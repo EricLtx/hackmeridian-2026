@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Event history of the Open Window contract on Stellar testnet, from the append-only journal." />
+    <title>Open Window, history</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="top">
+      <div class="wrap top-inner">
+        <a class="brand" href="./index.html" aria-label="Open Window, home">
+          <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2" />
+            <path d="M12 3v18M3 12h9" stroke="currentColor" stroke-width="2" />
+            <path d="M14.5 9.5 18 6m0 0h-3m3 0v3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" />
+          </svg>
+          <span>Open Window</span>
+        </a>
+        <span class="pill pill-net" id="network">Testnet</span>
+        <nav class="nav" aria-label="Sections">
+          <a href="./index.html">Market</a>
+          <a href="#registry">Repos</a>
+          <a href="#events">Events</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main" class="wrap">
+      <section class="intro">
+        <h1>History</h1>
+        <p>
+          Every event the contract emitted, kept in an append-only journal with a hash chain, beyond the few days the
+          public RPC retains. Repos are rebuilt from the events alone. The journal is produced by the indexer in the
+          repository (<code>indexer/</code>); this page reads its export.
+        </p>
+      </section>
+
+      <div class="notice" id="load-error" role="alert" hidden></div>
+
+      <section class="card" id="journal" aria-labelledby="journal-title">
+        <div class="card-head">
+          <h2 id="journal-title">Journal</h2>
+          <span class="muted small" id="journal-meta"></span>
+        </div>
+        <div class="tiles" id="journal-tiles"></div>
+        <p class="muted small" id="journal-hash"></p>
+      </section>
+
+      <section class="card" id="registry" aria-labelledby="registry-title">
+        <div class="card-head">
+          <h2 id="registry-title">Repos</h2>
+          <span class="muted small" id="registry-meta"></span>
+        </div>
+        <div id="registry-body"></div>
+      </section>
+
+      <section class="card" id="events" aria-labelledby="events-title">
+        <div class="card-head">
+          <h2 id="events-title">Latest events</h2>
+          <span class="muted small" id="events-meta"></span>
+        </div>
+        <div id="events-body"></div>
+      </section>
+    </main>
+
+    <footer class="wrap foot">
+      <p class="muted small" id="foot"></p>
+    </footer>
+    <script type="module" src="./src/history.js"></script>
+  </body>
+</html>

@@ -24,3 +24,8 @@ target
 /.claude/worktrees/
 # Ledger snapshots the Soroban test host writes when a test Env is dropped.
 **/test_snapshots/
+
+# Event indexer: dependencies, journal and exports, local only
+/indexer/node_modules/
+/indexer/.state/
+/web/public/history.json
