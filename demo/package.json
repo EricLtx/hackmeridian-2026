@@ -10,7 +10,8 @@
     "status": "node run.mjs --status",
     "onboard": "node onboard.mjs",
     "monitor": "node monitor.mjs",
-    "measure": "node measure.mjs"
+    "measure": "node measure.mjs",
+    "fxlog": "node fxlog.mjs"
   },
   "engines": { "node": ">=20" },
   "dependencies": {
