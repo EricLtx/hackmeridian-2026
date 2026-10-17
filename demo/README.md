@@ -65,7 +65,7 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 |---|---|---|
 | Fund haircut | 2 % | Covers a NAV move far larger than a money market fund makes in a week |
 | FX haircut | 2 % | Covers a weekend EUR/USD gap; FX markets are closed while the chain is open |
-| FX band | ±5 % around the rate at admission | A rate outside it is treated as a faulty feed; re-admission with `setup -- --fx=…` resets it |
+| FX band | ±2 % around the rate at admission, never wider than the FX haircut | A rate outside it is treated as a faulty feed; a rate inside it stays covered by the haircut. Re-admission with `setup -- --fx=…` or a two-key re-anchor resets it |
 | NAV max age | 26 hours | One daily publication plus two hours of slack |
 | FX max age | 3 days | Spans a weekend if the FX feed stops on Friday evening |
 | Corridor floor | 0.1 % | The NAV may dip this much below its reference |
@@ -82,7 +82,7 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 | `Entries are paused` | A run stopped between pause and unpause | `npm run demo -- --only=repair` |
 | `The wrong NAV may still be live` | The NAV correction did not take | `npm run demo -- --only=repair` |
 | `StalePrice` | NAV older than 26 h, or FX older than 3 days | `npm run status` republishes the NAV; for FX, `setup -- --fx=local` |
-| `PriceOutOfBand` outside the guardrails scene | EUR/USD moved more than 5 % since admission | `setup -- --fx=local`, or back with `--fx=reflector`: re-admission anchors today's rate |
+| `PriceOutOfBand` outside the guardrails scene | EUR/USD moved more than 2 % since admission | `setup -- --fx=local`, or back with `--fx=reflector`: re-admission anchors today's rate |
 | `Repo #n from an earlier run is still open` | A rehearsal opened a repo and did not repurchase it | `npm run demo -- --only=repurchase` |
 | `No offer has enough funds left` | Offers drained by repeated runs | `setup -- --fresh` |
 | `Repo #n is Defaulted` | The staged repo was already seized | `setup -- --restage`, then wait one hour |

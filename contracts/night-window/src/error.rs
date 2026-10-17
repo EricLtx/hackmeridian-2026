@@ -117,4 +117,7 @@ pub enum Error {
     /// The trustee must be neither the governor, the guardian nor the sole
     /// lender.
     TrusteeNotIndependent = 47,
+    /// A cross-priced fund's FX band may not exceed its FX haircut: a rate
+    /// the band admits must stay covered by the haircut.
+    FxBandExceedsHaircut = 48,
 }

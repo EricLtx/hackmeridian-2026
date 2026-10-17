@@ -18,7 +18,7 @@ export function navAt(publishedAt, now) {
 export const FUND_SETTINGS = {
   haircutBps: 200,
   fxHaircutBps: 200,
-  fxBandBps: 500,
+  fxBandBps: 200,
   fxMaxAgeSecs: 3 * 24 * 3600,
   navMaxAgeSecs: 26 * 3600,
   corridorFloorBps: 10,

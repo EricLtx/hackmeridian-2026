@@ -3032,6 +3032,9 @@ fn check_fund_config(env: &Env, config: &FundConfig) -> Result<(), Error> {
             {
                 return Err(Error::OutsideEnvelope);
             }
+            if fx.band_bps > fx.haircut_bps {
+                return Err(Error::FxBandExceedsHaircut);
+            }
             if OracleClient::new(env, &fx.oracle).base() != nav_base
                 || fx.asset != Asset::Other(config.currency.clone())
             {
