@@ -13,7 +13,7 @@ permissions:
 # Dependabot (.github/dependabot.yml) proposes the bumps as reviewable PRs.
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install the toolchain pinned in rust-toolchain.toml
@@ -43,7 +43,7 @@ jobs:
         run: cargo test
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     defaults:
       run:
         working-directory: web
@@ -63,7 +63,7 @@ jobs:
         run: npm test
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Licences, advisories, sources and duplicate versions (deny.toml).
@@ -72,7 +72,7 @@ jobs:
           command: check
 
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     permissions:
       contents: read
       checks: write # audit-check publishes its result as a check run
@@ -88,7 +88,7 @@ jobs:
     # Internal links of the documentation (README, docs/, demo/, web/). External
     # URLs are not fetched: the check is deterministic and never fails on a
     # third-party outage. Advisory until the end of the October 2026 freeze.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
