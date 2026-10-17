@@ -442,15 +442,22 @@ async function rehearse() {
   }
 
   if (runStep(2)) {
-    console.log("\n2. Reconciliation (DoS.5): the issuer claws back one share unit from the contract");
-    await invoke(state, "steward", C.shares, "clawback", [sv.address(C.openWindow), sv.i128(1n)]);
+    console.log("\n2. Reconciliation (DoS.5): one share unit appears or disappears from the contract's balance");
+    // With shares locked in an open repo the issuer claws one unit back; with
+    // nothing locked (no open repo), a stray unit is minted to the contract
+    // instead. Both break invariant I2 in one direction and are reverted.
+    const heldBefore = BigInt(await read(state, C.shares, "balance", [sv.address(C.openWindow)]));
+    const [breakI2, revertI2, trigger] = heldBefore > 0n
+      ? ["clawback", "mint", "issuer clawback of 1 unit"]
+      : ["mint", "clawback", "1 stray unit minted to the contract (no open repo)"];
+    await invoke(state, "steward", C.shares, breakI2, [sv.address(C.openWindow), sv.i128(1n)]);
     const { s, alerts } = await pass(monitor);
     const fired = firedBy(alerts, "reconciliation");
     const done = await act(alerts, s);
-    await invoke(state, "steward", C.shares, "mint", [sv.address(C.openWindow), sv.i128(1n)]);
+    await invoke(state, "steward", C.shares, revertI2, [sv.address(C.openWindow), sv.i128(1n)]);
     await invoke(state, "governor", C.openWindow, "unpause", []);
     const after = await clean();
-    record("reconciliation", "DoS.5", "issuer clawback of 1 unit", fired, done.join(", ") || "none", !firedBy(after, "reconciliation"));
+    record("reconciliation", "DoS.5", trigger, fired, done.join(", ") || "none", !firedBy(after, "reconciliation"));
   }
 
   if (runStep(3)) {
