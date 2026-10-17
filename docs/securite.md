@@ -186,6 +186,10 @@ La qualification d'un service comme service TIC dépend de la définition de l'a
 **Décision D2 : offrir les deux modes.** Instance exploitée par le projet, ou instance exploitée par l'émetteur à partir du code public. Le second mode est la stratégie de sortie de l'émetteur et réduit son risque de concentration (article 29).
 
 
+### 6.4 Garde des clés : politique (17 octobre 2026)
+
+Chaque rôle du contrat (gouverneur, gardien, intendant, tiers de confiance) est porté par un compte dont les signataires peuvent tourner, jamais par une clé nue ; l'adresse du rôle reste stable quand les clés changent. Le gouverneur est un multisig natif à seuils, clé maîtresse désactivée à terme, signataires sur portefeuilles matériels dont un hors de l'équipe ; l'hôte Soroban vérifie ses signatures contre le seuil *medium* du compte. Les clés chaudes (pause, loyer du code) vivent dans un service de gestion de clés avec journal d'audit, hors de tout fichier. Aucune personne ne détient deux rôles ; le responsable d'incident n'en détient aucun. Tout changement de signataires passe par une transaction atomique, répétée sur testnet avec les mêmes appareils, relue sur la chaîne et consignée dans un procès-verbal (`npm run keys` dans `demo/`). Les rotations suivent un calendrier écrit, avec un exercice trimestriel de rotation et un exercice annuel de restauration depuis les sauvegardes. Un playbook de compromission par rôle s'appuie sur le délai, le veto du gardien et le fait que les sorties ne sont jamais bloquées. La politique complète suit le cycle de vie demandé par le RTS (UE) 2024/1774 (génération, sauvegarde, stockage, rotation, révocation, destruction) et est tenue à la disposition des émetteurs. État au 17 octobre : testnet, gouverneur 2 sur 2 avec clé maîtresse encore active ; la cible ci-dessus s'applique au lancement gardé.
+
 ## 7. Chaîne d'outils et processus de revue
 
 ### En place
