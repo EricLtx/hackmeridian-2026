@@ -616,9 +616,17 @@ async function main() {
     return;
   }
   for (;;) {
-    const { s, alerts } = await pass(monitor);
-    if (ACT) await act(alerts, s, monitor);
-    saveMonitor(monitor);
+    try {
+      const { s, alerts } = await pass(monitor);
+      if (ACT) await act(alerts, s, monitor);
+      saveMonitor(monitor);
+    } catch (error) {
+      // In watch mode a failed pass (public RPC hiccup, "Account not found"
+      // on a live account, timeout) is logged and retried, never fatal: the
+      // watch must survive a weekend unattended. A single pass still fails.
+      if (!WATCH) throw error;
+      console.error(`\n[${new Date().toISOString().replace("T", " ").slice(0, 19)} UTC] pass failed, retrying in 30 s: ${error.message}`);
+    }
     if (!WATCH) return;
     await sleep(30_000);
   }
