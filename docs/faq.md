@@ -181,7 +181,7 @@ The amount the borrower signs is fixed when the transaction is simulated, a few 
 
 ### How is it tested?
 
-247 host tests across the workspace, 204 of them for Open Window:
+248 host tests across the workspace, 205 of them for Open Window:
 
 - every error path;
 - an intruder refused on every privileged function;

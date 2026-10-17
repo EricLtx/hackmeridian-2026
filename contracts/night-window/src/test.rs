@@ -550,7 +550,7 @@ fn cross_fund() -> (Fixture, Address) {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 200,
         max_age_secs: 3 * DAY,
-        band_bps: 500,
+        band_bps: 200,
     });
     f.client.set_stablecoin(&f.eurc, &eur(&f.env));
     // Raised before the first admission: afterwards an increase waits.
@@ -591,7 +591,7 @@ fn cross_fund_refuses_an_fx_feed_in_another_base() {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 200,
         max_age_secs: 3 * DAY,
-        band_bps: 500,
+        band_bps: 200,
     });
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
@@ -620,12 +620,50 @@ fn cross_fund_refuses_an_fx_haircut_below_the_envelope() {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 100,
         max_age_secs: 3 * DAY,
-        band_bps: 500,
+        band_bps: 200,
     });
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
         Err(Ok(Error::OutsideEnvelope))
     );
+}
+
+/// Economic model of 17 October 2026 (I16): a rate the FX band admits must
+/// stay covered by the FX haircut, otherwise an in-band wrong rate lends
+/// beyond the haircut-adjusted value.
+#[test]
+fn fx_band_wider_than_the_fx_haircut_is_refused_at_admission() {
+    let f = bare();
+    let usd_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    MockOracleClient::new(&f.env, &usd_oracle).set_price(
+        &Asset::Stellar(f.shares.clone()),
+        &NAV_USD,
+        &T0,
+    );
+    let fx = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    MockOracleClient::new(&f.env, &fx).set_price(&Asset::Other(eur(&f.env)), &EUR_USD, &T0);
+    f.client.set_stablecoin(&f.eurc, &eur(&f.env));
+    let mut config = fund_config(&f);
+    config.oracle = usd_oracle;
+    let leg = |band_bps: u32| FxLeg {
+        oracle: fx.clone(),
+        asset: Asset::Other(eur(&f.env)),
+        haircut_bps: 200,
+        max_age_secs: 3 * DAY,
+        band_bps,
+    };
+    config.source = PriceSource::Cross(leg(201));
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::FxBandExceedsHaircut))
+    );
+    // Equal is allowed: the haircut covers every rate the band admits.
+    config.source = PriceSource::Cross(leg(200));
+    f.client.set_fund(&f.shares, &config);
 }
 
 /// Review finding M3: a faulty FX feed cannot inflate the collateral.
@@ -634,7 +672,7 @@ fn fx_rate_outside_its_band_blocks_the_quote() {
     let (f, fx_oracle) = cross_fund();
     MockOracleClient::new(&f.env, &fx_oracle).set_price(
         &Asset::Other(eur(&f.env)),
-        &(EUR_USD * 94 / 100),
+        &(EUR_USD * 97 / 100),
         &T0,
     );
     assert_eq!(
@@ -643,7 +681,7 @@ fn fx_rate_outside_its_band_blocks_the_quote() {
     );
     MockOracleClient::new(&f.env, &fx_oracle).set_price(
         &Asset::Other(eur(&f.env)),
-        &(EUR_USD * 97 / 100),
+        &(EUR_USD * 99 / 100),
         &T0,
     );
     assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
@@ -1231,7 +1269,7 @@ fn fund_change_to_an_oracle_in_another_base_is_refused() {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 200,
         max_age_secs: 3 * DAY,
-        band_bps: 500,
+        band_bps: 200,
     });
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
@@ -2573,21 +2611,21 @@ fn a_new_fx_feed_must_lie_within_the_current_band() {
         fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
         nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
     };
-    // 6 % away from the reference rate, for a band of 5 %.
-    publish(EUR_USD * 94 / 100);
+    // 3 % away from the reference rate, for a band of 2 %.
+    publish(EUR_USD * 97 / 100);
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
         Err(Ok(Error::PriceOutOfBand))
     );
-    publish(EUR_USD * 97 / 100);
+    publish(EUR_USD * 99 / 100);
     f.client.set_fund(&f.shares, &config);
     advance(&f, DEFAULT_TIMELOCK_SECS);
-    publish(EUR_USD * 94 / 100);
+    publish(EUR_USD * 97 / 100);
     assert_eq!(
         f.client.try_apply_fund_change(&f.shares),
         Err(Ok(Error::PriceOutOfBand))
     );
-    publish(EUR_USD * 97 / 100);
+    publish(EUR_USD * 99 / 100);
     f.client.apply_fund_change(&f.shares);
     assert_eq!(
         f.client.get_fund_state(&f.shares).unwrap().reference_fx,
@@ -3437,10 +3475,10 @@ fn reanchor_of_a_cross_fund_checks_the_expected_rate() {
     let PriceSource::Cross(leg) = config.source.clone() else {
         panic!("cross fund");
     };
-    // 6 % away from the rate, for a band of 5 %.
+    // 3 % away from the rate, for a band of 2 %.
     assert_eq!(
         f.client
-            .try_propose_reanchor(&f.shares, &NAV_USD, &(EUR_USD * 106 / 100)),
+            .try_propose_reanchor(&f.shares, &NAV_USD, &(EUR_USD * 103 / 100)),
         Err(Ok(Error::PriceOutOfBand))
     );
     f.client.propose_reanchor(&f.shares, &NAV_USD, &EUR_USD);
@@ -3554,7 +3592,7 @@ fn a_first_fx_leg_is_anchored_at_the_proposal() {
         asset: Asset::Other(eur(&f.env)),
         haircut_bps: 200,
         max_age_secs: 3 * DAY,
-        band_bps: 500,
+        band_bps: 200,
     });
     publish(EUR_USD);
     f.client.set_fund(&f.shares, &config);
@@ -3563,12 +3601,12 @@ fn a_first_fx_leg_is_anchored_at_the_proposal() {
         EUR_USD
     );
     advance(&f, DEFAULT_TIMELOCK_SECS);
-    publish(EUR_USD * 94 / 100);
+    publish(EUR_USD * 97 / 100);
     assert_eq!(
         f.client.try_apply_fund_change(&f.shares),
         Err(Ok(Error::PriceOutOfBand))
     );
-    publish(EUR_USD * 97 / 100);
+    publish(EUR_USD * 99 / 100);
     f.client.apply_fund_change(&f.shares);
     assert_eq!(
         f.client.get_fund_state(&f.shares).unwrap().reference_fx,
@@ -4494,7 +4532,7 @@ mod integration {
                     asset: Asset::Other(eur(&env)),
                     haircut_bps: 200,
                     max_age_secs: 3 * DAY,
-                    band_bps: 500,
+                    band_bps: 200,
                 }),
                 nav_max_age_secs: 26 * HOUR,
                 corridor_floor_bps: 10,

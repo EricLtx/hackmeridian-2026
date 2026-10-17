@@ -64,7 +64,7 @@ export const ERRORS = {
   33: "TimelockPending", 34: "ReleaseBlocked", 35: "PriceDivergence", 36: "NothingToRelease",
   37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached", 40: "StewardCannotLend", 41: "NotSoleLender",
   42: "AttestationMissing", 43: "NotGuardianBackup", 44: "SoleLenderFixed", 45: "NoStewardBackup",
-  46: "TrusteeFixed", 47: "TrusteeNotIndependent",
+  46: "TrusteeFixed", 47: "TrusteeNotIndependent", 48: "FxBandExceedsHaircut",
 };
 
 /** Error tables of the other contracts the demo calls. */
