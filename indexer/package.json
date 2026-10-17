@@ -8,6 +8,7 @@
     "index": "node index.mjs",
     "verify": "node verify.mjs",
     "export": "node export.mjs",
+    "anchor": "node anchor.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "engines": { "node": ">=20" },

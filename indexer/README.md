@@ -2,7 +2,7 @@
 
 An append-only journal of every event the Open Window contract emits on Stellar testnet, kept beyond the few days the public RPC retains, with a hash chain over the lines and exports rebuilt from the events alone: a flat event table, a repo registry and an SFTR-shaped table. It is the contract's black box: once a line is written it is never changed, and `verify` proves it.
 
-The indexer reads the chain and writes files. It holds no key and signs nothing.
+The indexer reads the chain and writes files. It holds no key; the one command that signs, `anchor`, reads its key from the environment and never stores it.
 
 ## Prerequisites
 
@@ -24,7 +24,10 @@ npm run export -- --view registre    # .state/registre.csv, one row per repo
 npm run export -- --view sftr        # .state/sftr.csv
 npm run export -- --json             # .state/export.json
 npm run export -- --json --web       # also copies it to ../web/public/history.json
-npm test                             # hash chain and views, offline
+npm run anchor                       # write the last hash on the ledger (INDEXER_ANCHOR_SECRET)
+npm run anchor -- --rehearse         # same with a throwaway testnet account
+npm run verify -- --anchors          # also check every anchor, in the journal and on the ledger
+npm test                             # hash chain, views and anchor building, offline
 ```
 
 `--state <dir>` points every command at another folder, for a second contract or a second copy.
@@ -66,7 +69,35 @@ Event names are the contract's `#[contractevent]` struct names in snake case: `r
 
 Each line commits to the previous one. Changing a field changes that line's hash and breaks the next line's `prevHash`; removing a line breaks the `seq` sequence; recomputing a tampered line's hash moves the break to the next line; inserting a line out of ledger order is refused. `npm run verify` re-reads every file, recomputes the chain and prints the line count and the last hash, or the first line that does not fit.
 
-The last hash is the integrity proof: publish it (a timestamped mail, a ticket, a second machine) and anyone with a copy of the files can check that nothing was altered since. The chain proves that the journal was not changed after the fact; it does not prove that it is complete, which is what the declared gaps and a second indexer are for.
+The last hash is the integrity proof: publish it (a timestamped mail, a ticket, a second machine, or the ledger itself, see Anchoring) and anyone with a copy of the files can check that nothing was altered since. The chain proves that the journal was not changed after the fact; it does not prove that it is complete, which is what the declared gaps and a second indexer are for.
+
+## Anchoring
+
+`npm run anchor` writes the journal's last hash on the Stellar ledger. The machine that keeps the journal could also rewrite it and recompute the whole chain; a hash copied somewhere that machine cannot reach, with a date it cannot choose, closes that door. The ledger is such a place: the anchor is a timestamped proof that the journal existed in this exact state at that ledger, readable by anyone, kept by every full-history node and independent of the indexer, its disk and its operator.
+
+How it works:
+
+1. The journal is read and its chain verified (a broken chain is not anchored). The last hash (32 bytes) and the line count are taken.
+2. A classic transaction is built on the anchoring account: one `manageData` operation, key `openwindow.indexer.<first 8 characters of the contract id>`, value the 32 raw bytes of the hash; a text memo `ow-indexer lines=<n>`; base fee; 60-second validity window. `manageData` was chosen over a memo hash because the value stays readable afterwards as a ledger entry (`getLedgerEntries`, or Horizon `/accounts/{id}/data/{key}`), not only inside a transaction the RPC will forget.
+3. The transaction is signed and submitted through the same RPC list as the indexer (`STELLAR_RPC_URLS` failover), and waited for until it lands or its window closes; nothing is recorded for a transaction that did not land.
+4. One line is appended to `.state/anchors.jsonl`: `{ at, ledger, txHash, account, dataKey, hash, lines }`. Like the journal, this file is only ever appended to.
+
+Running `anchor` when the last hash is already the last anchor's does nothing (`--force` anchors it again). Each new anchor overwrites the data entry: the entry always holds the latest hash, and earlier anchors remain provable through their transaction.
+
+`npm run verify -- --anchors` checks every recorded anchor twice. (a) Journal: the anchored hash is recomputed from line `lines` of the current journal, which also shows that every line up to that one is the one that was anchored. (b) Ledger: the account's data entry still holds the hash; when a later anchor has overwritten it, the anchoring transaction is read instead (from the RPC while it retains it, else from Horizon, `STELLAR_HORIZON_URL`, default `https://horizon-testnet.stellar.org`) and must carry the hash under the data key. The command prints one row per anchor and a verdict; exit code 2 when anything does not hold.
+
+Environment:
+
+| Variable | Use |
+|---|---|
+| `INDEXER_ANCHOR_SECRET` | the anchoring account's secret seed (`S...`); read from the environment, never written to disk or printed. Without it, `--rehearse` generates a throwaway key, funds it through friendbot and discards it with the process (testnet only). |
+| `STELLAR_RPC_URLS`, `STELLAR_RPC_URL` | as for the other commands |
+| `STELLAR_HORIZON_URL` | Horizon, used only for an anchoring transaction the RPC no longer retains |
+| `STELLAR_NETWORK_PASSPHRASE` | defaults to testnet; `--rehearse` refuses any other network |
+
+Cost: the base fee, 100 stroops (0.00001 XLM) per anchor, plus one base reserve (0.5 XLM) held on the account for the data entry as long as it exists; re-anchoring reuses the entry, so the reserve is paid once per contract. The anchoring account is an ordinary account with no role in the contract: it needs no other balance and no other signer. In production, it is one of the operator's keys and its public key is published with the journal, so a reader can check `anchors.jsonl` against the account without trusting the file.
+
+Limits. An anchor proves that the journal up to line `lines` existed, unchanged, no later than the anchor's ledger; it proves neither that the journal is complete (a gap declared or not before that line is anchored with it) nor that the events it holds are true (the RPC was trusted for them). An anchor on a throwaway account proves the same thing but cannot be tied to the operator. Testnet is reset periodically: anchors made before a reset survive only in `anchors.jsonl`, with nothing left on the ledger to check them against.
 
 ## Views
 
@@ -99,7 +130,7 @@ These SFTR fields stay empty; they belong to the parties' own records:
 ## Limits
 
 - A copy of the journal is only as complete as the RPC windows it saw: if the indexer is down longer than the RPC's event retention (about a week on the public testnet endpoint, sometimes less), a gap is declared, not filled. Run `--watch` continuously, or from two places.
-- The RPC is trusted for the content of the events; the chain protects the journal after it is written. A second copy from another RPC with the same last hash is the cross-check.
+- The RPC is trusted for the content of the events; the chain protects the journal after it is written. A second copy from another RPC with the same last hash is the cross-check. An anchor on the ledger dates it.
 - Order follows the RPC's event ids (ledger, transaction, operation, event index). Two events of one transaction keep that order.
 - The journal is one contract's. Another contract needs `--state <dir>`.
 - Amounts are raw token units; the decimals of each token are not in the events (the web page reads them from `deployment.testnet.json`).
