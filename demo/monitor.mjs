@@ -114,7 +114,10 @@ const PRIVILEGED = new Set([
   "fallback_set", "fallback_cancelled", "fallback_removed", "upgrade_cancelled", "upgraded",
   "reanchored", "reanchor_cancelled", "admin_proposal_cancelled", "release_redirected",
   "sole_lender_set", "lender_attested", "guardian_backup_set", "steward_recovery_cancelled", "steward_recovered",
+  "stablecoin_change_cancelled", "sentinel_changed", "migrated",
 ]);
+/** The stored layout version the current code expects (`SCHEMA_VERSION` in lib.rs); an rc2 instance has no `schema_version` function. */
+const EXPECTED_SCHEMA = 2;
 /** Proposals that take effect after the time delay: the window to verify and cancel (Elev.2). */
 const PROPOSALS = /_proposed$|_change_proposed$/;
 
@@ -317,10 +320,15 @@ async function snapshot(monitor) {
   // The RPC serves events up to its latest ledger and for about a week back.
   const from = Math.min(Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000), ledger.latest);
   const events = await contractEvents(C.openWindow, from);
+  // rc4: the layout version behind the code means an upgrade without its migration; the sentinel is the key that acts.
+  const [schemaVersion, sentinel] = await Promise.all([
+    read(state, C.openWindow, "schema_version").then(Number, () => null),
+    read(state, C.openWindow, "sentinel").catch(() => null),
+  ]);
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal };
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel };
 }
 
 /** The detectors. Each returns alerts: { detector, threat, level, message, action }. */
@@ -415,6 +423,13 @@ const DETECTORS = {
       });
     }
     for (const e of s.events.filter((ev) => PROPOSALS.test(ev.name))) {
+      // rc4: a stablecoin registration announced beforehand (`--announce-stablecoin=<address>`) is a warning; unannounced, it is cancelled.
+      if (e.name === "stablecoin_change_proposed") {
+        const token = String(e.topics?.[0] ?? "");
+        const known = (monitor.announcedStablecoins ?? []).includes(token);
+        out.push({ level: known ? "warning" : "critical", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"}${known ? " (announced)" : " (NOT announced)"}`, action: known ? "verify before it applies" : "cancel stablecoin", token, tx: e.txHash });
+        continue;
+      }
       const isUpgrade = e.name === "upgrade_proposed";
       const hash = isUpgrade ? hex(e.data?.wasm_hash) : null;
       const announced = isUpgrade && (monitor.announced ?? []).includes(hash);
@@ -529,6 +544,12 @@ const DETECTORS = {
     }
     return out.map((a) => ({ detector: "rpc", threat: "Infra.1", ...a }));
   },
+  schema(s) {
+    // Elev.2 / S29: code upgraded, migration not run. Entries answer SchemaOutdated
+    // meanwhile; exits go on. Nothing is raised on code without the version.
+    if (s.schemaVersion === null || s.schemaVersion >= EXPECTED_SCHEMA) return [];
+    return [{ detector: "schema", threat: "Elev.2", level: "critical", message: `stored layout at version ${s.schemaVersion}, the code expects ${EXPECTED_SCHEMA}: migrate has not run since the upgrade`, action: "governor and trustee run migrate (npm run upgrade -- --apply)" }];
+  },
   journal(s) {
     // Repud.2: every event the RPC served must be in the indexer's journal once
     // the journal covers its ledger. An event the journal does not cover yet
@@ -572,9 +593,16 @@ function report(s, alerts) {
   for (const a of alerts) console.log(`  ${a.level.toUpperCase().padEnd(8)} ${a.threat.padEnd(9)} ${a.message}  (action: ${a.action})`);
 }
 
+/** The key that pauses and cancels: the sentinel when the instance names ours (rc4), else the guardian. Vetoes stay with the guardian and the trustee. */
+function actorRole(s) {
+  const ours = state.keys.sentinel ? keypair(state, "sentinel").publicKey() : null;
+  return s?.sentinel && ours && s.sentinel === ours ? "sentinel" : "guardian";
+}
+
 /** The safe automatic actions: pause on a critical alert, cancel an unannounced upgrade, extend TTLs. */
 async function act(alerts, s, monitor = {}) {
   const done = [];
+  const actor = actorRole(s);
   if (alerts.some((a) => /veto_admin/.test(a.action ?? ""))) {
     const pending = await read(state, C.openWindow, "pending_admin");
     if (pending && !(monitor.announcedAdmins ?? []).includes(pending.admin)) {
@@ -594,14 +622,20 @@ async function act(alerts, s, monitor = {}) {
   if (alerts.some((a) => a.action === "cancel")) {
     const pending = await read(state, C.openWindow, "pending_upgrade");
     if (pending) {
-      const r = await invoke(state, "guardian", C.openWindow, "cancel_upgrade", [sv.address(keypair(state, "guardian").publicKey())]);
-      console.log(`  ACTION   guardian cancelled the upgrade proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      const r = await invoke(state, actor, C.openWindow, "cancel_upgrade", [sv.address(keypair(state, actor).publicKey())]);
+      console.log(`  ACTION   ${actor} cancelled the upgrade proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
       done.push("cancel upgrade");
     }
   }
+  // rc4: a stablecoin proposed without an announcement is withdrawn the same way.
+  for (const a of alerts.filter((x) => x.action === "cancel stablecoin" && x.token)) {
+    const r = await invoke(state, actor, C.openWindow, "cancel_stablecoin_change", [sv.address(a.token), sv.address(keypair(state, actor).publicKey())]);
+    console.log(`  ACTION   ${actor} cancelled the stablecoin proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+    done.push("cancel stablecoin");
+  }
   if (!s.paused && alerts.some((a) => a.level === "critical" && a.action === "pause")) {
-    const r = await invoke(state, "guardian", C.openWindow, "pause", [sv.address(keypair(state, "guardian").publicKey())]);
-    console.log(`  ACTION   guardian paused new entries in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+    const r = await invoke(state, actor, C.openWindow, "pause", [sv.address(keypair(state, actor).publicKey())]);
+    console.log(`  ACTION   ${actor} paused new entries in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
     done.push("pause");
   }
   const extend = alerts.filter((a) => a.action === "extend" && a.key);
@@ -922,6 +956,39 @@ async function rehearse() {
     record("nav", "Tamper.1", "NAV unchanged across passes (threshold lowered to 0 h)", fired, "verify the fund type and the operator; the corridor floor bounds it", !firedBy(after, "nav") || firedBy(before, "nav"));
   }
 
+  if (runStep(18)) {
+    console.log("\n18. Stablecoin proposed without announcement (Elev.2, S29): withdrawn inside the delay");
+    const supported = await read(state, C.openWindow, "schema_version").then(() => true, () => false);
+    if (!supported) {
+      console.log("  instance without rc4 code; skipped");
+    } else {
+      const token = C.backupFeed ?? C.navOracle; // any contract address stands for an unknown token: it is never registered
+      const proposed = await invoke(state, "governor", C.openWindow, "set_stablecoin", [sv.address(token), sv.symbol("XXX")]);
+      const { s, alerts } = await pass(monitor);
+      const fired = alerts.some((a) => a.level === "critical" && /stablecoin registration proposed/.test(a.message));
+      const done = await act(alerts, s, monitor);
+      const left = await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]);
+      console.log(`  proposal ${explorer(proposed.hash)}; ${done.join(", ") || "no action"}`);
+      record("privileged", "Elev.2", "unannounced stablecoin registration proposed with the governor keys", fired, `${done.join(", ") || "none"} by ${actorRole(s)}`, !left);
+    }
+  }
+
+  if (runStep(19)) {
+    console.log("\n19. Sentinel limits (S26): the sentinel pauses, and cannot veto a governor handover");
+    const sentinel = await read(state, C.openWindow, "sentinel").catch(() => null);
+    if (!sentinel || !state.keys.sentinel) {
+      console.log("  no sentinel named on this instance (run `npm run setup -- --sentinel` on rc4 code); skipped");
+    } else {
+      const me = sv.address(keypair(state, "sentinel").publicKey());
+      const paused = await invoke(state, "sentinel", C.openWindow, "pause", [me]);
+      const refused = await probe(state, "sentinel", C.openWindow, "veto_admin", [me]);
+      await invoke(state, "governor", C.openWindow, "unpause", []);
+      const after = await clean();
+      console.log(`  pause by the sentinel ${explorer(paused.hash)}; veto_admin by the sentinel: ${refused ? refused.name : "accepted"}`);
+      record("pause", "S26", "sentinel pauses, then tries to veto a handover", true, `pause accepted, veto refused (${refused?.name ?? "accepted"})`, refused?.name === "Unauthorized" && !after.some((a) => a.detector === "pause" && /are paused/.test(a.message)));
+    }
+  }
+
   const file = path.join(STATE_DIR, `rehearsal-${new Date().toISOString().slice(0, 10)}.json`);
   fs.writeFileSync(file, JSON.stringify(results, null, 2));
   console.log(`\nRehearsal written to ${path.relative(process.cwd(), file)}`);
@@ -938,6 +1005,13 @@ async function main() {
     monitor.announced = [...new Set([...(monitor.announced ?? []), announce.toLowerCase()])];
     saveMonitor(monitor);
     console.log(`Upgrade ${announce} recorded as announced.`);
+    return;
+  }
+  const announceToken = args.find((a) => a.startsWith("--announce-stablecoin="))?.slice(22);
+  if (announceToken) {
+    monitor.announcedStablecoins = [...new Set([...(monitor.announcedStablecoins ?? []), announceToken])];
+    saveMonitor(monitor);
+    console.log(`Stablecoin ${announceToken} recorded as announced.`);
     return;
   }
   if (RPC_URLS.length === 1) console.log("single RPC endpoint, no cross-check (set STELLAR_RPC_URLS to compare two)");

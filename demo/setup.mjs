@@ -8,6 +8,8 @@
 //   npm run setup -- --fx=reflector back to the Reflector FX feed
 //   npm run setup -- --multisig     make the governor a 2-of-2 account with an
 //                                   outside co-signer (decision S7); done once
+//   npm run setup -- --sentinel     the guardian names the monitoring key as
+//                                   sentinel: it may only pause and cancel (rc4)
 //   npm run setup -- --second-fund  admit a second fund (euro money market
 //                                   share, its own issuer and NAV feed, no FX
 //                                   leg) and a second euro stablecoin; one
@@ -411,12 +413,44 @@ async function main() {
     },
   );
 
+  // rc4: the monitoring host signs pauses and cancellations with the sentinel key, never the guardian's.
+  if (process.argv.includes("--sentinel") || state.keys.sentinel) await nameSentinel(state, ow);
+
   // The second fund stays part of the deployment once admitted: a rerun keeps it consistent.
   if (process.argv.includes("--second-fund") || state.contracts.shares2) await secondFund(state, ow, shares, teur);
 
   writeDeployment(state);
   console.log("\n  Public addresses written to web/public/deployment.testnet.json for the web interface.");
   console.log("\nSetup complete. Run `npm run demo` from one hour after now.");
+}
+
+/**
+ * The sentinel (decision S26, rc4): a key the monitoring host holds, which
+ * the guardian names and which may only pause and cancel proposals. The
+ * guardian key itself leaves the host. Skipped, and left to a rerun, while the
+ * instance still runs code without the role.
+ */
+async function nameSentinel(state, ow) {
+  step("Sentinel: the guardian names the monitoring key");
+  if (state.done.sentinel) {
+    console.log("  done earlier, skipped");
+    return;
+  }
+  const supported = await read(state, ow, "sentinel").then(() => true, () => false);
+  if (!supported) {
+    console.log("  the instance runs code without the sentinel role (before rc4): rerun after the upgrade");
+    return;
+  }
+  if (!state.keys.sentinel) {
+    state.keys.sentinel = Keypair.random().secret();
+    saveState(state);
+    await friendbot(keypair(state, "sentinel").publicKey());
+  }
+  const sentinel = keypair(state, "sentinel").publicKey();
+  await invoke(state, "guardian", ow, "set_sentinel", [sv.address(sentinel)]);
+  state.done.sentinel = true;
+  saveState(state);
+  console.log(`  sentinel ${sentinel.slice(0, 8)}…: pause and cancel only; the monitor acts with it from now on`);
 }
 
 /**
@@ -483,7 +517,17 @@ async function secondFund(state, ow, shares, teur) {
   const shares2 = state.contracts.shares2;
 
   await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4)", async () => {
-    await invoke(state, "governor", ow, "set_stablecoin", [sv.address(state.contracts.euro2), sv.symbol("EUR")]);
+    const token = sv.address(state.contracts.euro2);
+    await invoke(state, "governor", ow, "set_stablecoin", [token, sv.symbol("EUR")]);
+    // From rc4 a registration after the first admission is a proposal (S29).
+    const pending = await read(state, ow, "pending_stablecoin_change", [token]).catch(() => null);
+    if (pending) {
+      const wait = Math.max(0, Number(pending.eta) - (await ledgerTime()));
+      console.log(`  proposed; applying it after the time delay (${Math.ceil(wait / 60)} min)`);
+      while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
+      await invoke(state, "operator2", ow, "apply_stablecoin_change", [token]);
+      console.log("  applied by a third party after the delay");
+    }
     console.log("  two stablecoins now share the EUR cap");
   });
 

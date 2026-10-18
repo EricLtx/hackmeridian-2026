@@ -7,7 +7,8 @@ Ce document dit qui agit, comment et dans quel délai quand la surveillance d'Op
 | Rôle | Détient | Peut | Ne peut pas |
 |---|---|---|---|
 | Responsable d'incident | La décision | Déclarer l'incident, choisir l'action, communiquer | Agir seul sur une clé qu'il ne détient pas |
-| Gardien | La clé `guardian` | Suspendre les entrées (`pause`), annuler une proposition, céder son rôle | Lever la pause ; bloquer une sortie |
+| Gardien | La clé `guardian` | Suspendre les entrées (`pause`), annuler une proposition, céder son rôle à sa sauvegarde, opposer son veto à une passation, nommer la sentinelle | Lever la pause ; bloquer une sortie |
+| Sentinelle (rc4) | La clé de l'hôte de surveillance, nommée par le gardien | Suspendre les entrées, annuler une proposition | Lever la pause ; opposer un veto ; céder ou sauvegarder un rôle ; proposer quoi que ce soit |
 | Gouverneur | La clé `governor`, compte multisig natif (2 sur 2 sur testnet, cible 2 sur 3 sur matériel dont un signataire extérieur) | Lever la pause, retirer un fonds, proposer une mise à niveau ou un assouplissement, remplacer seul le gardien après 30 jours | Toucher une pension ouverte ; appliquer quoi que ce soit avant le délai |
 | Intendant d'un fonds | La clé du fonds | Geler son fonds, révoquer un prêteur, abaisser la référence | Agir sur un autre fonds |
 | Opérateur de prix | La clé du flux NAV | Republier une valeur liquidative | Modifier le contrat |
@@ -52,6 +53,8 @@ Robustesse de la surveillance elle-même : `STELLAR_RPC_URLS` liste plusieurs RP
 | Plafond à 80 % ou rythme anormal d'ouvertures | Usage réel ou sondage | Examen ; pause si inexpliqué | Plafonds revus par l'intendant ou le gouverneur |
 | Cours de change inchangé depuis plus de 60 heures | Marché des changes fermé (week-end prolongé, jour férié) ; flux figé | Vérifier la fermeture du marché ; l'exposition reste bornée par la bande et la décote de change (S22 à venir : bande ≤ décote) ; pause si le flux est figé un jour de marché | Le cours bouge à la réouverture ; sinon bascule sur le flux de secours (`setup -- --fx=local` en démonstration) |
 | Flotteur du keeper sous le seuil | Loyer payé sans recharge | Recharge depuis la trésorerie (le keeper n'a aucun rôle dans le contrat) | Solde revenu au-dessus d'un mois de loyer |
+| Schéma en retard sur le code (rc4) | Mise à niveau appliquée sans `migrate` | Gouverneur et trustee lancent `migrate` (`npm run upgrade -- --apply`) ; les entrées répondent `SchemaOutdated`, les sorties continuent | `schema_version` égal à la version attendue |
+| Stablecoin proposé non annoncé (rc4) | Clés du gouverneur compromises, ou oubli d'annonce | Annulation par la sentinelle ou le gardien (automatique avec `--act` sauf annonce par `--announce-stablecoin=`) | Proposition disparue ; si prévue, réannoncer puis reproposer |
 | VL inchangée depuis plus de 72 heures | Opérateur qui republie sans recalculer ; flux figé ; ou fonds à VL constante (normal) | Vérifier le type de fonds auprès de l'intendant ; si le fonds est à VL variable, demander à l'opérateur une publication recalculée ; le plancher du corridor borne l'exposition | La VL bouge ; pour un fonds à VL constante, relever le seuil (`--nav-frozen-hours=`) |
 | Approbation de prêteur proche de l'archivage | TTL non prolongé sur une entrée `Lender` qu'une saisie lira | Prolongation (automatique avec `--act`) ; une approbation archivée bloquerait la saisie jusqu'à sa restauration | Entrée revenue au-dessus du seuil |
 
@@ -99,7 +102,7 @@ Rythme : une répétition complète avant chaque démonstration publique et chaq
 
 ## 6. Limites connues
 
-- La pause automatique utilise la clé du gardien sur la machine de surveillance : avant tout dépôt réel, cette clé doit être isolée et limitée à la pause, ce qu'elle est déjà dans le contrat.
+- Avant rc4, la pause automatique utilisait la clé du gardien sur la machine de surveillance. Depuis rc4, le gardien nomme une sentinelle (`setup -- --sentinel`) : la clé de l'hôte ne peut que suspendre et annuler, jamais lever la pause, opposer un veto ni céder un rôle ; la clé du gardien quitte l'hôte.
 - La surveillance lit l'historique d'événements du RPC public, conservé environ sept jours. L'historique complet est tenu à part par `indexer/` (journal append-only sous chaîne de hachage, ancré sur le registre, vues registre et SFTR), à lancer régulièrement ; la surveillance compare à chaque passe les événements du RPC au journal quand il couvre le ledger (Repud.2).
 - Par défaut la surveillance n'interroge qu'un RPC ; avec `STELLAR_RPC_URLS`, elle compare la hauteur de ledger des endpoints à chaque passe (Infra.1) et bascule sur erreur. Le second fournisseur reste à choisir avant toute exploitation réelle.
 - Une seconde instance en mode témoin (`npm run monitor -- --witness`, sur un autre poste) alerte avec ses propres fichiers et son propre signal de vie, sans jamais agir : deux témoins, un seul acteur.
