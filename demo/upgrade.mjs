@@ -57,6 +57,18 @@ function announce(hash) {
   fs.writeFileSync(MONITOR_FILE, JSON.stringify(monitor, null, 2));
 }
 
+/** After a verified upgrade the monitor's code baseline moves to the executable the ledger holds, so Elev.2 stops reporting the change we made. */
+function acknowledge(hash) {
+  let monitor = {};
+  try {
+    monitor = JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
+  } catch {
+    return;
+  }
+  monitor.wasmHash = hash.toLowerCase();
+  fs.writeFileSync(MONITOR_FILE, JSON.stringify(monitor, null, 2));
+}
+
 /** The WASM hash the ledger holds as the instance's executable. */
 async function executableHash() {
   const head = await ledgerEntries([storageKey(ow)]);
@@ -102,6 +114,8 @@ async function apply(hash) {
   const held = await executableHash();
   console.log(`ledger executable ${held}`);
   if (held !== Buffer.from(wasmHash).toString("hex")) throw new Error("the ledger holds another executable: stop and investigate");
+  acknowledge(held);
+  console.log("monitor baseline moved to the new executable (restart a running watch to pick it up)");
   // Pre-rc4 code has no schema_version: read it through the new code, after the upgrade.
   const version = Number(await read(state, ow, "schema_version"));
   const expected = await expectedSchema();
