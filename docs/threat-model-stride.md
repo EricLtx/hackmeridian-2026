@@ -1,6 +1,6 @@
 # STRIDE threat model of the Open Window contract (crate `night-window`)
 
-Date: 13 October 2026 · Status: **initiated, to be completed with the implementation of the lifecycle** · Method: Stellar's threat modeling guide (four questions, six STRIDE categories, at least one problem per category, one treatment per problem) · Sibling document: [security.md](security.md), which holds the invariants, the vulnerability classes and decisions S1 to S19.
+Date: 13 October 2026 · Status: **kept current with the implementation; thirteen detectors per admitted fund and nineteen drills rehearsed on the testnet instance (18 October 2026, rc4)** · Method: Stellar's threat modeling guide (four questions, six STRIDE categories, at least one problem per category, one treatment per problem) · Sibling document: [security.md](security.md), which holds the invariants, the vulnerability classes and decisions S1 to S29.
 
 This document meets the requirements of tranche 2 of the Stellar Community Fund (threat model and monitoring plan) and of the Audit Bank readiness assessment. It is a living tool: it is redone at every architecture change and reread before every audit.
 
@@ -61,7 +61,7 @@ The contract's functions: `__constructor`, `set_admin`, `upgrade`, `set_max_term
 
 ## 2. What can go wrong?
 
-Each problem is numbered by category. Invariants I1 to I9 and decisions S1 to S19 are those of [security.md](security.md).
+Each problem is numbered by category. Invariants I1 to I9 and decisions S1 to S29 are those of [security.md](security.md).
 
 ### Spoofing
 

@@ -222,10 +222,9 @@ The demo runner is described in [demo/README.md](../demo/README.md). It never re
 
 ### Where is the threat model?
 
-- **[security.md](security.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S21, maximum loss per scenario and the DORA mapping.
+- **[security.md](security.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S29, maximum loss per scenario and the DORA mapping.
 - **[threat-model-stride.md](threat-model-stride.md)** holds 21 STRIDE problems, the treatment of each and a first monitoring plan.
 
-Both are in French.
 
 ### How do I report a vulnerability?
 

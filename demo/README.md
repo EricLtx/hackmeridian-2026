@@ -104,7 +104,7 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 
 Re-admission anchors the NAV reference on the live NAV, so run `repair` before `setup -- --fx=…` if a wrong NAV might be live.
 
-## Version 3 governance in the demo
+## Governance in the demo
 
 `setup` sets the contract's time delay to 5 minutes before the first fund is admitted (`config.mjs`), so changes can be shown live; a real deployment keeps 48 hours or more. With `--multisig`, the governor needs two keys for every action. After admission, replacing the fund, raising a cap or appointing a guardian is a proposal: `setup -- --fx=…` proposes the replacement, waits for the delay, then applies it. The operator extends the contract code itself, by 30 days at a time, because the contract never extends its own code.
 

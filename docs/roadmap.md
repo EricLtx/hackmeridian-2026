@@ -186,5 +186,6 @@ These tasks run continuously from step 1 on. Each one has an owner in the incide
 - [incident-procedure.md](incident-procedure.md): who acts, how and within what time when an alert fires.
 - [interface-reference.md](interface-reference.md): every entry point, type and error, in long form.
 - [audit-scope.md](audit-scope.md): what an external auditor needs; the code is frozen at the tag `audit-v4-rc4`.
+- [operations.md](operations.md): running an instance as its operator, with the pre-upgrade inventory and the instance register.
 - [faq.md](faq.md): questions and answers for users, the Stellar ecosystem, engineers and security reviewers.
 - [demo/README.md](../demo/README.md): the live testnet demo and its recovery procedures.

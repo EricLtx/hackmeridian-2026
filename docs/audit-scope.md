@@ -1,13 +1,13 @@
 # Audit package
 
-What an external auditor needs to review Open Window version 4 (audit candidate rc2): the scope, how to rebuild and check the deployed code, the trust model, the invariants, what was already reviewed, and where to look hardest. Prepared on 15 October 2026 for Step 2 of the [roadmap](roadmap.md).
+What an external auditor needs to review Open Window version 4 (audit candidate rc4, tag `audit-v4-rc4` on commit `a85515f`, interface frozen): the scope, how to rebuild and check the deployed code, the trust model, the invariants, what was already reviewed, and where to look hardest. Prepared on 15 October 2026 for Step 2 of the [roadmap](roadmap.md); updated on 18 October 2026 for rc4. The testnet instance runs the tagged code (executable `f5f13ae6…`), upgraded from rc2 and migrated under governance on 18 October 2026.
 
 ## Scope
 
 | In scope | Path |
 |---|---|
 | The Open Window contract, version 4 | `contracts/night-window/src/`: `lib.rs`, `storage.rs`, `oracle.rs`, `math.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs` |
-| Its host tests, as evidence | `contracts/night-window/src/test.rs` |
+| Its host tests, as evidence | `contracts/night-window/src/test.rs` (210 tests), `test_math.rs`, and `tests/fixtures/night_window_rc2.wasm`, the rc2 code deployed on testnet, which the migration test upgrades and migrates with a repo open |
 | Build configuration | `Cargo.toml`, `rust-toolchain.toml`, `contracts/night-window/Cargo.toml`, `contracts/night-window/build.rs` |
 
 Out of scope: `contracts/fund-token/` and `contracts/nav-oracle/`, which are test doubles of a permissioned share token and an operator NAV feed; `demo/`, `indexer/` and `web/`, which are off-chain tooling; the Stellar network, the Soroban host and `soroban-sdk`. The indexer's journal is outside the contract audit, but its register and reporting views are checkable without trusting it: every line carries a hash chained to the previous one, the chain head is anchored on the ledger, and `verify` recomputes it.
@@ -69,6 +69,7 @@ None of these is a substitute for an external audit: the reviews were internal, 
 3. **Deferred release.** `repurchase` and `seize` settle the debt even when the share token refuses the transfer, and record the shares owed. Check that the shares can only reach the recorded beneficiary, once, and that invariant I2 holds on every path.
 4. **Backup feed.** It may only stand in for a stale or reverting primary, must agree with a fresh primary within `max_divergence_bps`, and goes through the same corridor. Check the rescaling and rounding of the comparison.
    **FX leg (rc3):** the FX band of a cross-priced fund may not exceed its FX haircut (`FxBandExceedsHaircut`), so a rate inside the band stays covered. Check that no admission or replacement path skips `check_fund_config`, and that the NAV side keeps the same property through the envelope (`min_haircut_bps` 100 against a worst-case corridor rise of 58 bps over `max_nav_age_secs`).
+6. **rc4 additions.** Schema version: `create_offer` and `open_repo` must refuse while the stored layout is behind the code (`SchemaOutdated`), every exit must keep working, `migrate` must need the governor and the trustee and refuse when nothing is to migrate. Sentinel: it may pause and cancel any proposal, never veto, lift a pause or decide; it must be independent of every other role; the guardian names it, the guardian or the governor removes it. Stablecoin registry: after the first admission a registration or a currency change is a proposal behind the delay, cancellable by the governor, the guardian or the sentinel, dropped by a removal, expiring like every proposal; before the first admission it applies at once. The embedded spec was trimmed: check that the long-form text in [interface-reference.md](interface-reference.md) matches the code, since tools and bindings now see one-sentence doc comments.
 5. **Storage and rent.** Operations extend the contract instance but never the code entry; the operator extends the code (decision recorded in `storage::bump_instance`). Check that no user-triggered path pays rent on a large entry, and that every persistent entry an exit depends on is extended when it is written or refused.
 
 ## Known limits
