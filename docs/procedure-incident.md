@@ -28,7 +28,9 @@ Une passe toutes les 30 secondes. `--act` pose la pause sur une alerte critique 
 | Niveau | Délai de réaction | Exemples |
 |---|---|---|
 | Critique | Pause ou annulation automatique, responsable joint en 15 minutes | Prix refusé par le contrat, écart de rapprochement des parts (I2), parts retenues par l'émetteur, proposition de mise à niveau non annoncée, code du contrat modifié, entrée archivée |
-| Avertissement | Examen avant l'échéance de la proposition | Proposition en attente (fonds, secours, recalage, gardien, enveloppe, limites, plafond), changement privilégié, pause en cours, plafond utilisé à 80 %, NAV de plus de 24 heures, entrée à moins de 14 jours de l'archivage, cours de change inchangé depuis plus de 60 heures, flotteur du keeper sous un mois de loyer |
+| Avertissement | Examen avant l'échéance de la proposition | Proposition en attente (fonds, secours, recalage, gardien, enveloppe, limites, plafond), changement privilégié, pause en cours, plafond utilisé à 80 %, NAV à deux heures de sa borne d'âge, entrée à moins de 14 jours de l'archivage (approbations de prêteur comprises), cours de change inchangé depuis plus de 60 heures, VL inchangée depuis plus de 72 heures, flotteur du keeper sous un mois de loyer |
+
+Chaque détecteur tourne par fonds admis : avec deux fonds, une alerte porte le nom du fonds concerné.
 
 Robustesse de la surveillance elle-même : `STELLAR_RPC_URLS` liste plusieurs RPC essayés dans l'ordre (le RPC public a répondu « compte introuvable » sur un compte existant à trois reprises en treize heures le 17 octobre 2026) ; `HEARTBEAT_URL` envoie un signal de vie après chaque passe réussie à un service externe qui alerte quand la surveillance s'arrête ; une passe en échec est journalisée et rejouée trente secondes plus tard.
 
@@ -50,6 +52,8 @@ Robustesse de la surveillance elle-même : `STELLAR_RPC_URLS` liste plusieurs RP
 | Plafond à 80 % ou rythme anormal d'ouvertures | Usage réel ou sondage | Examen ; pause si inexpliqué | Plafonds revus par l'intendant ou le gouverneur |
 | Cours de change inchangé depuis plus de 60 heures | Marché des changes fermé (week-end prolongé, jour férié) ; flux figé | Vérifier la fermeture du marché ; l'exposition reste bornée par la bande et la décote de change (S22 à venir : bande ≤ décote) ; pause si le flux est figé un jour de marché | Le cours bouge à la réouverture ; sinon bascule sur le flux de secours (`setup -- --fx=local` en démonstration) |
 | Flotteur du keeper sous le seuil | Loyer payé sans recharge | Recharge depuis la trésorerie (le keeper n'a aucun rôle dans le contrat) | Solde revenu au-dessus d'un mois de loyer |
+| VL inchangée depuis plus de 72 heures | Opérateur qui republie sans recalculer ; flux figé ; ou fonds à VL constante (normal) | Vérifier le type de fonds auprès de l'intendant ; si le fonds est à VL variable, demander à l'opérateur une publication recalculée ; le plancher du corridor borne l'exposition | La VL bouge ; pour un fonds à VL constante, relever le seuil (`--nav-frozen-hours=`) |
+| Approbation de prêteur proche de l'archivage | TTL non prolongé sur une entrée `Lender` qu'une saisie lira | Prolongation (automatique avec `--act`) ; une approbation archivée bloquerait la saisie jusqu'à sa restauration | Entrée revenue au-dessus du seuil |
 
 Commandes utiles, depuis `demo/` :
 
@@ -89,6 +93,8 @@ Répétition du 15 octobre 2026, sur la version 4 avec gouverneur multisig, prê
 | Gel par l'émetteur | DoS.5 | L'émetteur gèle le contrat, l'emprunteur rembourse | oui, critique | dette soldée, parts inscrites ; livraison refusée pendant le gel, réussie après | oui |
 | Passation du gouverneur avec clés volées (version 4) | Elev.2 | Le gouverneur propose une passation vers une adresse tierce | oui, critique | veto du gardien 11 s après la proposition, 290 s avant son échéance ; acceptation avant le délai refusée (`TimelockPending`) | oui |
 
+Exercices ajoutés depuis : 14 cours de change inchangé, 15 flotteur du keeper (17 octobre) ; 16 approbations de prêteur proches de l'archivage, prolongées (seuil forcé à 130 jours ; deux approbations sur deux fonds le 18 octobre) ; 17 VL inchangée d'une passe à l'autre (seuil abaissé à 0 h). Depuis le 18 octobre l'instance testnet admet deux fonds (parts de fonds du Trésor américain en USD, parts de fonds monétaire euro en EUR sans jambe de change) et deux stablecoins euro partageant un plafond : les exercices se rejouent sur les deux.
+
 Rythme : une répétition complète avant chaque démonstration publique et chaque mise à niveau, puis une par mois en exploitation.
 
 ## 6. Limites connues
@@ -97,4 +103,4 @@ Rythme : une répétition complète avant chaque démonstration publique et chaq
 - La surveillance lit l'historique d'événements du RPC public, conservé environ sept jours. L'historique complet est tenu à part par `indexer/` (journal append-only sous chaîne de hachage, ancré sur le registre, vues registre et SFTR), à lancer régulièrement ; la surveillance compare à chaque passe les événements du RPC au journal quand il couvre le ledger (Repud.2).
 - Par défaut la surveillance n'interroge qu'un RPC ; avec `STELLAR_RPC_URLS`, elle compare la hauteur de ledger des endpoints à chaque passe (Infra.1) et bascule sur erreur. Le second fournisseur reste à choisir avant toute exploitation réelle.
 - Une seconde instance en mode témoin (`npm run monitor -- --witness`, sur un autre poste) alerte avec ses propres fichiers et son propre signal de vie, sans jamais agir : deux témoins, un seul acteur.
-- Le détecteur de rapprochement couvre un fonds ; il s'étend fonds par fonds quand d'autres fonds sont admis.
+- Les détecteurs couvrent chaque fonds que le fichier d'état de la démonstration connaît (deux depuis le 18 octobre) ; un fonds admis par une autre voie doit y être ajouté pour être surveillé.
