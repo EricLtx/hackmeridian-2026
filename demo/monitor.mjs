@@ -932,15 +932,18 @@ async function rehearse() {
   if (runStep(16)) {
     console.log("\n16. Lender approvals (DoS.2, S6): threshold forced above their time to live; an archived approval would block a seizure");
     const saved = LIMITS.ttlDays;
-    LIMITS.ttlDays = 130;
+    // Whatever their current time to live, every watched approval must be
+    // listed: the threshold is forced above any TTL for the firing pass, then
+    // set to 130 days to check that the extension (about 140 days) took.
+    LIMITS.ttlDays = 10_000;
     const { s, alerts } = await pass(monitor);
     const lenderAlerts = alerts.filter((a) => a.detector === "ttl" && /^lender /.test(a.message));
     const fired = lenderAlerts.length > 0;
     const done = await act(lenderAlerts, s);
-    // Still at the forced threshold: the extended entries (about 140 days) must no longer be flagged.
+    LIMITS.ttlDays = 130;
     const after = (await clean()).filter((a) => a.detector === "ttl" && /^lender /.test(a.message));
     LIMITS.ttlDays = saved;
-    record("ttl", "DoS.2", `threshold forced to 130 days: ${lenderAlerts.length} lender approval(s) near archival`, fired, done.join(", ") || "none", fired && after.length === 0);
+    record("ttl", "DoS.2", `threshold forced above every TTL: ${lenderAlerts.length} lender approval(s) watched and extended`, fired, done.join(", ") || "none", fired && after.length === 0);
   }
 
   if (runStep(17)) {
