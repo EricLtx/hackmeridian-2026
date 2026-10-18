@@ -181,6 +181,7 @@ These tasks run continuously from step 1 on. Each one has an owner in the incide
 
 ## Where the details are
 
+- [architecture.md](architecture.md): the map of the system, with diagrams.
 - [security.md](security.md): security baseline, decisions S1 to S29, maximum loss, DORA.
 - [threat-model-stride.md](threat-model-stride.md): threat model and monitoring plan.
 - [incident-procedure.md](incident-procedure.md): who acts, how and within what time when an alert fires.

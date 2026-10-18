@@ -243,6 +243,7 @@ npm run export -- --json --web      # feed web/public/history.json
 - [docs/faq.md](docs/faq.md): questions and answers for newcomers, users, the Stellar ecosystem, engineers and security reviewers.
 - [docs/roadmap.md](docs/roadmap.md): what the MVP proves, and the steps to a product in operation.
 
+- [docs/architecture.md](docs/architecture.md): the map: context, deployable units, components, repo lifecycle, price controls, governance automaton, storage, several funds as data, governed upgrade, operations, build chain.
 - [docs/security.md](docs/security.md): security baseline, threat model and invariants of the contract.
 - [docs/threat-model-stride.md](docs/threat-model-stride.md): STRIDE threat model and monitoring plan.
 - [docs/incident-procedure.md](docs/incident-procedure.md): incident procedure, roles, action per alert and the monitoring rehearsal.

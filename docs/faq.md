@@ -147,6 +147,8 @@ Yes, but not by surprise. The governor proposes the exact code hash with `propos
 
 ### How is the code organised?
 
+The map with diagrams is [architecture.md](architecture.md).
+
 | File | Role |
 |---|---|
 | `lib.rs` | Entry points, role checks, lifecycle |
