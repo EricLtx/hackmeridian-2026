@@ -74,6 +74,10 @@ This repository is public. The market study, the business proposal and third-par
 - When the functional specification is written, it is the reference for the lifecycle; keep it in `private/` until the maintainer decides otherwise, and keep tracked files limited to what the code needs (interface, invariants, security decisions).
 - Do not add event, application or team-administration content.
 
+## Network requests made by agents
+
+Any HTTP request an agent or a script sends on the maintainer's behalf (RPC, documentation fetch, web search) uses a generic `User-Agent` that names the tool, never a person. No e-mail address, name or other personal data goes into request headers, URLs, payloads or committed files.
+
 ## Further reading
 
 - https://developers.stellar.org/docs/build/smart-contracts/overview

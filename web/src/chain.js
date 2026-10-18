@@ -235,7 +235,14 @@ export class Chain {
     if (Array.isArray(source) && source[0] === "Cross") {
       fx = await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]);
     }
-    return { config, state, paused, maxTerm, nav, fx, quote, offers, cap, outstanding, now };
+    // Every admitted fund the deployment lists (one, or two after `setup -- --second-fund`): settings and state.
+    const funds = await Promise.all(
+      (this.deployment.funds ?? []).map(async (f) => {
+        const [cfg, st] = await Promise.all([this.settle(ow, "get_fund", [sv.address(f.shares)]), this.settle(ow, "get_fund_state", [sv.address(f.shares)])]);
+        return { ...f, config: cfg, state: st };
+      }),
+    );
+    return { config, state, paused, maxTerm, nav, fx, quote, offers, cap, outstanding, now, funds };
   }
 
   /** Balances of an address: XLM, the stablecoin (null without trustline) and fund shares. */

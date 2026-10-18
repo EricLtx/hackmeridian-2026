@@ -24,7 +24,45 @@
   },
   "offers": {
     "sponsor": 1,
-    "market": 2
+    "market": 2,
+    "dual": 3,
+    "second": 4
   },
-  "updatedAt": "2026-10-17T16:32:19.497Z"
+  "updatedAt": "2026-10-18T09:08:25.143Z",
+  "funds": [
+    {
+      "symbol": "tMMF",
+      "name": "Test US T-bill fund share",
+      "decimals": 7,
+      "navCurrency": "USD",
+      "shares": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+      "navFeed": "CBOVFFTT3CWDZAF5YKH3EBGQHFL6LRBO2UQITXOQF7TJXRF5KFB35EYG",
+      "priceSource": "Cross"
+    },
+    {
+      "symbol": "tEMMF",
+      "name": "Test euro money market fund share",
+      "decimals": 7,
+      "navCurrency": "EUR",
+      "shares": "CCE42GVRYTFBVZY77KHMPNWVQDMTAUQHMPLUF6VR2GDBUIBFO5E2EY6J",
+      "navFeed": "CC7YOEN6CJ5JSCU64MT7HMROVDW6CSUX5NA4ACIHAUM6DOWAJ6ZOSBBZ",
+      "priceSource": "Direct"
+    }
+  ],
+  "stablecoins": [
+    {
+      "code": "tEUR",
+      "issuer": "GAQWD2X7DREQP6KBAZGRKSEESC3DBHS5XZR6NPEKXU5L7YI7GLHZFJZF",
+      "currency": "EUR",
+      "decimals": 7,
+      "contract": "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX"
+    },
+    {
+      "code": "tEURB",
+      "issuer": "GAQWD2X7DREQP6KBAZGRKSEESC3DBHS5XZR6NPEKXU5L7YI7GLHZFJZF",
+      "currency": "EUR",
+      "decimals": 7,
+      "contract": "CBGM5LVQJTCLKL2BF2T3VK3A3W7VQG2PTRULTLPOZTMTXPJFAEZ7RS3S"
+    }
+  ]
 }

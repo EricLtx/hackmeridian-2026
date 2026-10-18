@@ -6,7 +6,9 @@
 //   npm run status                  the board only
 //   npm run demo -- --only=repair   put the demo back in a clean state
 //
-// Scenes: board, open, guardrails, repurchase, seize, value; repair on demand.
+// Scenes: board, open, guardrails, repurchase, seize, value; repair on demand;
+// second (after `setup -- --second-fund`): a repo on the second fund, in the
+// second stablecoin, through an offer that lists both funds.
 // Prerequisite: `npm run setup`, at least one hour earlier for the seizure.
 //
 // Figures come from the chain at that moment: feeds, fund settings, offers,
@@ -36,7 +38,7 @@ import {
   sleep,
   sv,
 } from "./lib.mjs";
-import { navAt } from "./config.mjs";
+import { NAV_EUR_AT_SETUP, navAt } from "./config.mjs";
 
 const args = process.argv.slice(2);
 const AUTO = args.includes("--auto");
@@ -329,12 +331,87 @@ async function board() {
     line(`Offer #${offer.id} ${offer.sponsor ? "designated" : "market"}`, `${fmt(offer.available)} tEUR available at ${(offer.rate_bps / 100).toFixed(2)} %`);
   }
   line("Entries", (await isPaused()) ? red("paused") : green("open"));
-  for (const [label, id] of [["Live repo", state.ids.liveRepo], ["Staged repo", state.ids.stagedRepo]]) {
+  for (const [label, id] of [["Live repo", state.ids.liveRepo], ["Staged repo", state.ids.stagedRepo], ["Second-fund repo", state.ids.secondRepo]]) {
     if (id === undefined) continue;
     const repo = await getRepo(id);
     const left = Number(repo.maturity) - now;
     line(`${label} #${id}`, `${statusOf(repo)}, ${left > 0 ? `matures in ${age(left)}` : "matured"}`);
   }
+  if (C.shares2) {
+    const fs2 = await read(state, C.openWindow, "get_fund_state", [sv.address(C.shares2)]);
+    const cfg2 = await read(state, C.openWindow, "get_fund", [sv.address(C.shares2)]);
+    line("Second fund (euro MMF share)", `${fmt(fs2.outstanding)} / ${fmt(cfg2.max_outstanding)} EUR lent, haircut ${pct(cfg2.haircut_bps)}, no FX leg`);
+  }
+}
+
+/**
+ * Second fund, second stablecoin, one instance: the borrower pledges euro
+ * fund shares and borrows tEURB through the offer that only lists that fund,
+ * while the tEUR offer listing both funds stays available; the EUR cap is
+ * shared by both stablecoins. Then repurchases. Needs `setup -- --second-fund`.
+ */
+async function second() {
+  title("Second fund: another issuer, another stablecoin, the same contract");
+  if (!C.shares2) {
+    console.log("  No second fund: run `npm run setup -- --second-fund` first.");
+    return;
+  }
+  if (!(await requireOpen())) return;
+  const ow = C.openWindow;
+  const fund2 = sv.address(C.shares2);
+  const now = await ledgerTime();
+  // The second NAV operator publishes when its last value is over an hour old.
+  const nav = await read(state, C.navOracle2, "lastprice", [asset.stellar(C.shares2)]);
+  if (!nav || now - Number(nav.timestamp) >= 3600) {
+    await tx("Second operator publishes the euro fund NAV", "operator2", C.navOracle2, "publish", [asset.stellar(C.shares2), sv.i128(NAV_EUR_AT_SETUP), sv.u64(Math.max(now - 1, Number(nav?.timestamp ?? 0)))]);
+  }
+  const [cfg1, cfg2, fs2] = await Promise.all([
+    read(state, ow, "get_fund", [sv.address(C.shares)]),
+    read(state, ow, "get_fund", [fund2]),
+    read(state, ow, "get_fund_state", [fund2]),
+  ]);
+  line("Fund 1: T-bill share", `NAV in USD, FX leg ${Array.isArray(cfg1.source) ? cfg1.source[0] : cfg1.source}, haircut ${pct(cfg1.haircut_bps)}, NAV age ≤ ${age(Number(cfg1.nav_max_age_secs))}`);
+  line("Fund 2: euro MMF share", `NAV in EUR, source ${Array.isArray(cfg2.source) ? cfg2.source[0] : cfg2.source}, haircut ${pct(cfg2.haircut_bps)}, NAV age ≤ ${age(Number(cfg2.nav_max_age_secs))}`);
+  line("Fund 2 NAV, its own operator", `${price14((await read(state, C.navOracle2, "lastprice", [asset.stellar(C.shares2)])).price)} EUR`);
+  for (const [label, id] of [["dual offer (tEUR, both funds)", state.ids.dualOffer], ["second offer (tEURB, fund 2)", state.ids.secondOffer]]) {
+    if (id === undefined) continue;
+    const offer = await read(state, ow, "get_offer", [sv.u64(id)]);
+    line(`Offer #${id} ${label}`, `${fmt(offer.available)} available at ${(offer.rate_bps / 100).toFixed(2)} %, funds listed: ${offer.funds.length}`);
+  }
+  const capBefore = await read(state, ow, "currency_outstanding", [sv.symbol("EUR")]);
+  const cap = await read(state, ow, "currency_cap", [sv.symbol("EUR")]);
+  line("EUR outstanding, both stablecoins", `${fmt(capBefore)} / ${fmt(cap)}`);
+
+  if (state.ids.secondRepo !== undefined && statusOf(await getRepo(state.ids.secondRepo)) === "Open") {
+    alarm(`Repo #${state.ids.secondRepo} on the second fund is still open.`, "npm run demo -- --only=second (repurchases it first)");
+    await tx("repurchase (second fund)", "borrower", ow, "repurchase", [sv.u64(state.ids.secondRepo)]);
+    delete state.ids.secondRepo;
+    saveState(state);
+  }
+  const pledge = 5_000n * ONE;
+  const q = await read(state, ow, "quote", [fund2, sv.i128(pledge), sv.address(C.euro2)]);
+  const principal = ((BigInt(q.max_principal) * LIVE_BORROW_BPS) / 10_000n / ONE) * ONE;
+  line(`Quote for ${fmt(pledge, 7, 0)} euro fund shares`, `${fmt(q.price, Number(q.price_decimals), 4)} tEURB/share, haircut ${pct(q.haircut_bps)}, up to ${bold(`${fmt(q.max_principal)} tEURB`)}`);
+  const before = await balance(C.euro2, pub("borrower"));
+  const opened = await tx("open_repo on the euro fund, in tEURB", "borrower", ow, "open_repo", [
+    sv.address(pub("borrower")),
+    sv.u64(state.ids.secondOffer),
+    fund2,
+    sv.i128(pledge),
+    sv.i128(principal),
+    sv.u64(24 * 3600),
+  ]);
+  state.ids.secondRepo = Number(opened.value);
+  saveState(state);
+  line("Borrower tEURB balance", `${fmt(before)} → ${bold(fmt(await balance(C.euro2, pub("borrower"))))}`);
+  line("EUR outstanding, both stablecoins", `${fmt(capBefore)} → ${bold(fmt(await read(state, ow, "currency_outstanding", [sv.symbol("EUR")])))} of ${fmt(cap)} (one cap, two tokens)`);
+  line("Fund 2 outstanding", `${fmt(fs2.outstanding)} → ${fmt((await read(state, ow, "get_fund_state", [fund2])).outstanding)} of ${fmt(cfg2.max_outstanding)}`);
+  const interest = BigInt(await read(state, ow, "repo_due", [sv.u64(state.ids.secondRepo)]));
+  await tx("repurchase", "borrower", ow, "repurchase", [sv.u64(state.ids.secondRepo)]);
+  delete state.ids.secondRepo;
+  saveState(state);
+  line("Repaid", `${fmt(principal + interest, 7, 4)} tEURB, of which interest ${fmt(interest, 7, 4)}; shares back to the borrower`);
+  console.log(dim("\n  Two issuers, two NAV feeds, two stablecoins, one currency cap, zero contract changes."));
 }
 
 async function open() {
@@ -575,7 +652,7 @@ async function repair() {
 
 // ---------------------------------------------------------------------------
 
-const RUN = { board, open, guardrails, repurchase, seize, value, repair };
+const RUN = { board, open, guardrails, repurchase, seize, value, repair, second };
 
 async function main() {
   const list = STATUS ? ["board"] : (ONLY ?? SCENES);
