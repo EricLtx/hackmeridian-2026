@@ -56,9 +56,9 @@ pub use types::{
     AnchorFx, AnchorRate, Asset, DataKey, FallbackFeed, FundConfig, FundState, FxLeg,
     LenderAttestation, Offer, PendingAdminChange, PendingCurrencyCapChange, PendingEnvelopeChange,
     PendingFallback, PendingFundChange, PendingFundLimitsChange, PendingGuardianChange,
-    PendingMaxTermChange, PendingReanchor, PendingRelease, PendingStewardBackup,
-    PendingStewardRecovery, PendingUpgrade, PriceData, PriceSource, Quote, Repo, RepoStatus,
-    RiskEnvelope, StablecoinConfig,
+    PendingMaxTermChange, PendingReanchor, PendingRelease, PendingStablecoinChange,
+    PendingStewardBackup, PendingStewardRecovery, PendingUpgrade, PriceData, PriceSource, Quote,
+    Repo, RepoStatus, RiskEnvelope, StablecoinConfig,
 };
 
 use events::*;
@@ -94,6 +94,12 @@ pub const MAX_TIMELOCK_SECS: u64 = 30 * 24 * 60 * 60;
 /// forgotten proposal must not be applied by anyone months later, against a
 /// situation its signers never saw.
 pub const PROPOSAL_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Version of the stored data layout this code expects. An instance deployed
+/// before rc4 holds no version entry and is at 1; `migrate` brings it here
+/// after an upgrade. Entries (new offers and repos) wait for the migration,
+/// exits never do.
+pub const SCHEMA_VERSION: u32 = 2;
 /// Most funds with an active fallback feed: each one keeps its decimals in
 /// instance storage, which every invocation loads.
 pub const MAX_FALLBACKS: u32 = 16;
@@ -126,6 +132,7 @@ impl OpenWindow {
         storage::set_max_term(&env, DEFAULT_MAX_TERM_SECS);
         storage::set_envelope(&env, &default_envelope());
         storage::set_timelock_delay(&env, DEFAULT_TIMELOCK_SECS);
+        storage::set_schema_version(&env, SCHEMA_VERSION);
         env.storage().instance().set(&DataKey::NextOfferId, &1u64);
         env.storage().instance().set(&DataKey::NextRepoId, &1u64);
     }
@@ -140,6 +147,33 @@ impl OpenWindow {
     /// Interface version.
     pub fn version() -> u32 {
         4
+    }
+
+    /// Stored layout version; 1 before rc4.
+    pub fn schema_version(env: Env) -> u32 {
+        storage::schema_version(&env)
+    }
+
+    /// Brings the stored layout to this code's version after an upgrade.
+    /// Governor, and the trustee when named.
+    pub fn migrate(env: Env) -> Result<(), Error> {
+        let governor = storage::require_governor(&env);
+        require_trustee(&env, &governor);
+        let from = storage::schema_version(&env);
+        if from >= SCHEMA_VERSION {
+            return Err(Error::NothingToMigrate);
+        }
+        // Version 1 to 2: no stored type changed; the version entry is the
+        // whole migration. Each later version adds its own step here, run in
+        // order, so that any instance can catch up from any earlier layout.
+        storage::set_schema_version(&env, SCHEMA_VERSION);
+        storage::bump_instance(&env);
+        Migrated {
+            from,
+            to: SCHEMA_VERSION,
+        }
+        .publish(&env);
+        Ok(())
     }
 
     /// The governor.
@@ -269,7 +303,7 @@ impl OpenWindow {
     /// Withdraws it; governor, guardian or trustee.
     pub fn cancel_upgrade(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) && !is_trustee(&env, &caller) {
+        if !may_cancel(&env, &caller) && !is_trustee(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         let pending = storage::pending_upgrade(&env).ok_or(Error::NotProposed)?;
@@ -337,7 +371,7 @@ impl OpenWindow {
     /// Withdraws it; governor or guardian.
     pub fn cancel_max_term_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) {
+        if !may_cancel(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_max_term(&env, &caller) {
@@ -392,7 +426,7 @@ impl OpenWindow {
     /// Withdraws it; governor or guardian.
     pub fn cancel_guardian_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) {
+        if !may_cancel(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_guardian(&env, &caller) {
@@ -590,7 +624,7 @@ impl OpenWindow {
     /// Withdraws it; governor or guardian.
     pub fn cancel_envelope_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) {
+        if !may_cancel(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_envelope(&env, &caller) {
@@ -606,25 +640,83 @@ impl OpenWindow {
             .filter(|p| is_live(&env, p.eta))
     }
 
-    /// Registers a stablecoin. Governor.
+    /// Registers a stablecoin; after the first admission, proposes it for
+    /// the delay. Governor.
     pub fn set_stablecoin(env: Env, stablecoin: Address, currency: Symbol) {
         storage::require_governor(&env);
-        let config = StablecoinConfig {
-            currency: currency.clone(),
-            decimals: token_io::decimals(&env, &stablecoin),
-        };
-        storage::set_stablecoin(&env, &stablecoin, &config);
-        storage::bump_instance(&env);
-        StablecoinSet {
-            stablecoin,
-            currency,
+        if storage::past_bootstrap(&env) {
+            // A new stablecoin, or a new currency for a registered one,
+            // widens what lenders may be repaid in: it waits like any other
+            // loosening (decision S7). The signature predates the delay, so
+            // the one failure is raised the way `set_admin` raises.
+            let eta = match eta(&env) {
+                Ok(eta) => eta,
+                Err(error) => panic_with_error!(&env, error),
+            };
+            storage::set_pending_stablecoin(
+                &env,
+                &stablecoin,
+                &PendingStablecoinChange {
+                    currency: currency.clone(),
+                    eta,
+                },
+            );
+            storage::bump_instance(&env);
+            StablecoinChangeProposed {
+                stablecoin,
+                currency,
+                eta,
+            }
+            .publish(&env);
+            return;
         }
-        .publish(&env);
+        install_stablecoin(&env, stablecoin, currency);
     }
 
-    /// Removes a stablecoin; exits go on. Governor.
+    /// Applies a proposed stablecoin once its delay has elapsed. Anyone.
+    pub fn apply_stablecoin_change(env: Env, stablecoin: Address) -> Result<(), Error> {
+        let pending = storage::pending_stablecoin(&env, &stablecoin).ok_or(Error::NotProposed)?;
+        ensure_due(&env, pending.eta)?;
+        storage::remove_pending_stablecoin(&env, &stablecoin);
+        install_stablecoin(&env, stablecoin, pending.currency);
+        Ok(())
+    }
+
+    /// Withdraws a proposed stablecoin. Governor, guardian or sentinel.
+    pub fn cancel_stablecoin_change(
+        env: Env,
+        stablecoin: Address,
+        caller: Address,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        if !may_cancel(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        if !storage::remove_pending_stablecoin(&env, &stablecoin) {
+            return Err(Error::NotProposed);
+        }
+        storage::bump_instance(&env);
+        StablecoinChangeCancelled {
+            stablecoin,
+            by: caller,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The proposed registration of a stablecoin, unless it has expired.
+    pub fn pending_stablecoin_change(
+        env: Env,
+        stablecoin: Address,
+    ) -> Option<PendingStablecoinChange> {
+        storage::pending_stablecoin(&env, &stablecoin).filter(|p| is_live(&env, p.eta))
+    }
+
+    /// Removes a stablecoin and drops its pending proposal; exits go on.
+    /// Governor.
     pub fn remove_stablecoin(env: Env, stablecoin: Address) -> Result<(), Error> {
         storage::require_governor(&env);
+        storage::remove_pending_stablecoin(&env, &stablecoin);
         storage::remove_stablecoin(&env, &stablecoin)?;
         StablecoinRemoved { stablecoin }.publish(&env);
         Ok(())
@@ -683,7 +775,7 @@ impl OpenWindow {
         caller: Address,
     ) -> Result<(), Error> {
         caller.require_auth();
-        if !is_governor_or_guardian(&env, &caller) {
+        if !may_cancel(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_currency_cap(&env, &currency, &caller) {
@@ -793,7 +885,7 @@ impl OpenWindow {
     pub fn cancel_fund_change(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
-        if !is_governor_or_guardian(&env, &caller) && !steward {
+        if !may_cancel(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if storage::pending_fund_change(&env, &fund).is_none() {
@@ -1198,7 +1290,7 @@ impl OpenWindow {
     pub fn cancel_reanchor(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
-        if !is_governor_or_guardian(&env, &caller) && !steward {
+        if !may_cancel(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_reanchor(&env, &fund, &caller) {
@@ -1259,7 +1351,7 @@ impl OpenWindow {
     pub fn cancel_fallback(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
-        if !is_governor_or_guardian(&env, &caller) && !steward {
+        if !may_cancel(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if storage::pending_fallback(&env, &fund).is_none() {
@@ -1323,10 +1415,10 @@ impl OpenWindow {
         storage::is_paused(&env)
     }
 
-    /// Stops new offers and repos, not exits; guardian or governor.
+    /// Stops new offers and repos, not exits; guardian, governor or sentinel.
     pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
-        if caller != storage::guardian(&env) && caller != storage::governor(&env) {
+        if !may_cancel(&env, &caller) {
             return Err(Error::Unauthorized);
         }
         storage::set_paused(&env, true);
@@ -1337,6 +1429,50 @@ impl OpenWindow {
         }
         .publish(&env);
         Ok(())
+    }
+
+    /// Names the automated key that may only pause and cancel. Guardian.
+    pub fn set_sentinel(env: Env, sentinel: Address) -> Result<(), Error> {
+        let guardian = storage::guardian(&env);
+        guardian.require_auth();
+        // The sentinel is a hot key on a monitoring host: it must hold no
+        // role whose loss or theft would matter more than a pause.
+        if is_governor_or_guardian(&env, &sentinel)
+            || is_trustee(&env, &sentinel)
+            || storage::guardian_backup(&env).is_some_and(|backup| backup == sentinel)
+            || storage::sole_lender(&env).is_some_and(|lender| lender == sentinel)
+        {
+            return Err(Error::SentinelNotIndependent);
+        }
+        storage::set_sentinel(&env, Some(&sentinel));
+        storage::bump_instance(&env);
+        SentinelChanged {
+            sentinel: Some(sentinel),
+            by: guardian,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Removes the sentinel. Guardian or governor.
+    pub fn clear_sentinel(env: Env, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        if !is_governor_or_guardian(&env, &caller) {
+            return Err(Error::Unauthorized);
+        }
+        storage::set_sentinel(&env, None);
+        storage::bump_instance(&env);
+        SentinelChanged {
+            sentinel: None,
+            by: caller,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// The sentinel, if one is named.
+    pub fn sentinel(env: Env) -> Option<Address> {
+        storage::sentinel(&env)
     }
 
     /// Lifts the pause. Governor.
@@ -1424,7 +1560,7 @@ impl OpenWindow {
     ) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
-        if !is_governor_or_guardian(&env, &caller) && !steward {
+        if !may_cancel(&env, &caller) && !steward {
             return Err(Error::Unauthorized);
         }
         if !drop_pending_fund_limits(&env, &fund, &caller) {
@@ -1624,6 +1760,7 @@ impl OpenWindow {
     ) -> Result<u64, Error> {
         lender.require_auth();
         storage::ensure_not_paused(&env)?;
+        ensure_schema_current(&env)?;
         // Read from instance storage, which every invocation loads: the mode
         // adds no ledger entry to the footprint.
         if storage::sole_lender(&env).is_some_and(|sole| sole != lender) {
@@ -1731,6 +1868,7 @@ impl OpenWindow {
     ) -> Result<u64, Error> {
         borrower.require_auth();
         storage::ensure_not_paused(&env)?;
+        ensure_schema_current(&env)?;
 
         let mut offer = storage::offer(&env, offer_id)?;
         if !offer.funds.contains(&fund) {
@@ -2218,6 +2356,40 @@ fn drop_pending_admin(env: &Env, by: &Address) -> Result<(), Error> {
 
 fn is_governor_or_guardian(env: &Env, caller: &Address) -> bool {
     *caller == storage::governor(env) || *caller == storage::guardian(env)
+}
+
+fn is_sentinel(env: &Env, caller: &Address) -> bool {
+    storage::sentinel(env).is_some_and(|sentinel| sentinel == *caller)
+}
+
+/// Who may pause and withdraw a proposal: the governor, the guardian, and
+/// the sentinel, the automated key that can do nothing else (rc4). Vetoes
+/// and handovers stay with the human keys.
+fn may_cancel(env: &Env, caller: &Address) -> bool {
+    is_governor_or_guardian(env, caller) || is_sentinel(env, caller)
+}
+
+/// Entries wait until a code upgrade is followed by `migrate`; exits never
+/// check (decision S6).
+fn ensure_schema_current(env: &Env) -> Result<(), Error> {
+    if storage::schema_version(env) < SCHEMA_VERSION {
+        return Err(Error::SchemaOutdated);
+    }
+    Ok(())
+}
+
+fn install_stablecoin(env: &Env, stablecoin: Address, currency: Symbol) {
+    let config = StablecoinConfig {
+        currency: currency.clone(),
+        decimals: token_io::decimals(env, &stablecoin),
+    };
+    storage::set_stablecoin(env, &stablecoin, &config);
+    storage::bump_instance(env);
+    StablecoinSet {
+        stablecoin,
+        currency,
+    }
+    .publish(env);
 }
 
 /// Whether `caller` is the steward on record of `fund`: the current one, or

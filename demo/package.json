@@ -12,7 +12,8 @@
     "monitor": "node monitor.mjs",
     "measure": "node measure.mjs",
     "fxlog": "node fxlog.mjs",
-    "keys": "node keys.mjs"
+    "keys": "node keys.mjs",
+    "upgrade": "node upgrade.mjs"
   },
   "engines": { "node": ">=20" },
   "dependencies": {

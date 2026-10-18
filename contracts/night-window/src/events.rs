@@ -458,3 +458,30 @@ pub struct StewardBackupChangeCancelled {
     pub backup: Address,
     pub by: Address,
 }
+
+#[contractevent]
+pub struct StablecoinChangeProposed {
+    #[topic]
+    pub stablecoin: Address,
+    pub currency: Symbol,
+    pub eta: u64,
+}
+
+#[contractevent]
+pub struct StablecoinChangeCancelled {
+    #[topic]
+    pub stablecoin: Address,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct SentinelChanged {
+    pub sentinel: Option<Address>,
+    pub by: Address,
+}
+
+#[contractevent]
+pub struct Migrated {
+    pub from: u32,
+    pub to: u32,
+}

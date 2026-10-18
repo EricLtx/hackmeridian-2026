@@ -87,7 +87,9 @@ Passes the trustee role at once. Requires the current trustee and `trustee`: no 
 
 ## Stablecoins and the sole lender
 
-### `set_stablecoin(stablecoin, currency)`, `remove_stablecoin(stablecoin)`
+### `set_stablecoin(stablecoin, currency)`, `apply_stablecoin_change(stablecoin)`, `cancel_stablecoin_change(stablecoin, caller)`, `pending_stablecoin_change(stablecoin)`, `remove_stablecoin(stablecoin)`
+
+Since rc4 (decision S29), registering a stablecoin, or changing the currency of a registered one, applies at once only before the first admission. Afterwards `set_stablecoin` records a proposal with its eta and publishes `StablecoinChangeProposed`: widening what a lender may be repaid in is a loosening, so it waits for the time delay like the others. Anyone applies it from the eta to the end of the grace period (`apply_stablecoin_change`, which reads the token's decimals then); the governor, the guardian or the sentinel withdraws it (`cancel_stablecoin_change`). `remove_stablecoin` stays immediate, a tightening, and drops any pending proposal for that token. `set_stablecoin` keeps its version 2 signature, so its one failure before the delay (an eta overflow) is raised as a typed error, like `set_admin`.
 
 Registers a stablecoin for a currency; its decimals are read from the token. A removal lets open repos and offers keep working for exits.
 
@@ -157,7 +159,9 @@ Removes a fund's fallback feed at once: removing a source never loosens a check.
 
 ## Pause
 
-### `pause(caller)`, `unpause()`
+### `pause(caller)`, `unpause()`, `set_sentinel(sentinel)`, `clear_sentinel(caller)`, `sentinel()`
+
+Since rc4 the guardian may name a *sentinel* (decision S26): the automated key a monitoring host holds, which may only `pause` and cancel proposals (`cancel_upgrade`, `cancel_stablecoin_change`, `cancel_fund_change`, `cancel_guardian_change`, every `cancel_*` the guardian may call). It can neither lift the pause, veto a governor handover or a forced guardian change, hand over or back up any role, nor propose anything: a stolen sentinel costs a pause and nothing more. It must hold no other role (`SentinelNotIndependent`). The guardian or the governor removes it (`clear_sentinel`); a guardian change leaves it in place until the new guardian decides.
 
 The pause suspends new offers and new repos; `caller` must be the guardian or the governor. Exits (repurchase, withdrawal of an offer, seizure, release) stay open. Only the governor lifts it.
 
@@ -186,6 +190,12 @@ Lowers the NAV reference to the oracle's current NAV, for instance after a legit
 ### `set_sponsor(offer_id, fund, sponsor)`
 
 Marks an offer as designated by the fund's issuer. A label only: an independent lender funds it, with no privilege. The offer must accept the fund.
+
+## Schema version and migration
+
+### `schema_version()`, `migrate()`
+
+An upgrade replaces the code and keeps the storage (decision S15). Since rc4 the storage carries a layout version: `SCHEMA_VERSION` in the code, the `SchemaVersion` instance entry on the ledger, absent (read as 1) for every instance deployed before rc4. After an upgrade whose code expects a newer layout, the governor, with the trustee when one is named, runs `migrate`: it converts the stored data step by step from the version found to the version expected (the step from 1 to 2 changes nothing but the version entry) and publishes `Migrated`. Until then new offers and new repos answer `SchemaOutdated`; repurchase, seizure, release and withdrawal never check the version (decision S6). A second `migrate`, or one on a fresh instance, answers `NothingToMigrate`. The test `an_rc2_instance_upgrades_then_migrates_with_a_repo_open` runs the whole path on the WASM deployed as rc2.
 
 ## Open to anyone
 
@@ -240,7 +250,7 @@ Storage keys (`DataKey`) are not part of the interface; their doc comments stay 
 - **`FundConfig`**: `oracle` is the SEP-40 oracle publishing the fund's NAV and `oracle_asset` the identifier of the shares in it; `haircut_bps` the haircut on the share value; `steward` the issuer's key, which approves lenders and tunes the fund in the envelope; `currency` the currency of the stablecoins this fund can be borrowed against; `source` direct, or crossed through an FX feed when the NAV oracle does not report in `currency`; `nav_max_age_secs` the oldest acceptable NAV; `corridor_floor_bps` the lower margin of the NAV corridor; `max_yield_bps` the highest annual growth the corridor allows; `max_principal_per_repo` the cap on the principal of one repo, in stablecoin units; `max_outstanding` the cap on the sum of open principals on this fund.
 - **`FundState`**: runtime state, kept apart from the configuration. `currency` is copied from the configuration so that totals can be released even after the fund or its stablecoin leaves the registry; `share_decimals` and `nav_decimals` are read at admission; `fx_decimals` is 0 without FX leg; `reference_nav` and `reference_time` are the reference NAV of the corridor and its timestamp; `reference_fx` the reference FX rate, 0 without FX leg; `outstanding` the sum of open principals; `frozen` is set by the steward to suspend new repos.
 - **`StablecoinConfig`**: `decimals` is read from the token when registered.
-- **`Offer`**: a lender's standing offer. Borrowers take it in one transaction; the principal repaid flows back into it. `available` is the amount available to borrow now; `rate_bps` the annual rate; `max_term` the longest term the lender accepts, in seconds; `funds` the fund shares accepted as collateral; `sponsor` is marked by a fund's steward for the issuer's own designated offer.
+- **`Offer`**: a lender's standing offer. Borrowers take it in one transaction; the principal repaid flows back into it. `available` is the amount available to borrow now; `rate_bps` the annual rate; `max_term` the longest term the lender accepts, in seconds; `funds` the fund shares accepted as collateral; `sponsor` is set by a fund's steward on the offer it designates (`set_sponsor`, a name kept for compatibility): a display mark, no funding by the issuer and no special right.
 - **`Repo`**: shares locked against a stablecoin loan; its terms are frozen at opening (invariant I9). `opened_at` is the ledger timestamp at opening; `maturity` the ledger timestamp from which the lender may seize the shares.
 - **`Quote`**: read-only, for interfaces. `price` is the share price in the loan currency, with `price_decimals` digits; `haircut_bps` the fund haircut plus the FX haircut when the price is crossed.
 - **`PendingUpgrade`**: an upgrade proposed by the governor (decision S7), applicable by the governor from `eta` on, or cancelled by the governor, the guardian or the trustee until then.
@@ -310,7 +320,12 @@ Error codes are public ABI: new variants are appended, never renumbered or remov
 | 46 | `TrusteeFixed` | The trustee is named once, before the first admission and the first offer; afterwards only the trustee hands its role over. |
 | 47 | `TrusteeNotIndependent` | The trustee must be neither the governor, the guardian nor the sole lender. |
 | 48 | `FxBandExceedsHaircut` | A cross-priced fund's FX band may not exceed its FX haircut: a rate the band admits must stay covered by the haircut. |
+| 49 | `SentinelNotIndependent` | The sentinel must hold no other role: not the governor, the guardian, its backup, the trustee or the sole lender. |
+| 50 | `NothingToMigrate` | The stored layout is already at the version the code expects. |
+| 51 | `SchemaOutdated` | The code was upgraded and `migrate` has not run yet: new offers and repos wait, exits go on. |
+
+- **`PendingStablecoinChange`** (rc4): a stablecoin registration or currency change waiting for its delay; `currency` is what the token will be registered as, `eta` when anyone may apply it.
 
 ## Events
 
-`Upgraded` is published just before the code switches, by the code being replaced. `GuardianChangeForced` records a guardian the governor imposes without the current one, after the longest delay. `AdminChangeProposed` is published with `AdminProposed`, which keeps its version 2 shape, and adds when the proposed governor may accept.
+`StablecoinChangeProposed`, `StablecoinChangeCancelled`, `SentinelChanged` (with `None` when cleared) and `Migrated` (from, to) are the rc4 additions. `Upgraded` is published just before the code switches, by the code being replaced. `GuardianChangeForced` records a guardian the governor imposes without the current one, after the longest delay. `AdminChangeProposed` is published with `AdminProposed`, which keeps its version 2 shape, and adds when the proposed governor may accept.

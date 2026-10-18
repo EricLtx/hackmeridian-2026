@@ -101,4 +101,10 @@ pub enum Error {
     TrusteeNotIndependent = 47,
     /// FX band wider than the FX haircut.
     FxBandExceedsHaircut = 48,
+    /// Sentinel holds another role.
+    SentinelNotIndependent = 49,
+    /// Stored layout already at the current version.
+    NothingToMigrate = 50,
+    /// Code upgraded, `migrate` not yet run: entries wait, exits go on.
+    SchemaOutdated = 51,
 }

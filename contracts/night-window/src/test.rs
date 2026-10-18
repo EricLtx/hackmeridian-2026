@@ -1411,7 +1411,10 @@ fn offer_checks() {
         Err(Ok(Error::StablecoinNotAccepted))
     );
     let usdc = new_token(&f.env);
+    // After the first admission a stablecoin waits for the delay (rc4).
     f.client.set_stablecoin(&usdc, &usd(&f.env));
+    advance(&f, f.client.timelock_delay());
+    f.client.apply_stablecoin_change(&usdc);
     assert_eq!(
         f.client
             .try_create_offer(&f.lender, &usdc, &ONE, &RATE_BPS, &DAY, &funds),
@@ -7181,4 +7184,228 @@ fn two_moves_at_the_top_of_the_corridor_cannot_ratchet_the_reference() {
         f.client.try_refresh_reference(&f.shares),
         Err(Ok(Error::PriceOutOfBand))
     );
+}
+
+// ---------------------------------------------------------------------------
+// rc4: stablecoin registration behind the delay, sentinel, schema version
+// ---------------------------------------------------------------------------
+
+/// Covers: S5, S7
+#[test]
+fn stablecoin_registration_is_immediate_before_admission_and_waits_after() {
+    let (f, _offer_id) = ready();
+    // EURC was registered before the admission: at once.
+    assert!(f.client.get_stablecoin(&f.eurc).is_some());
+    let usdc = new_token(&f.env);
+    let eta = f.env.ledger().timestamp() + f.client.timelock_delay();
+    f.client.set_stablecoin(&usdc, &usd(&f.env));
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(
+        own_events(&f),
+        std::vec![StablecoinChangeProposed {
+            stablecoin: usdc.clone(),
+            currency: usd(&f.env),
+            eta
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(f.client.get_stablecoin(&usdc), None);
+    assert_eq!(
+        f.client.pending_stablecoin_change(&usdc),
+        Some(PendingStablecoinChange {
+            currency: usd(&f.env),
+            eta
+        })
+    );
+    // Nobody lends in it meanwhile.
+    assert_eq!(
+        f.client.try_create_offer(
+            &f.lender,
+            &usdc,
+            &(1_000 * ONE),
+            &RATE_BPS,
+            &(7 * DAY),
+            &vec![&f.env, f.shares.clone()],
+        ),
+        Err(Ok(Error::StablecoinNotAccepted))
+    );
+    assert_eq!(
+        f.client.try_apply_stablecoin_change(&usdc),
+        Err(Ok(Error::TimelockPending))
+    );
+    advance(&f, f.client.timelock_delay());
+    f.client.apply_stablecoin_change(&usdc);
+    assert_eq!(
+        f.client.get_stablecoin(&usdc).unwrap().currency,
+        usd(&f.env)
+    );
+    assert_eq!(f.client.pending_stablecoin_change(&usdc), None);
+    assert_eq!(
+        f.client.try_apply_stablecoin_change(&usdc),
+        Err(Ok(Error::NotProposed))
+    );
+}
+
+/// Covers: S5, S7
+#[test]
+fn a_proposed_stablecoin_is_cancelled_dropped_by_a_removal_or_expires() {
+    let (f, _offer_id) = ready();
+    let guardian = appoint_guardian(&f);
+    let usdc = new_token(&f.env);
+    f.client.set_stablecoin(&usdc, &usd(&f.env));
+    let intruder = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_cancel_stablecoin_change(&usdc, &intruder),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_stablecoin_change(&usdc, &guardian);
+    assert_eq!(f.client.pending_stablecoin_change(&usdc), None);
+    assert_eq!(
+        f.client.try_cancel_stablecoin_change(&usdc, &guardian),
+        Err(Ok(Error::NotProposed))
+    );
+    // A currency change of a registered token waits too; removing the token drops it.
+    f.client.set_stablecoin(&f.eurc, &usd(&f.env));
+    assert!(f.client.pending_stablecoin_change(&f.eurc).is_some());
+    assert_eq!(
+        f.client.get_stablecoin(&f.eurc).unwrap().currency,
+        eur(&f.env)
+    );
+    f.client.remove_stablecoin(&f.eurc);
+    assert_eq!(f.client.pending_stablecoin_change(&f.eurc), None);
+    assert_eq!(f.client.get_stablecoin(&f.eurc), None);
+    // An expired proposal is gone and cannot be applied.
+    f.client.set_stablecoin(&usdc, &usd(&f.env));
+    advance(&f, f.client.timelock_delay() + PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_stablecoin_change(&usdc), None);
+    assert_eq!(
+        f.client.try_apply_stablecoin_change(&usdc),
+        Err(Ok(Error::ProposalExpired))
+    );
+}
+
+/// Covers: S7, S26
+#[test]
+fn sentinel_pauses_and_cancels_but_neither_vetoes_nor_decides() {
+    let (f, _offer_id) = ready();
+    let guardian = appoint_guardian(&f);
+    let sentinel = Address::generate(&f.env);
+    // A sentinel holds no role of weight.
+    assert_eq!(
+        f.client.try_set_sentinel(&guardian),
+        Err(Ok(Error::SentinelNotIndependent))
+    );
+    assert_eq!(
+        f.client.try_set_sentinel(&f.governor),
+        Err(Ok(Error::SentinelNotIndependent))
+    );
+    f.client.set_sentinel(&sentinel);
+    assert_eq!(f.env.auths()[0].0, guardian);
+    assert_eq!(f.client.sentinel(), Some(sentinel.clone()));
+    // Pause: yes. Lifting it stays with the governor.
+    f.client.pause(&sentinel);
+    assert!(f.client.is_paused());
+    f.client.unpause();
+    // Cancel an upgrade and a stablecoin proposal: yes.
+    f.client.propose_upgrade(&wasm_hash(&f.env, 9));
+    f.client.cancel_upgrade(&sentinel);
+    assert_eq!(f.client.pending_upgrade(), None);
+    let usdc = new_token(&f.env);
+    f.client.set_stablecoin(&usdc, &usd(&f.env));
+    f.client.cancel_stablecoin_change(&usdc, &sentinel);
+    assert_eq!(f.client.pending_stablecoin_change(&usdc), None);
+    // Veto a governor handover: no, that is the guardian's and the trustee's.
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    assert_eq!(
+        f.client.try_veto_admin(&sentinel),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.cancel_admin();
+    // Cleared by the governor, it can do nothing; a stranger cannot clear it.
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_clear_sentinel(&stranger),
+        Err(Ok(Error::Unauthorized))
+    );
+    f.client.clear_sentinel(&f.governor);
+    assert_eq!(f.client.sentinel(), None);
+    assert_eq!(f.client.try_pause(&sentinel), Err(Ok(Error::Unauthorized)));
+}
+
+/// Covers: S14, S15
+#[test]
+fn a_fresh_instance_is_at_the_current_schema_and_has_nothing_to_migrate() {
+    let f = bare();
+    assert_eq!(f.client.schema_version(), SCHEMA_VERSION);
+    assert_eq!(f.client.try_migrate(), Err(Ok(Error::NothingToMigrate)));
+}
+
+/// The WASM deployed as rc2 on testnet (hash 5cdbfd0c…), kept so that the
+/// upgrade path from a live layout is exercised, not only the same-code one.
+#[cfg(night_window_wasm)]
+const RC2_WASM: &[u8] = include_bytes!("../tests/fixtures/night_window_rc2.wasm");
+
+/// Covers: S6, S14, S15
+#[cfg(night_window_wasm)]
+#[test]
+fn an_rc2_instance_upgrades_then_migrates_with_a_repo_open() {
+    // The `bare` fixture, on the rc2 code.
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(T0);
+    let governor = Address::generate(&env);
+    let contract_id = env.register(RC2_WASM, (governor.clone(),));
+    let client = OpenWindowClient::new(leak(env.clone()), leak(contract_id.clone()));
+    let nav_oracle = env.register(MockOracle, (Asset::Other(eur(&env)), NAV_DECIMALS));
+    let oracle = MockOracleClient::new(leak(env.clone()), leak(nav_oracle.clone()));
+    let shares = new_token(&env);
+    oracle.set_price(&Asset::Stellar(shares.clone()), &NAV_EUR, &T0);
+    let f = Fixture {
+        guardian: governor.clone(),
+        steward: Address::generate(&env),
+        lender: Address::generate(&env),
+        borrower: Address::generate(&env),
+        eurc: new_token(&env),
+        env,
+        contract_id,
+        client,
+        governor,
+        shares,
+        nav_oracle,
+        oracle,
+    };
+    let (f, offer_id) = ready_from(f);
+    let repo_id = open(&f, offer_id);
+    assert_eq!(f.client.version(), 4);
+
+    let hash = f.env.deployer().upload_contract_wasm(NIGHT_WINDOW_WASM);
+    f.client.propose_upgrade(&hash);
+    advance(&f, f.client.timelock_delay());
+    publish_nav(&f, NAV_EUR);
+    f.client.upgrade(&hash);
+
+    // Until the migration the layout is at 1: reads and exits work, entries wait.
+    assert_eq!(f.client.schema_version(), 1);
+    assert_eq!(f.client.get_repo(&repo_id).unwrap().shares, 10_000 * ONE);
+    assert!(f.client.get_fund(&f.shares).is_some());
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &(1_000 * ONE),
+            &(1_000 * ONE),
+            &(24 * HOUR),
+        ),
+        Err(Ok(Error::SchemaOutdated))
+    );
+    f.client.repurchase(&repo_id);
+
+    f.client.migrate();
+    assert_eq!(f.env.auths()[0].0, f.governor);
+    assert_eq!(f.client.schema_version(), SCHEMA_VERSION);
+    assert_eq!(f.client.try_migrate(), Err(Ok(Error::NothingToMigrate)));
+    let again = open(&f, offer_id);
+    assert!(again > repo_id);
 }

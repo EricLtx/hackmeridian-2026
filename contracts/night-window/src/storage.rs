@@ -8,8 +8,8 @@ use crate::error::Error;
 use crate::types::{
     DataKey, FallbackFeed, FundConfig, FundState, LenderAttestation, Offer,
     PendingCurrencyCapChange, PendingFallback, PendingFundChange, PendingFundLimitsChange,
-    PendingReanchor, PendingRelease, PendingStewardBackup, PendingStewardRecovery, PendingUpgrade,
-    Repo, RiskEnvelope, StablecoinConfig,
+    PendingReanchor, PendingRelease, PendingStablecoinChange, PendingStewardBackup,
+    PendingStewardRecovery, PendingUpgrade, Repo, RiskEnvelope, StablecoinConfig,
 };
 
 // Ledgers close about every 5 seconds: 17,280 ledgers a day.
@@ -192,6 +192,54 @@ pub fn remove_stablecoin(env: &Env, token: &Address) -> Result<(), Error> {
     }
     env.storage().persistent().remove(&key);
     Ok(())
+}
+
+pub fn pending_stablecoin(env: &Env, token: &Address) -> Option<PendingStablecoinChange> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PendingStablecoin(token.clone()))
+}
+
+pub fn set_pending_stablecoin(env: &Env, token: &Address, pending: &PendingStablecoinChange) {
+    put(env, &DataKey::PendingStablecoin(token.clone()), pending);
+}
+
+/// Drops a pending registration; whether there was one.
+pub fn remove_pending_stablecoin(env: &Env, token: &Address) -> bool {
+    let key = DataKey::PendingStablecoin(token.clone());
+    let present = env.storage().persistent().has(&key);
+    if present {
+        env.storage().persistent().remove(&key);
+    }
+    present
+}
+
+// -- Sentinel and schema (rc4) ------------------------------------------------
+
+pub fn sentinel(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Sentinel)
+}
+
+pub fn set_sentinel(env: &Env, sentinel: Option<&Address>) {
+    match sentinel {
+        Some(address) => env.storage().instance().set(&DataKey::Sentinel, address),
+        None => env.storage().instance().remove(&DataKey::Sentinel),
+    }
+}
+
+/// Stored layout version; an instance deployed before rc4 has no entry and
+/// is at version 1.
+pub fn schema_version(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::SchemaVersion)
+        .unwrap_or(1)
+}
+
+pub fn set_schema_version(env: &Env, version: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::SchemaVersion, &version);
 }
 
 pub fn fund(env: &Env, fund: &Address) -> Result<FundConfig, Error> {

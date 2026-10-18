@@ -1,8 +1,8 @@
 // Types exported in the contract interface. The interface freezes at the tag
-// the external audit reviews; from then on it is append-only: new types, new
-// enum variants at the end and new functions, never a reshaped or removed
-// one. Until that tag, types first released in version 3 or 4 may still
-// change; a stored type keeps its key (see `DataKey`).
+// the external audit reviews, `audit-v4-rc4`; from then on it is append-only:
+// new types, new enum variants at the end and new functions, never a reshaped
+// or removed one. A stored type keeps its key (see `DataKey`); a change of
+// layout bumps `SCHEMA_VERSION` and gets a step in `migrate`.
 
 use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
@@ -127,6 +127,15 @@ pub enum DataKey {
     Trustee,
     /// Persistent: replacement of a steward's backup, waiting for its delay.
     PendingStewardBackup(Address),
+    /// Persistent: a stablecoin registration or currency change proposed
+    /// after the first admission, waiting for its delay (rc4).
+    PendingStablecoin(Address),
+    /// Instance: the sentinel, an automated key the guardian names, which
+    /// may only pause and cancel (rc4).
+    Sentinel,
+    /// Instance: version of the stored data layout. Absent means 1, the
+    /// layout of every instance deployed before rc4.
+    SchemaVersion,
 }
 
 /// Bounds on every fund configuration.
@@ -446,5 +455,13 @@ pub struct PendingStewardRecovery {
 pub struct PendingStewardBackup {
     pub backup: Address,
     pub steward: Address,
+    pub eta: u64,
+}
+
+/// A stablecoin registration waiting for its delay.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingStablecoinChange {
+    pub currency: Symbol,
     pub eta: u64,
 }

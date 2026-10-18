@@ -73,7 +73,9 @@ The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry poin
 | `set_sole_lender(lender)` | governor, before the first admission | Fixes the instance's only lender for good: a regulated lender running its own instance |
 | `attest_lender(fund, lender, declaration)` | lender **and** steward | Records the hash of the lender's off-chain declaration (eligibility, independence from the fund); required before approval |
 | `set_steward_backup(fund, backup)` (+ `apply_steward_backup_change`, `cancel_steward_backup_change`), `propose_steward_recovery` (+ apply, cancel) | steward **and** backup / governor **and** guardian | A lost steward key can be replaced only by the backup the issuer registered, after 30 days; any action by the steward cancels the recovery. A first backup is set at once; replacing it waits for the delay, and the governor may cancel the replacement (block, never choose) |
-| `set_stablecoin(token, currency)`, `remove_stablecoin(token)` | governor | Stablecoin registry |
+| `set_stablecoin(token, currency)` (+ `apply_stablecoin_change`, `cancel_stablecoin_change`, `pending_stablecoin_change`), `remove_stablecoin(token)` | governor; anyone applies; guardian or sentinel may cancel | Stablecoin registry: immediate before the first admission, a proposal behind the delay afterwards (S29); removal immediate |
+| `set_sentinel(sentinel)`, `clear_sentinel(caller)`, `sentinel()` | guardian / guardian or governor | An automated key that may only pause and cancel proposals, never lift the pause, veto or hand over (S26); what a monitoring host holds instead of the guardian key |
+| `schema_version()`, `migrate()` | anyone / governor **and** trustee | The stored layout's version; after an upgrade, `migrate` brings it to the code's version step by step; until then new offers and repos answer `SchemaOutdated`, exits never check (S29, S6) |
 | `set_fund(fund, config)` (+ `apply_fund_change`, `cancel_fund_change`) | governor **and** steward | Two-key admission, immediate the first time; a replacement waits for the delay, keeps the price references, and needs the steward on record |
 | `propose_reanchor(fund, expected_nav, expected_fx)` (+ apply, cancel) | governor **and** steward | The only way to move a fund's price reference off its model: the signers name the values, the contract checks today's feeds agree, and installs those values after the delay if the feeds still follow the model |
 | `propose_fallback(fund, feed)` (+ apply, cancel, `remove_fallback`) | governor **and** steward; removal also by the guardian alone | A backup NAV feed that stands in for a stale primary and must agree with a fresh one |
@@ -145,7 +147,7 @@ The enforced part of the baseline:
 ├── indexer/                 # append-only event journal under a hash chain; register and SFTR views
 ├── web/                     # minimal web interface (Vite, plain JavaScript, Freighter), history page
 ├── docs/
-│   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S22 (French)
+│   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S29 (French)
 │   ├── modele-menace-stride.md # STRIDE threat model and monitoring plan (French)
 │   ├── procedure-incident.md # incident procedure and monitoring rehearsal (French)
 │   ├── faq.md               # questions and answers for five audiences
