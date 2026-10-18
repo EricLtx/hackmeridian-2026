@@ -119,7 +119,7 @@ pub struct OpenWindow;
 
 #[contractimpl]
 impl OpenWindow {
-    /// Deploys the contract with its governor, who is also the first guardian.
+    /// Deploys with `admin` as governor and first guardian.
     pub fn __constructor(env: Env, admin: Address) {
         storage::set_governor(&env, &admin);
         storage::set_guardian(&env, &admin);
@@ -137,25 +137,17 @@ impl OpenWindow {
     // append-only (see `types.rs`, `error.rs`). Version 4 is unreleased: the
     // audit candidates (`audit-v4-rc*`) keep `version()` at 4.
 
-    /// Version of the contract interface. Bump on every incompatible change.
+    /// Interface version.
     pub fn version() -> u32 {
         4
     }
 
-    /// The governor (historical name kept for interface stability).
+    /// The governor.
     pub fn admin(env: Env) -> Address {
         storage::governor(&env)
     }
 
-    /// Proposes `new_admin` as governor. Nothing changes until the proposed
-    /// address accepts (decision S7: a typo cannot lose the role). Before the
-    /// first admission it may accept at once. Afterwards it may accept only
-    /// once the time delay has elapsed, within the grace period, and the
-    /// guardian can veto the handover meanwhile (custody gap I12): a stolen
-    /// governor quorum can no longer take the role inside one window.
-    /// Replaces an earlier proposal. Requires the current governor. The
-    /// signature is the one of version 2, so failures are raised as typed
-    /// contract errors.
+    /// Proposes a handover, delayed after the first admission. Governor.
     pub fn set_admin(env: Env, new_admin: Address) {
         let current = storage::require_governor(&env);
         ensure_not_trustee(&env, &new_admin).unwrap_or_else(|error| panic_with_error!(&env, error));
@@ -187,11 +179,7 @@ impl OpenWindow {
         .publish(&env);
     }
 
-    /// Completes a governor handover, from its eta to the end of its grace
-    /// period. Requires the proposed address. The proposals the previous
-    /// governor made alone (upgrade, guardian, term ceiling, envelope,
-    /// currency caps) are dropped: a handover is often the answer to a
-    /// compromised key, and the new governor re-proposes what it wants.
+    /// Completes a due handover. Proposed governor.
     pub fn accept_admin(env: Env) -> Result<(), Error> {
         let pending = pending_admin_change(&env).ok_or(Error::Unauthorized)?;
         pending.admin.require_auth();
@@ -210,8 +198,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a governor handover proposed by `set_admin`, for instance
-    /// one proposed to a wrong or compromised address. Requires the governor.
+    /// Withdraws the handover. Governor.
     pub fn cancel_admin(env: Env) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         drop_pending_admin(&env, &governor)
@@ -221,9 +208,7 @@ impl OpenWindow {
     // `force_guardian_change` (with the trustee's consent, when one is
     // named): complete it before handing the governor over.
 
-    /// Vetoes a governor handover: the guardian's answer to a governor
-    /// quorum that proposes a successor it should not. `caller` must be the
-    /// guardian, the governor or the trustee.
+    /// Vetoes it; guardian, governor or trustee.
     pub fn veto_admin(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if !is_governor_or_guardian(&env, &caller) && !is_trustee(&env, &caller) {
@@ -232,24 +217,17 @@ impl OpenWindow {
         drop_pending_admin(&env, &caller)
     }
 
-    /// The proposed governor and when it may accept, unless the proposal has
-    /// expired. One proposed before version 4 counts as expired.
+    /// The handover, if live.
     pub fn pending_admin(env: Env) -> Option<PendingAdminChange> {
         pending_admin_change(&env).filter(|p| is_live(&env, p.eta))
     }
 
-    /// Time delay applied to upgrades, fund replacements and fallback feeds,
-    /// in seconds.
+    /// Delay of governed changes, seconds.
     pub fn timelock_delay(env: Env) -> u64 {
         storage::timelock_delay(&env, DEFAULT_TIMELOCK_SECS)
     }
 
-    /// Sets the time delay, between one minute and thirty days. Until a fund
-    /// is first admitted nothing is at stake, so any value in that range is
-    /// accepted (a demonstration may run with minutes); from then on, the
-    /// delay may only grow, or a compromised governor would shorten the
-    /// window before acting. Proposals already made keep their eta. Requires
-    /// the governor.
+    /// Sets the delay; it only grows after admission. Governor.
     pub fn set_timelock_delay(env: Env, delay: u64) -> Result<(), Error> {
         storage::require_governor(&env);
         if !(MIN_TIMELOCK_SECS..=MAX_TIMELOCK_SECS).contains(&delay) {
@@ -266,9 +244,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Proposes new contract code, applicable by `upgrade` once the delay has
-    /// elapsed. Replaces any earlier proposal. Requires the governor, and the
-    /// trustee when one is named.
+    /// Proposes code, applicable after the delay. Governor, trustee if named.
     pub fn propose_upgrade(env: Env, wasm_hash: BytesN<32>) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         require_trustee(&env, &governor);
@@ -285,13 +261,12 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The proposed upgrade, unless it has expired.
+    /// The upgrade, if live.
     pub fn pending_upgrade(env: Env) -> Option<PendingUpgrade> {
         storage::pending_upgrade(&env).filter(|p| is_live(&env, p.eta))
     }
 
-    /// Withdraws the proposed upgrade. `caller` must be the governor, the
-    /// guardian or the trustee: their veto is what the delay is for.
+    /// Withdraws it; governor, guardian or trustee.
     pub fn cancel_upgrade(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if !is_governor_or_guardian(&env, &caller) && !is_trustee(&env, &caller) {
@@ -308,10 +283,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Replaces the contract code with the proposed WASM, once its delay has
-    /// elapsed. The WASM must already be uploaded; storage and address are
-    /// kept. Requires the governor. The signature is the one of version 2,
-    /// so failures are raised as typed contract errors.
+    /// Installs the due WASM. Governor.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         storage::require_governor(&env);
         if let Err(error) = take_due_upgrade(&env, &new_wasm_hash) {
@@ -330,11 +302,7 @@ impl OpenWindow {
         storage::max_term(&env, DEFAULT_MAX_TERM_SECS)
     }
 
-    /// Sets the ceiling for a repo term, in seconds. A decrease applies at
-    /// once: it only tightens, and it drops a pending increase. After the
-    /// first admission, an increase lengthens the exposure of every offer, so
-    /// it waits for the time delay and applies through
-    /// `apply_max_term_change` (decision S7). Requires the governor.
+    /// Sets the term ceiling; increases wait after admission. Governor.
     pub fn set_max_term(env: Env, max_term: u64) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         if !(MIN_TERM_SECS..=MAX_TERM_CEILING_SECS).contains(&max_term) {
@@ -356,8 +324,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Applies a queued increase of the term ceiling once its delay has
-    /// elapsed. Anyone may call it.
+    /// Applies a due increase. Anyone.
     pub fn apply_max_term_change(env: Env) -> Result<(), Error> {
         let pending: PendingMaxTermChange =
             storage::instance_value(&env, &DataKey::PendingMaxTerm).ok_or(Error::NotProposed)?;
@@ -367,8 +334,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a queued increase of the term ceiling. `caller` must be the
-    /// governor or the guardian.
+    /// Withdraws it; governor or guardian.
     pub fn cancel_max_term_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if !is_governor_or_guardian(&env, &caller) {
@@ -381,7 +347,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The queued increase of the term ceiling, unless it has expired.
+    /// The increase, if live.
     pub fn pending_max_term_change(env: Env) -> Option<PendingMaxTermChange> {
         storage::instance_value::<PendingMaxTermChange>(&env, &DataKey::PendingMaxTerm)
             .filter(|p| is_live(&env, p.eta))
@@ -391,13 +357,7 @@ impl OpenWindow {
         storage::guardian(&env)
     }
 
-    /// Appoints the guardian. Before the first admission it applies at once.
-    /// Afterwards it waits for the time delay and applies through
-    /// `apply_guardian_change`, and the current guardian can cancel it: a
-    /// governor key alone cannot remove the veto inside the window in which
-    /// that veto is needed (decision S7). Requires the governor. The
-    /// signature is the one of version 2, so failures are raised as typed
-    /// contract errors.
+    /// Appoints the guardian, delayed after admission. Governor.
     pub fn set_guardian(env: Env, guardian: Address) {
         storage::require_governor(&env);
         ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
@@ -418,10 +378,7 @@ impl OpenWindow {
         GuardianChangeProposed { guardian, eta }.publish(&env);
     }
 
-    /// Appoints the proposed guardian once the delay has elapsed. Anyone may
-    /// call it. A forced change still waiting is dropped: the guardian it
-    /// meant to replace is gone, and the ordinary path, which that guardian
-    /// could veto, has settled the question.
+    /// Applies a due appointment. Anyone.
     pub fn apply_guardian_change(env: Env) -> Result<(), Error> {
         let pending: PendingGuardianChange =
             storage::instance_value(&env, &DataKey::PendingGuardian).ok_or(Error::NotProposed)?;
@@ -432,8 +389,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a proposed guardian change. `caller` must be the governor
-    /// or the current guardian.
+    /// Withdraws it; governor or guardian.
     pub fn cancel_guardian_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if !is_governor_or_guardian(&env, &caller) {
@@ -446,20 +402,13 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The proposed guardian, unless the proposal has expired.
+    /// The appointment, if live.
     pub fn pending_guardian_change(env: Env) -> Option<PendingGuardianChange> {
         storage::instance_value::<PendingGuardianChange>(&env, &DataKey::PendingGuardian)
             .filter(|p| is_live(&env, p.eta))
     }
 
-    /// Passes the guardian role to `guardian`, at once. Requires the current
-    /// guardian, and `guardian` must be the backup registered with
-    /// `set_guardian_backup` (custody gap I13): a stolen hot guardian key can
-    /// no longer hand the role to its thief, and a rotation to the prepared
-    /// backup still never waits. The backup is consumed. Without a backup the
-    /// handover is allowed only while the guardian is the governor, whose key
-    /// gains nothing by it. The signature is the one of version 2, so
-    /// failures are raised as typed contract errors.
+    /// Hands the role to the backup, at once. Guardian.
     pub fn hand_over_guardian(env: Env, guardian: Address) {
         let current = storage::guardian(&env);
         current.require_auth();
@@ -474,9 +423,7 @@ impl OpenWindow {
         install_guardian(&env, guardian);
     }
 
-    /// Registers the address the guardian may hand its role over to, at
-    /// once. Requires both the governor and the current guardian: either key
-    /// alone cannot choose where the veto goes. Replaces an earlier backup.
+    /// Registers the backup. Governor and guardian.
     pub fn set_guardian_backup(env: Env, backup: Address) {
         let governor = storage::require_governor(&env);
         ensure_not_trustee(&env, &backup).unwrap_or_else(|error| panic_with_error!(&env, error));
@@ -489,19 +436,12 @@ impl OpenWindow {
         GuardianBackupSet { backup }.publish(&env);
     }
 
-    /// The registered guardian backup, if any.
+    /// The backup, if any.
     pub fn guardian_backup(env: Env) -> Option<Address> {
         storage::guardian_backup(&env)
     }
 
-    /// Imposes a guardian without the current one, for a guardian key that is
-    /// lost or hostile and cancels every ordinary change. It waits for the
-    /// longest delay, thirty days in public, and only the governor can cancel
-    /// it: the guardian it replaces has no veto here, or a lost key would
-    /// freeze governance forever. Replaces an earlier forced change. Requires
-    /// the governor, and the trustee when one is named. The signature returns
-    /// nothing like `set_guardian`, so failures are raised as typed contract
-    /// errors.
+    /// Imposes a guardian after the longest delay. Governor, trustee if named.
     pub fn force_guardian_change(env: Env, guardian: Address) {
         let governor = storage::require_governor(&env);
         ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
@@ -523,8 +463,7 @@ impl OpenWindow {
         GuardianChangeForced { guardian, eta }.publish(&env);
     }
 
-    /// Appoints the forced guardian once its thirty days have elapsed.
-    /// Anyone may call it.
+    /// Applies a due forced change. Anyone.
     pub fn apply_forced_guardian_change(env: Env) -> Result<(), Error> {
         let pending: PendingGuardianChange =
             storage::instance_value(&env, &DataKey::PendingForcedGuardian)
@@ -535,8 +474,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a forced guardian change. Requires the governor, and only
-    /// the governor.
+    /// Withdraws it. Governor only.
     pub fn cancel_forced_guardian_change(env: Env) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         if !drop_pending_forced_guardian(&env, &governor) {
@@ -546,14 +484,13 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The forced guardian change, unless it has expired.
+    /// The forced change, if live.
     pub fn pending_forced_guardian_change(env: Env) -> Option<PendingGuardianChange> {
         storage::instance_value::<PendingGuardianChange>(&env, &DataKey::PendingForcedGuardian)
             .filter(|p| is_live(&env, p.eta))
     }
 
-    /// Withdraws a forced guardian change. `caller` must be the governor or
-    /// the trustee.
+    /// Withdraws it; governor or trustee.
     pub fn veto_forced_guardian_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if caller != storage::governor(&env) && !is_trustee(&env, &caller) {
@@ -572,11 +509,7 @@ impl OpenWindow {
     // good: that is the point, no upgrade without independent consent. The
     // trustee should be an account whose signers rotate (native multisig).
 
-    /// Names the trustee, whose signature every upgrade and forced guardian
-    /// change then needs, and who may cancel them and veto a governor
-    /// handover. Once, before the first admission and the first offer.
-    /// Requires the governor and the trustee. Proposals made without the
-    /// trustee go.
+    /// Names the trustee once, before stakes. Governor and trustee.
     pub fn set_trustee(env: Env, trustee: Address) -> Result<(), Error> {
         storage::require_governor(&env);
         if storage::past_bootstrap(&env) || storage::trustee(&env).is_some() {
@@ -593,9 +526,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Passes the trustee role to `trustee`, at once. Requires the current
-    /// trustee and `trustee`: no other key names or removes a trustee. A
-    /// pending upgrade or forced guardian change is dropped.
+    /// Passes the role, at once. Both trustees.
     pub fn hand_over_trustee(env: Env, trustee: Address) -> Result<(), Error> {
         let previous = storage::trustee(&env).ok_or(Error::Unauthorized)?;
         previous.require_auth();
@@ -613,7 +544,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The trustee, if one is named.
+    /// The trustee, if named.
     pub fn trustee(env: Env) -> Option<Address> {
         storage::trustee(&env)
     }
@@ -622,12 +553,7 @@ impl OpenWindow {
         storage::envelope(&env)
     }
 
-    /// Sets the risk envelope. Applies to fund settings made afterwards. An
-    /// envelope that only tightens (every minimum at least the current one,
-    /// every maximum at most the current one) applies at once and drops a
-    /// pending loosening. After the first admission, any loosening waits for
-    /// the time delay and applies through `apply_envelope_change` (decision
-    /// S7). Requires the governor.
+    /// Sets the envelope; loosenings wait after admission. Governor.
     pub fn set_envelope(env: Env, envelope: RiskEnvelope) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         check_envelope(&envelope)?;
@@ -650,8 +576,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Applies a queued envelope once its delay has elapsed. Anyone may call
-    /// it.
+    /// Applies a due envelope. Anyone.
     pub fn apply_envelope_change(env: Env) -> Result<(), Error> {
         let pending: PendingEnvelopeChange =
             storage::instance_value(&env, &DataKey::PendingEnvelope).ok_or(Error::NotProposed)?;
@@ -662,8 +587,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a queued envelope. `caller` must be the governor or the
-    /// guardian.
+    /// Withdraws it; governor or guardian.
     pub fn cancel_envelope_change(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if !is_governor_or_guardian(&env, &caller) {
@@ -676,14 +600,13 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The queued envelope, unless it has expired.
+    /// The envelope, if live.
     pub fn pending_envelope_change(env: Env) -> Option<PendingEnvelopeChange> {
         storage::instance_value::<PendingEnvelopeChange>(&env, &DataKey::PendingEnvelope)
             .filter(|p| is_live(&env, p.eta))
     }
 
-    /// Registers a stablecoin for a currency; its decimals are read from the
-    /// token. Requires the governor.
+    /// Registers a stablecoin. Governor.
     pub fn set_stablecoin(env: Env, stablecoin: Address, currency: Symbol) {
         storage::require_governor(&env);
         let config = StablecoinConfig {
@@ -699,8 +622,7 @@ impl OpenWindow {
         .publish(&env);
     }
 
-    /// Removes a stablecoin. Open repos and offers keep working for exits.
-    /// Requires the governor.
+    /// Removes a stablecoin; exits go on. Governor.
     pub fn remove_stablecoin(env: Env, stablecoin: Address) -> Result<(), Error> {
         storage::require_governor(&env);
         storage::remove_stablecoin(&env, &stablecoin)?;
@@ -712,12 +634,7 @@ impl OpenWindow {
         storage::stablecoin(&env, &stablecoin).ok()
     }
 
-    /// Caps open principals in a currency. Unset means zero: no lending until
-    /// the governor sets it. A decrease applies at once and drops a pending
-    /// increase. After the first admission, an increase raises the exposure
-    /// of every lender in that currency, so it waits for the time delay and
-    /// applies through `apply_currency_cap_change` (decision S7). Requires
-    /// the governor.
+    /// Caps a currency; increases wait after admission. Governor.
     pub fn set_currency_cap(env: Env, currency: Symbol, cap: i128) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         if cap < 0 {
@@ -748,8 +665,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Applies a queued currency cap increase once its delay has elapsed.
-    /// Anyone may call it.
+    /// Applies a due increase. Anyone.
     pub fn apply_currency_cap_change(env: Env, currency: Symbol) -> Result<(), Error> {
         let mut pending = storage::pending_currency_caps(&env);
         let change = pending.get(currency.clone()).ok_or(Error::NotProposed)?;
@@ -760,8 +676,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a queued currency cap increase. `caller` must be the
-    /// governor or the guardian.
+    /// Withdraws it; governor or guardian.
     pub fn cancel_currency_cap_change(
         env: Env,
         currency: Symbol,
@@ -778,7 +693,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The queued cap increase of a currency, unless it has expired.
+    /// The increase, if live.
     pub fn pending_currency_cap_change(
         env: Env,
         currency: Symbol,
@@ -799,12 +714,7 @@ impl OpenWindow {
     // The sole lender can never change: it must be an account whose signers
     // rotate (native multisig or smart account), never a bare key.
 
-    /// Makes this a single-lender instance (bilateral mode): from now on only
-    /// `lender` may create offers, which anyone, supervisors included, can
-    /// check on chain. Allowed once, before the first admission and the first
-    /// offer, so that no lender already in place is shut out and the mode
-    /// cannot be switched on or off under existing offers. Requires the
-    /// governor.
+    /// Fixes the only lender once, before stakes. Governor.
     pub fn set_sole_lender(env: Env, lender: Address) -> Result<(), Error> {
         storage::require_governor(&env);
         if storage::past_bootstrap(&env) || storage::sole_lender(&env).is_some() {
@@ -819,33 +729,12 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The only lender of a single-lender instance, if it is one.
+    /// The sole lender, if any.
     pub fn sole_lender(env: Env) -> Option<Address> {
         storage::sole_lender(&env)
     }
 
-    /// Admits a fund, or proposes a replacement of its configuration.
-    /// Requires both the governor and the fund's steward: a two-key
-    /// admission. A replacement also requires the current steward, and
-    /// cannot change the currency while repos are open. Checks the
-    /// configuration against the envelope, checks the oracles report in the
-    /// right currency, reads the decimals and fresh prices.
-    ///
-    /// A first admission applies at once: no offer can list the fund yet, so
-    /// nobody is exposed to it. A replacement changes the oracle or the
-    /// haircut under existing offers, so it is stored and applies through
-    /// `apply_fund_change` once the time delay has elapsed (decision S7). A
-    /// fund that was removed keeps its runtime state, so its re-admission is
-    /// a replacement too: removing then re-admitting cannot skip the delay,
-    /// nor the issuer: the steward on record (the last installed one, kept
-    /// after a removal) must sign when the new configuration names another.
-    /// A replacement keeps the NAV and FX references unless it changes the
-    /// feed, and then the new feed must agree with them; the only way to
-    /// move them otherwise is `propose_reanchor`. A replacement that gives
-    /// the fund its first FX leg anchors it on the rate read now. For a
-    /// removed fund, the agreement with the references is checked at the
-    /// apply only, so that a re-anchor proposed meanwhile can bring them to
-    /// the new feed. Open repos keep their frozen terms (invariant I9).
+    /// Admits a fund at once, or queues a replacement. Governor and steward.
     pub fn set_fund(env: Env, fund: Address, config: FundConfig) -> Result<(), Error> {
         storage::require_governor(&env);
         config.steward.require_auth();
@@ -889,13 +778,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Applies a fund replacement whose delay has elapsed, within its grace
-    /// period. Anyone may call it: the keys signed the proposal. The
-    /// configuration is checked again now, with fresh prices. The references
-    /// carry over from the current state, so the caller's choice of moment
-    /// cannot re-anchor them on a spot price; a new feed must agree with
-    /// them, and a first FX leg takes the rate read at the proposal. On
-    /// failure the proposal stays for a later attempt.
+    /// Applies a due replacement, rechecked. Anyone.
     pub fn apply_fund_change(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_fund_change(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
@@ -906,8 +789,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a pending fund replacement. `caller` must be the governor,
-    /// the guardian or the fund's current steward.
+    /// Withdraws it; governor, guardian or steward.
     pub fn cancel_fund_change(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
@@ -932,18 +814,12 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The pending replacement of a fund, unless it has expired.
+    /// The replacement, if live.
     pub fn pending_fund_change(env: Env, fund: Address) -> Option<PendingFundChange> {
         storage::pending_fund_change(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
 
-    /// Removes a fund from the registry, at once: removal never harms an open
-    /// repo. Open repos on that fund can still be repurchased or seized:
-    /// their terms are frozen. A pending replacement and the fallback feed go
-    /// with it, so that nothing brings the fund back on its own. The steward
-    /// is recorded first: a fund admitted before that record existed, or
-    /// whose record aged, still cannot be re-admitted without its issuer.
-    /// Requires the governor.
+    /// Removes a fund; open repos go on. Governor.
     pub fn remove_fund(env: Env, fund: Address) -> Result<(), Error> {
         let governor = storage::require_governor(&env);
         let config = storage::fund(&env, &fund)?;
@@ -979,16 +855,7 @@ impl OpenWindow {
     // under a recovery: the governor sees the proposal and cancels it, and a
     // recovery proposed meanwhile drops it.
 
-    /// Names the successor a steward recovery may install for this fund.
-    /// Requires the fund's steward on record alone: the key holder names its
-    /// own successor, so the governor and the guardian can never pick the
-    /// issuer's replacement (the governor can cancel a replacement, so it
-    /// can block one, never choose one). The backup signs too, proving its
-    /// key exists.
-    /// Must not be a lender approved on the fund. A first backup is set at
-    /// once; replacing one waits for the time delay and applies through
-    /// `apply_steward_backup_change`, the current backup staying valid until
-    /// then.
+    /// Names the successor; replacing it waits. Steward and backup.
     pub fn set_steward_backup(env: Env, fund: Address, backup: Address) -> Result<(), Error> {
         let steward = storage::steward_on_record(&env, &fund).ok_or(Error::FundNotAccepted)?;
         steward.require_auth();
@@ -1025,8 +892,7 @@ impl OpenWindow {
     // action, which cancels a recovery, and proposing a recovery drops it.
     // Nor does it outlive its steward: a rotation or a recovery drops it.
 
-    /// Installs a proposed backup once its delay has elapsed, within its
-    /// grace period. Anyone may call it.
+    /// Applies a due replacement. Anyone.
     pub fn apply_steward_backup_change(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_steward_backup(&env, &fund).ok_or(Error::NotProposed)?;
         // Second review of rc2, L2: the proposer must still be the steward on
@@ -1044,8 +910,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a proposed backup replacement. `caller` must be the fund's
-    /// steward on record or the governor.
+    /// Withdraws it; steward or governor.
     pub fn cancel_steward_backup_change(
         env: Env,
         fund: Address,
@@ -1066,13 +931,12 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The successor a fund's steward named, if any.
+    /// The backup, if any.
     pub fn steward_backup(env: Env, fund: Address) -> Option<Address> {
         storage::steward_backup(&env, &fund)
     }
 
-    /// The proposed replacement of a fund's steward backup, unless it has
-    /// expired.
+    /// The replacement, if live.
     pub fn pending_steward_backup(env: Env, fund: Address) -> Option<PendingStewardBackup> {
         storage::pending_steward_backup(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
@@ -1080,16 +944,7 @@ impl OpenWindow {
     // Recovery answers a lost steward key. A stolen one is answered at once
     // by `remove_fund`: the fund then cannot return without its issuer.
 
-    /// Proposes to install the steward's registered backup for a fund whose
-    /// steward key is lost (custody gap I14): without this path, a lost bare
-    /// key would keep the fund out for good. It takes the governor and the
-    /// guardian, two distinct keys, and waits for the longest delay, thirty
-    /// days. Any action the steward signs on the fund meanwhile proves its
-    /// key alive and cancels it; the steward on record or the governor can
-    /// also cancel it. It dies if the steward or a governance role changes
-    /// before it applies. A pending backup replacement, signed by a key
-    /// that may be the lost one, goes. Works for a removed fund too.
-    /// Replaces an earlier proposal.
+    /// Proposes the backup for a lost steward key. Governor and guardian.
     pub fn propose_steward_recovery(
         env: Env,
         fund: Address,
@@ -1135,11 +990,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Installs the steward's backup once the thirty days have elapsed,
-    /// within the grace period; the backup signs, accepting the role.
-    /// Proposals the previous steward signed go. Returns false, removing the
-    /// proposal, when it can no longer apply (expired, steward or governance
-    /// changed); anyone may then call it.
+    /// Installs the backup once due (it signs); false drops a dead proposal.
     pub fn apply_steward_recovery(env: Env, fund: Address) -> Result<bool, Error> {
         let pending = storage::pending_steward_recovery(&env, &fund).ok_or(Error::NotProposed)?;
         if env.ledger().timestamp() < pending.eta {
@@ -1185,9 +1036,7 @@ impl OpenWindow {
         Ok(true)
     }
 
-    /// Withdraws a proposed steward recovery. `caller` must be the fund's
-    /// steward on record or the governor; the guardian alone cannot, since a
-    /// recovery needed its signature and its veto would be a second vote.
+    /// Withdraws it; steward on record or governor.
     pub fn cancel_steward_recovery(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if caller != storage::governor(&env) && !is_steward(&env, &fund, &caller) {
@@ -1202,8 +1051,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The proposed steward recovery of a fund, unless it can no longer
-    /// apply.
+    /// The recovery, if it can still apply.
     pub fn pending_steward_recovery(env: Env, fund: Address) -> Option<PendingStewardRecovery> {
         storage::pending_steward_recovery(&env, &fund)
             .filter(|p| recovery_can_apply(&env, &fund, p))
@@ -1211,22 +1059,7 @@ impl OpenWindow {
 
     // -- Re-anchoring ---------------------------------------------------------
 
-    /// Proposes to re-anchor a fund's NAV and FX references, the only way to
-    /// move them other than along the model path or down by the steward:
-    /// after a legitimate jump, or to re-admit a removed fund whose new feed
-    /// no longer lies on the old path. The fresh readings of the feed are
-    /// taken now and stored; they are what the apply installs, so whoever
-    /// applies cannot choose the anchor. The feed is the fund's current one,
-    /// or for a removed fund the one of its pending re-admission, and the NAV
-    /// is read under the pricing rule: the primary feed must be fresh, and a
-    /// fresh fallback must agree with it.
-    ///
-    /// The signers sign numbers, not just a moment: `expected_nav` and
-    /// `expected_fx` (0 for a fund priced directly) are the values they
-    /// agreed on, and the readings must lie within the fund's corridor floor
-    /// (NAV) and the leg's band (FX) of them, or the proposal is refused.
-    /// Replaces an earlier proposal. Requires the governor and the fund's
-    /// steward on record.
+    /// Proposes references near the signed values. Governor and steward.
     pub fn propose_reanchor(
         env: Env,
         fund: Address,
@@ -1297,13 +1130,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Installs a proposed re-anchor once its delay has elapsed, within its
-    /// grace period. Anyone may call it. The fund must still be priced by
-    /// the feeds the proposal read, and they must still agree with it:
-    /// today's NAV within the corridor that starts at the proposed NAV (the
-    /// model path, so a fund that accrued during the delay still passes),
-    /// today's FX rate within the leg's band of the proposed rate. The
-    /// references become the proposed readings, not today's.
+    /// Installs due references if the feeds still agree. Anyone.
     pub fn apply_reanchor(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_reanchor(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
@@ -1367,8 +1194,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a proposed re-anchor. `caller` must be the governor, the
-    /// guardian or the fund's steward on record.
+    /// Withdraws it; governor, guardian or steward.
     pub fn cancel_reanchor(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
@@ -1385,21 +1211,14 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The proposed re-anchor of a fund, unless it has expired.
+    /// The re-anchor, if live.
     pub fn pending_reanchor(env: Env, fund: Address) -> Option<PendingReanchor> {
         storage::pending_reanchor(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
 
     // -- Fallback NAV feed ----------------------------------------------------
 
-    /// Proposes a fallback NAV feed for a fund. It is an oracle change, so it
-    /// needs the same two keys as an admission and waits for the time delay.
-    /// The feed must report in the NAV oracle's base, publish a fresh price
-    /// for the shares now and agree with the primary feed when that one is
-    /// fresh; its age limit stays within the envelope's NAV age, and its
-    /// divergence tolerance within the envelope's corridor floor. Replaces
-    /// any earlier proposal. At most `MAX_FALLBACKS` funds may have one.
-    /// Requires the governor and the fund's steward.
+    /// Proposes a fallback NAV feed. Governor and steward.
     pub fn propose_fallback(env: Env, fund: Address, feed: FallbackFeed) -> Result<(), Error> {
         storage::require_governor(&env);
         let config = storage::fund(&env, &fund)?;
@@ -1419,8 +1238,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Activates a proposed fallback feed once its delay has elapsed, after
-    /// checking it again. Anyone may call it.
+    /// Activates a due fallback, rechecked. Anyone.
     pub fn apply_fallback(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_fallback(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
@@ -1437,8 +1255,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a proposed fallback feed. `caller` must be the governor, the
-    /// guardian or the fund's steward.
+    /// Withdraws it; governor, guardian or steward.
     pub fn cancel_fallback(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         let steward = is_steward(&env, &fund, &caller);
@@ -1457,11 +1274,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Removes a fund's fallback feed, at once: removing a source never
-    /// loosens a check. It does stop valuation when the primary feed stops,
-    /// so it takes more than one ordinary key: the guardian alone (the role
-    /// that acts in emergencies), or the governor and the fund's steward
-    /// together, `caller` being either of them; the other one must sign too.
+    /// Removes it at once; guardian, or governor with steward.
     pub fn remove_fallback(env: Env, fund: Address, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if caller != storage::guardian(&env) {
@@ -1491,7 +1304,7 @@ impl OpenWindow {
         storage::fallback(&env, &fund).map(|(feed, _)| feed)
     }
 
-    /// The fallback feed proposed for a fund, unless it has expired.
+    /// The fallback, if live.
     pub fn pending_fallback(env: Env, fund: Address) -> Option<PendingFallback> {
         storage::pending_fallback(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
@@ -1510,8 +1323,7 @@ impl OpenWindow {
         storage::is_paused(&env)
     }
 
-    /// Suspends new offers and new repos. `caller` must be the guardian or
-    /// the governor. Exits stay open.
+    /// Stops new offers and repos, not exits; guardian or governor.
     pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
         caller.require_auth();
         if caller != storage::guardian(&env) && caller != storage::governor(&env) {
@@ -1527,7 +1339,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Lifts the pause. Requires the governor.
+    /// Lifts the pause. Governor.
     pub fn unpause(env: Env) {
         let governor = storage::require_governor(&env);
         storage::set_paused(&env, false);
@@ -1541,13 +1353,7 @@ impl OpenWindow {
 
     // -- Steward ------------------------------------------------------------
 
-    /// Tunes a fund's haircut and caps inside the envelope. A change that
-    /// only tightens (haircut not lower, caps not higher) applies at once and
-    /// drops a pending loosening. Any loosening exposes the fund's lenders
-    /// more on one key, so it waits for the time delay and applies through
-    /// `apply_fund_limits_change`, during which the governor or the guardian
-    /// can cancel it (decision S7). Requires the fund's steward. Open repos
-    /// keep their frozen terms.
+    /// Tunes haircut and caps; loosenings wait. Steward.
     pub fn set_fund_limits(
         env: Env,
         fund: Address,
@@ -1596,9 +1402,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Applies a queued loosening of a fund's limits once its delay has
-    /// elapsed, after checking it against the envelope again. Anyone may call
-    /// it.
+    /// Applies a due loosening, rechecked. Anyone.
     pub fn apply_fund_limits_change(env: Env, fund: Address) -> Result<(), Error> {
         let pending = storage::pending_fund_limits(&env, &fund).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
@@ -1612,8 +1416,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Withdraws a queued loosening of a fund's limits. `caller` must be the
-    /// governor, the guardian or the fund's steward.
+    /// Withdraws it; governor, guardian or steward.
     pub fn cancel_fund_limits_change(
         env: Env,
         fund: Address,
@@ -1633,19 +1436,12 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The queued loosening of a fund's limits, unless it has expired.
+    /// The loosening, if live.
     pub fn pending_fund_limits_change(env: Env, fund: Address) -> Option<PendingFundLimitsChange> {
         storage::pending_fund_limits(&env, &fund).filter(|p| is_live(&env, p.eta))
     }
 
-    /// Approves or revokes a lender for a fund, from the issuer's own list of
-    /// authorized holders: seized shares can then always reach the lender
-    /// (decision S8). An approval needs the lender's attestation for the
-    /// fund, co-signed by the current steward, and the steward can never
-    /// approve itself: the issuer does not lend against its own fund (MMF
-    /// Regulation, Art. 35). A revocation also removes the attestation, so a
-    /// return needs a fresh one; the events keep the trail. Requires the
-    /// fund's steward.
+    /// Approves or revokes an attested lender. Steward.
     pub fn approve_lender(
         env: Env,
         fund: Address,
@@ -1677,12 +1473,7 @@ impl OpenWindow {
         })
     }
 
-    /// Records that `lender` and the fund's steward both signed the
-    /// declaration whose hash is `declaration` (eligibility, no group or
-    /// economic link with the fund's manager, agreement reference): the trail
-    /// counsel and auditors follow from an on-chain address to a signed
-    /// document. Replaces an earlier attestation of the pair. Requires the
-    /// lender and the fund's steward, who may not be the same address.
+    /// Records a declaration hash. Lender and steward.
     pub fn attest_lender(
         env: Env,
         fund: Address,
@@ -1713,7 +1504,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// The attestation of a lender for a fund, if any.
+    /// The attestation, if any.
     pub fn lender_attestation(
         env: Env,
         fund: Address,
@@ -1722,8 +1513,7 @@ impl OpenWindow {
         storage::lender_attestation(&env, &fund, &lender)
     }
 
-    /// Suspends or resumes new repos on a fund. Exits stay open. Requires the
-    /// fund's steward.
+    /// Suspends or resumes new repos. Steward.
     pub fn freeze_fund(env: Env, fund: Address, frozen: bool) -> Result<(), Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
@@ -1735,12 +1525,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Lowers the NAV reference to the oracle's current NAV, for instance after
-    /// a legitimate drop. It can only lower it: upward, the reference follows
-    /// the model path, so a steward who also runs the feed cannot inflate the
-    /// collateral. Takes no price from the caller; the NAV follows the same
-    /// rule as a valuation, so a fresh fallback stands in for a silent
-    /// primary feed. Requires the fund's steward.
+    /// Lowers the NAV reference to the NAV. Steward.
     pub fn reset_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
@@ -1753,9 +1538,7 @@ impl OpenWindow {
         Ok(set_reference(&env, &fund, &mut state, lowered, timestamp))
     }
 
-    /// Marks an offer as designated by the fund's issuer. A label only: an
-    /// independent lender funds it, with no privilege. The offer must accept
-    /// the fund. Requires the fund's steward.
+    /// Labels an issuer-designated offer. Steward.
     pub fn set_sponsor(env: Env, offer_id: u64, fund: Address, sponsor: bool) -> Result<(), Error> {
         let config = storage::fund(&env, &fund)?;
         config.steward.require_auth();
@@ -1772,10 +1555,7 @@ impl OpenWindow {
 
     // -- Anyone -------------------------------------------------------------
 
-    /// Moves a fund's NAV reference forward when the oracle's NAV is fresh,
-    /// newer and inside the corridor. The reference never falls and rises at
-    /// most along the model path. Anyone may call it, like feeding a watchdog:
-    /// it cannot be made to follow a faulty feed.
+    /// Moves the reference along the model. Anyone.
     pub fn refresh_reference(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         let mut state = storage::fund_state(&env, &fund)?;
@@ -1791,7 +1571,7 @@ impl OpenWindow {
         })
     }
 
-    /// Last NAV of a fund's shares as reported by its oracle, unchecked.
+    /// Last oracle NAV, unchecked.
     pub fn fund_price(env: Env, fund: Address) -> Result<PriceData, Error> {
         let config = storage::fund(&env, &fund)?;
         OracleClient::new(&env, &config.oracle)
@@ -1799,8 +1579,7 @@ impl OpenWindow {
             .ok_or(Error::NoPrice)
     }
 
-    /// What `shares` of `fund` can secure now in `stablecoin`, with every
-    /// check `open_repo` applies to the price. Read-only.
+    /// What `shares` can secure now, fully checked.
     pub fn quote(
         env: Env,
         fund: Address,
@@ -1833,11 +1612,7 @@ impl OpenWindow {
 
     // -- Lifecycle ----------------------------------------------------------
 
-    /// Lender deposits `amount` of `stablecoin` with their terms. The lender
-    /// must be approved by the current steward of every fund listed (an
-    /// approval implies the attestation that steward co-signed), must not be
-    /// the steward of any of them, and in a single-lender instance must be
-    /// the sole lender. Returns the offer identifier.
+    /// Deposits an offer; returns its id. Approved lender.
     pub fn create_offer(
         env: Env,
         lender: Address,
@@ -1923,8 +1698,7 @@ impl OpenWindow {
         Ok(offer_id)
     }
 
-    /// Lender takes back `amount` of the stablecoins not lent. Works while
-    /// paused.
+    /// Takes back unlent stablecoins, even paused. Lender.
     pub fn withdraw_offer(env: Env, offer_id: u64, amount: i128) -> Result<(), Error> {
         let mut offer = storage::offer(&env, offer_id)?;
         offer.lender.require_auth();
@@ -1945,10 +1719,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Borrower locks `shares` of `fund` against `offer_id` and receives
-    /// `principal` stablecoins in the same transaction, for `term` seconds.
-    /// The contract refuses rather than adjusts: the borrower states what
-    /// they want. Returns the repo identifier.
+    /// Locks shares, pays `principal` for `term`; returns the id. Borrower.
     pub fn open_repo(
         env: Env,
         borrower: Address,
@@ -2082,7 +1853,7 @@ impl OpenWindow {
         Ok(repo_id)
     }
 
-    /// Interest due on a repo if it were repurchased now.
+    /// Interest due if repurchased now.
     pub fn repo_due(env: Env, repo_id: u64) -> Result<i128, Error> {
         let repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -2091,18 +1862,7 @@ impl OpenWindow {
         interest_due(&env, &repo)
     }
 
-    /// Borrower repays principal and interest and gets the shares back.
-    /// Allowed before and after maturity until the repo is seized, and while
-    /// paused. Interest runs at the repo rate until repayment, per started
-    /// hour, with a minimum of one hour. Principal and interest both flow back
-    /// into the offer, where the lender withdraws them: nothing in the
-    /// borrower's exit depends on an address the lender controls.
-    ///
-    /// If the share token refuses to return the shares (issuer freeze,
-    /// allowlist removal, clawback), the debt still settles and the repo
-    /// closes; the shares stay attributed to the borrower as a pending
-    /// release that anyone can retry with `release` (decision S9). A failed
-    /// repayment still reverts everything.
+    /// Repays and recovers the shares, even paused. Borrower.
     pub fn repurchase(env: Env, repo_id: u64) -> Result<(), Error> {
         let mut repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -2138,11 +1898,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// From maturity, the lender seizes the shares of an unpaid repo and sends
-    /// them to `to`, the lender or another address the fund's steward
-    /// approved. Allowed while paused. If the share token refuses the
-    /// delivery, the repo still defaults and the shares wait for `to` as a
-    /// pending release (decision S9).
+    /// From maturity, sends the shares to approved `to`. Lender.
     pub fn seize(env: Env, repo_id: u64, to: Address) -> Result<(), Error> {
         let mut repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -2175,13 +1931,7 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Retries the delivery of shares a closed repo owes, to the beneficiary
-    /// recorded. Anyone may call it, typically once the issuer has lifted the
-    /// freeze or restored the allowlist; only the beneficiary can change
-    /// itself (`redirect_release`), and no other path moves these shares.
-    /// Works while paused. Returns whether the shares were delivered. A
-    /// refusal is not an error: the call succeeds so that the record's TTL
-    /// extension is kept, and the record waits for the next attempt.
+    /// Retries a deferred delivery; false if refused. Anyone.
     pub fn release(env: Env, repo_id: u64) -> Result<bool, Error> {
         let pending = storage::pending_release(&env, repo_id).ok_or(Error::NothingToRelease)?;
         // The transfer goes first so that a refusal leaves the record as it
@@ -2201,12 +1951,7 @@ impl OpenWindow {
         Ok(true)
     }
 
-    /// Changes where the shares awaiting release go, for instance when the
-    /// issuer will never let the recorded address hold them again. After a
-    /// repurchase the shares are the borrower's, so the borrower signs and
-    /// picks any address; after a seizure they are the lender's, so the
-    /// lender signs and picks another address the fund's steward approved
-    /// (decision S8). Delivery still goes through `release`.
+    /// Changes a deferred delivery's beneficiary. Beneficiary.
     pub fn redirect_release(env: Env, repo_id: u64, to: Address) -> Result<(), Error> {
         let mut pending = storage::pending_release(&env, repo_id).ok_or(Error::NothingToRelease)?;
         // A "delivery" to the contract itself would close the record while

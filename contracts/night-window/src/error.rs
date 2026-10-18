@@ -7,117 +7,98 @@ use soroban_sdk::contracterror;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    /// Kept for ABI stability: returned by entry points of version 1 that
-    /// waited for the specification. No longer returned.
+    /// Reserved (version 1).
     NotImplemented = 1,
-    /// The fund is not in the registry of accepted funds.
+    /// Fund not in the registry.
     FundNotAccepted = 2,
-    /// Haircut must be below 10,000 basis points and within the envelope.
+    /// Haircut out of range.
     InvalidHaircut = 3,
-    /// Amounts must be strictly positive.
+    /// Amount not positive.
     InvalidAmount = 4,
-    /// Term must be within the minimum term and the applicable ceiling.
+    /// Term out of range.
     InvalidTerm = 5,
-    /// The oracle has no price for the asset.
+    /// No price for the asset.
     NoPrice = 6,
-    /// Instance storage lost its configuration. Unreachable with a constructor
-    /// deployment; kept as a typed failure rather than an opaque trap.
+    /// Configuration missing.
     NotInitialized = 7,
-    /// New offers and new repos are suspended.
+    /// New entries suspended.
     Paused = 8,
-    /// The stablecoin is not in the registry of accepted stablecoins.
+    /// Stablecoin not in the registry.
     StablecoinNotAccepted = 9,
-    /// Currencies of the fund, its oracles and the stablecoin do not match.
+    /// Currencies differ.
     CurrencyMismatch = 10,
-    /// The price is older than the freshness window.
+    /// Price too old.
     StalePrice = 11,
-    /// The fund's NAV is outside the corridor predicted from its reference.
+    /// NAV outside its corridor.
     PriceOutOfBand = 12,
-    /// The principal requested exceeds what the shares can secure.
+    /// Principal exceeds the collateral.
     LoanTooLarge = 13,
     OfferNotFound = 14,
-    /// The offer does not hold enough stablecoins.
+    /// Offer holds too little.
     InsufficientOffer = 15,
     RepoNotFound = 16,
-    /// The repo was already repurchased or seized.
+    /// Repo already closed.
     RepoNotOpen = 17,
-    /// The repo has not reached maturity yet.
+    /// Maturity not reached.
     NotMatured = 18,
-    /// A per-repo, per-fund or per-currency cap would be exceeded.
+    /// A cap would be exceeded.
     CapExceeded = 19,
-    /// An offer lists no fund, a duplicate, or more than the maximum.
+    /// Fund list empty, duplicated or too long.
     TooManyFunds = 20,
-    /// The lender or recipient is not approved by the fund's steward.
+    /// Lender or recipient not approved.
     LenderNotApproved = 21,
-    /// The contract did not receive exactly the amount transferred.
+    /// Amount received differs.
     TransferMismatch = 22,
-    /// The offer does not accept this fund as collateral.
+    /// Offer refuses this fund.
     FundNotInOffer = 23,
-    /// Rates are expressed in basis points and capped at 10,000.
+    /// Rate above 10,000 bps.
     InvalidRate = 24,
-    /// A computation overflowed or divided by zero.
+    /// Overflow or division by zero.
     ArithmeticOverflow = 25,
-    /// A parameter lies outside the protocol risk envelope.
+    /// Outside the envelope.
     OutsideEnvelope = 26,
-    /// The fund's steward suspended new repos on this fund.
+    /// Fund frozen by its steward.
     FundFrozen = 27,
-    /// A price is not strictly positive or lies in the future.
+    /// Price not positive or future.
     InvalidPrice = 28,
-    /// Reserved: the fund is already listed in the offer.
+    /// Reserved.
     DuplicateFund = 29,
-    /// The caller does not hold the role this function requires.
+    /// Caller lacks the role.
     Unauthorized = 30,
-    /// Once a fund has been admitted, the time delay may only grow: a
-    /// compromised governor cannot shorten the window others have to react.
+    /// Delay may only grow.
     DelayCannotDecrease = 31,
-    /// No pending proposal matches: nothing proposed, already applied or
-    /// cancelled, or an upgrade to another WASM hash than the one proposed.
+    /// No matching proposal.
     NotProposed = 32,
-    /// The proposal exists but its time delay has not elapsed yet.
+    /// Delay not elapsed.
     TimelockPending = 33,
-    /// Reserved: a draft of version 3 returned it from `release`, which now
-    /// reports a refused delivery as `false` so that the record's TTL
-    /// extension is kept. No longer returned.
+    /// Reserved (version 3 draft).
     ReleaseBlocked = 34,
-    /// The fund's NAV feed and its fallback feed disagree by more than the
-    /// tolerance set for the fallback.
+    /// NAV feeds disagree.
     PriceDivergence = 35,
-    /// No shares are waiting to be released for this repo.
+    /// No shares awaiting release.
     NothingToRelease = 36,
-    /// The fund has no fallback NAV feed.
+    /// No fallback feed.
     NoFallback = 37,
-    /// The proposal was not applied within its grace period after the eta;
-    /// it is treated as gone and must be proposed again.
+    /// Grace period passed.
     ProposalExpired = 38,
-    /// A bounded list kept in instance storage is full: funds with a
-    /// fallback feed, or currencies with a pending cap increase.
+    /// Bounded list full.
     LimitReached = 39,
-    /// A fund's steward, its issuer, never lends on its fund: it cannot be
-    /// approved or attested as a lender there, nor create an offer listing
-    /// it, and an approved lender cannot become the fund's steward.
+    /// A steward never lends on its fund.
     StewardCannotLend = 40,
-    /// The instance runs in sole-lender mode and the caller is not that
-    /// lender.
+    /// Not the sole lender.
     NotSoleLender = 41,
-    /// The lender has no attestation for this fund signed by itself and the
-    /// fund's current steward: it can be neither approved nor offer on it.
+    /// No attestation with this steward.
     AttestationMissing = 42,
-    /// A guardian may hand its role over only to the backup it registered
-    /// with the governor.
+    /// Not the registered backup.
     NotGuardianBackup = 43,
-    /// The sole lender can be chosen once, before the first admission and the
-    /// first offer, and never changes.
+    /// Sole lender already fixed.
     SoleLenderFixed = 44,
-    /// A steward recovery goes only to the backup the steward registered;
-    /// none is registered, or the recovery names another address.
+    /// No or other steward backup.
     NoStewardBackup = 45,
-    /// The trustee is named once, before the first admission and the first
-    /// offer; afterwards only the trustee hands its role over.
+    /// Trustee already named.
     TrusteeFixed = 46,
-    /// The trustee must be neither the governor, the guardian nor the sole
-    /// lender.
+    /// Trustee holds another role.
     TrusteeNotIndependent = 47,
-    /// A cross-priced fund's FX band may not exceed its FX haircut: a rate
-    /// the band admits must stay covered by the haircut.
+    /// FX band wider than the FX haircut.
     FxBandExceedsHaircut = 48,
 }

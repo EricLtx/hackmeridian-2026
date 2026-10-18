@@ -6,18 +6,17 @@
 
 use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
-/// Asset identifier as defined by SEP-40.
+/// SEP-40 asset identifier.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Asset {
-    /// A Stellar asset, identified by its contract address.
+    /// By contract address.
     Stellar(Address),
-    /// Any other asset, identified by a ticker symbol (`USD`, `EUR`).
+    /// By ticker symbol.
     Other(Symbol),
 }
 
-/// A price point as defined by SEP-40. `price` carries the oracle's
-/// `decimals()` fractional digits; `timestamp` is a Unix timestamp.
+/// SEP-40 price point.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PriceData {
@@ -130,9 +129,7 @@ pub enum DataKey {
     PendingStewardBackup(Address),
 }
 
-/// Limits that no fund configuration may exceed, set by the governor.
-/// Stewards tune their fund inside it, the way a calibration stays inside the
-/// limits a manufacturer burns into the firmware.
+/// Bounds on every fund configuration.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RiskEnvelope {
@@ -142,87 +139,70 @@ pub struct RiskEnvelope {
     pub max_yield_bps: u32,
     pub max_nav_age_secs: u64,
     pub max_fx_age_secs: u64,
-    /// Widest band an FX rate may move from its reference.
     pub max_fx_band_bps: u32,
 }
 
-/// Second leg of a cross price: the fund's NAV oracle reports in one base
-/// (for instance USD) and the loan is in another currency (for instance EUR).
-/// The FX oracle must report `asset` in the same base as the NAV oracle.
+/// FX leg of a cross price.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FxLeg {
     pub oracle: Address,
-    /// The loan currency as quoted by the FX oracle, e.g. `Other(EUR)`.
+    /// As quoted by the FX oracle.
     pub asset: Asset,
-    /// Extra haircut covering a weekend gap of the exchange rate.
+    /// Extra, for the FX gap.
     pub haircut_bps: u32,
     pub max_age_secs: u64,
-    /// Band around the reference rate, both ways. The reference is set at
-    /// admission, which needs both the governor and the steward.
     pub band_bps: u32,
 }
 
-/// Where a fund's price in the loan currency comes from.
+/// Where the loan-currency price comes from.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PriceSource {
-    /// The NAV oracle reports in the loan currency.
+    /// NAV in the loan currency.
     Direct,
-    /// The NAV oracle reports in another base; this leg converts it.
+    /// Converted through an FX leg.
     Cross(FxLeg),
 }
 
-/// How the contract values and accepts a fund's shares as collateral.
+/// A fund's valuation settings.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FundConfig {
-    /// SEP-40 oracle publishing the fund's NAV.
+    /// SEP-40 NAV oracle.
     pub oracle: Address,
-    /// Identifier of the shares in that oracle.
+    /// The shares in that oracle.
     pub oracle_asset: Asset,
-    /// Haircut on the share value, in basis points.
     pub haircut_bps: u32,
-    /// The issuer's key: approves lenders and tunes the fund in the envelope.
+    /// The issuer's key.
     pub steward: Address,
-    /// Currency of the stablecoins this fund can be borrowed against.
+    /// Loan currency.
     pub currency: Symbol,
-    /// Direct, or crossed through an FX feed when the NAV oracle does not
-    /// report in `currency`.
     pub source: PriceSource,
-    /// Oldest acceptable NAV, in seconds.
     pub nav_max_age_secs: u64,
-    /// Lower margin of the NAV corridor, in basis points.
     pub corridor_floor_bps: u32,
-    /// Highest annual growth the corridor allows, in basis points.
+    /// Corridor growth, yearly.
     pub max_yield_bps: u32,
-    /// Cap on the principal of one repo, in stablecoin units.
     pub max_principal_per_repo: i128,
-    /// Cap on the sum of open principals on this fund.
     pub max_outstanding: i128,
 }
 
-/// Runtime state of a fund, kept apart from its configuration.
+/// Runtime state of a fund.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FundState {
-    /// Loan currency, copied from the configuration so that totals can be
-    /// released even after the fund or its stablecoin leaves the registry.
     pub currency: Symbol,
-    /// Decimals of the share token, read at admission.
     pub share_decimals: u32,
-    /// Decimals of the NAV oracle, read at admission.
     pub nav_decimals: u32,
-    /// Decimals of the FX oracle, 0 without FX leg.
+    /// 0 without FX leg.
     pub fx_decimals: u32,
-    /// Reference NAV of the corridor and its timestamp.
+    /// Corridor reference.
     pub reference_nav: i128,
     pub reference_time: u64,
-    /// Reference FX rate, 0 without FX leg.
+    /// 0 without FX leg.
     pub reference_fx: i128,
-    /// Sum of open principals on this fund.
     pub outstanding: i128,
-    /// Set by the steward to suspend new repos on this fund.
+    /// Set by the steward.
     pub frozen: bool,
 }
 
@@ -231,26 +211,22 @@ pub struct FundState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StablecoinConfig {
     pub currency: Symbol,
-    /// Read from the token when registered.
     pub decimals: u32,
 }
 
-/// A lender's standing offer. Borrowers take it in one transaction; the
-/// principal repaid flows back into it.
+/// A lender's standing offer.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Offer {
     pub lender: Address,
     pub stablecoin: Address,
-    /// Amount available to borrow now.
     pub available: i128,
-    /// Annual rate, in basis points.
+    /// Annual.
     pub rate_bps: u32,
-    /// Longest term the lender accepts, in seconds.
     pub max_term: u64,
-    /// Fund shares the lender accepts as collateral.
+    /// Accepted collateral.
     pub funds: Vec<Address>,
-    /// Marked by a fund's steward: the issuer's own offer.
+    /// Issuer-designated.
     pub sponsor: bool,
 }
 
@@ -262,8 +238,7 @@ pub enum RepoStatus {
     Defaulted,
 }
 
-/// A repo position: shares locked against a stablecoin loan. Its terms are
-/// frozen at opening (invariant I9).
+/// Shares locked against a loan; terms frozen.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Repo {
@@ -275,75 +250,58 @@ pub struct Repo {
     pub stablecoin: Address,
     pub principal: i128,
     pub rate_bps: u32,
-    /// Ledger timestamp at opening.
     pub opened_at: u64,
-    /// Ledger timestamp from which the lender may seize the shares.
+    /// Seizable from then.
     pub maturity: u64,
     pub status: RepoStatus,
 }
 
-/// What a fund's shares can secure right now. Read-only, for interfaces.
+/// What shares can secure now.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Quote {
-    /// Share price in the loan currency, with `price_decimals` digits.
+    /// `price_decimals` digits.
     pub price: i128,
     pub price_decimals: u32,
-    /// Fund haircut plus FX haircut when the price is crossed.
+    /// Fund plus FX.
     pub haircut_bps: u32,
     pub max_principal: i128,
     pub nav_timestamp: u64,
 }
 
-/// An upgrade proposed by the governor (decision S7). It can be applied by
-/// the governor from `eta` on, or cancelled by the governor or the guardian
-/// until then.
+/// A proposed upgrade.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingUpgrade {
     pub wasm_hash: BytesN<32>,
-    /// Ledger timestamp from which `upgrade` accepts this hash.
     pub eta: u64,
 }
 
-/// A replacement of an admitted fund's configuration, signed by the governor
-/// and the steward(s), waiting for its time delay (decision S7).
+/// A proposed fund replacement.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingFundChange {
     pub config: FundConfig,
-    /// When the replacement gives the fund its first FX leg: the rate read
-    /// at the proposal, which becomes the FX reference. The rate at the
-    /// apply must lie within the leg's band of it, so whoever applies does
-    /// not pick the anchor. Zero otherwise.
+    /// First FX leg's reference, else 0.
     pub fx_anchor: i128,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// A re-anchoring of a fund's references, signed by the governor and the
-/// steward, waiting for its time delay. The references it installs are the
-/// readings taken at the proposal, never the spot at the apply.
+/// A proposed re-anchor: readings at the proposal.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingReanchor {
-    /// The NAV feed the readings come from; the apply requires the fund to
-    /// be priced by the same one.
     pub nav_oracle: Address,
     pub nav_asset: Asset,
-    /// NAV read at the proposal, with `nav_decimals` digits, and its time.
+    /// `nav_decimals` digits.
     pub nav: i128,
     pub nav_time: u64,
     pub nav_decimals: u32,
-    /// The FX rate read at the proposal, for a cross price.
     pub fx: AnchorFx,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// The FX side of a re-anchor: none for a fund priced directly, or the rate
-/// read for a cross price. An enum, like `PriceSource`, rather than a zero
-/// rate with zero decimals that could pass for a reading.
+/// FX side of a re-anchor.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AnchorFx {
@@ -361,113 +319,95 @@ impl AnchorFx {
     }
 }
 
-/// An FX rate read for a re-anchor, with the feed it comes from.
+/// An FX reading with its feed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnchorRate {
     pub oracle: Address,
     pub asset: Asset,
-    /// The rate, with `decimals` digits.
+    /// `decimals` digits.
     pub rate: i128,
     pub decimals: u32,
 }
 
-/// Shares a closed repo owes but the share token refused to deliver: the
-/// issuer froze the contract or the recipient, removed one of them from its
-/// allowlist, or clawed shares back (decision S9). Anyone may retry the
-/// delivery to `to`; nothing else moves these shares.
+/// Shares owed; delivery refused by the token.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRelease {
     pub fund: Address,
-    /// The borrower after a repurchase, the seizure recipient after a default.
+    /// Borrower or seizure recipient.
     pub to: Address,
     pub shares: i128,
 }
 
-/// A second NAV source for a fund, used when the primary feed is stale or
-/// silent, and checked against it when both are fresh.
+/// A second NAV source.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FallbackFeed {
-    /// SEP-40 oracle reporting in the same base as the fund's NAV oracle.
+    /// Same base as the NAV oracle.
     pub oracle: Address,
-    /// Identifier of the shares in that oracle.
     pub asset: Asset,
-    /// Oldest acceptable price, in seconds; within the envelope's NAV age.
     pub max_age_secs: u64,
-    /// Largest gap allowed between the two feeds when both are fresh, in
-    /// basis points of the primary NAV.
+    /// Gap from the primary.
     pub max_divergence_bps: u32,
 }
 
-/// A guardian appointment waiting for its time delay. The current guardian
-/// can cancel it, so a governor key alone cannot remove the veto in time.
+/// A proposed guardian.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingGuardianChange {
     pub guardian: Address,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// An increase of the term ceiling waiting for its time delay.
+/// A proposed ceiling increase.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingMaxTermChange {
     pub max_term: u64,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// A risk envelope that loosens at least one bound, waiting for its time
-/// delay.
+/// A proposed envelope loosening.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingEnvelopeChange {
     pub envelope: RiskEnvelope,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// A loosening of a fund's limits by its steward (lower haircut, higher
-/// caps), waiting for its time delay.
+/// A proposed loosening of fund limits.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingFundLimitsChange {
     pub haircut_bps: u32,
     pub max_principal_per_repo: i128,
     pub max_outstanding: i128,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// An increase of a currency cap, waiting for its time delay.
+/// A proposed cap increase.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingCurrencyCapChange {
     pub cap: i128,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// A fallback feed proposed for a fund, waiting for its time delay.
+/// A proposed fallback feed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingFallback {
     pub feed: FallbackFeed,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// A governor handover waiting for its successor's acceptance. After the
-/// first admission it waits for the time delay too, during which the
-/// guardian can veto it (custody gap I12).
+/// A proposed governor handover.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingAdminChange {
     pub admin: Address,
-    /// Ledger timestamp from which the successor may accept.
+    /// Acceptable from then.
     pub eta: u64,
 }
 
@@ -475,17 +415,13 @@ pub struct PendingAdminChange {
 // never released: instances are redeployed, never upgraded in place from a
 // draft, so no stored value has the old shape.
 
-/// What a lender and a fund's steward both signed: the hash of an off-chain
-/// declaration (eligibility, no link with the fund's manager, agreement
-/// reference). The document stays off-chain; no personal data goes on chain.
+/// Hash of a declaration both signed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LenderAttestation {
     pub declaration: BytesN<32>,
-    /// The steward who co-signed; an approval needs it to still be the
-    /// fund's steward.
+    /// Co-signer; must still hold.
     pub steward: Address,
-    /// Ledger timestamp of the signature.
     pub at: u64,
 }
 
@@ -493,29 +429,22 @@ pub struct LenderAttestation {
 // added); same reason as `LenderAttestation`: no stored value has the old
 // shape.
 
-/// Replacement of a lost steward key by the backup the steward registered,
-/// proposed by the governor and the guardian, waiting for the longest delay
-/// (custody gap I14).
+/// A proposed steward recovery.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingStewardRecovery {
     pub steward: Address,
-    /// The steward on record at the proposal; it must still be at the apply.
+    /// Steward at the proposal.
     pub previous: Address,
-    /// Governance generation at the proposal; it must still be at the apply.
     pub generation: u64,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }
 
-/// Replacement of a fund's steward backup, waiting for the time delay. The
-/// current backup stays valid until it applies.
+/// A proposed backup replacement.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingStewardBackup {
     pub backup: Address,
-    /// The steward who proposed it. A steward change drops the proposal.
     pub steward: Address,
-    /// Ledger timestamp from which anyone may apply it.
     pub eta: u64,
 }

@@ -215,7 +215,7 @@ pub struct UpgradeCancelled {
     pub by: Address,
 }
 
-/// Published just before the code switches, by the code being replaced.
+/// Published by the code being replaced.
 #[contractevent]
 pub struct Upgraded {
     pub wasm_hash: BytesN<32>,
@@ -257,8 +257,7 @@ pub struct EnvelopeChangeCancelled {
     pub by: Address,
 }
 
-/// The governor imposes a guardian without the current one, after the
-/// longest delay.
+/// A guardian imposed without the current one.
 #[contractevent]
 pub struct GuardianChangeForced {
     pub guardian: Address,
@@ -375,8 +374,7 @@ pub struct SharesReleased {
 
 // -- Version 4: independent lenders and custody gaps ----------------------------
 
-/// Published with `AdminProposed`, which keeps its version 2 shape: when the
-/// proposed governor may accept.
+/// Published with `AdminProposed`.
 #[contractevent]
 pub struct AdminChangeProposed {
     pub admin: Address,

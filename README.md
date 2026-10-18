@@ -241,6 +241,7 @@ npm run export -- --json --web      # feed web/public/history.json
 - [docs/modele-menace-stride.md](docs/modele-menace-stride.md): STRIDE threat model and monitoring plan (French).
 - [docs/procedure-incident.md](docs/procedure-incident.md): incident procedure, roles, action per alert and the monitoring rehearsal (French).
 - [docs/audit-scope.md](docs/audit-scope.md): audit package: scope, reproducible build, trust model, invariants, reviews done, where to look hardest.
+- [docs/reference-interface.md](docs/reference-interface.md): interface reference: the long-form description of every entry point, type and error, kept out of the WASM.
 - [docs/stellar-platform.md](docs/stellar-platform.md): overview of the Stellar platform (French).
 - [docs/claude-tooling.md](docs/claude-tooling.md): AI tooling (French).
 - [AGENTS.md](AGENTS.md): build, test and security rules for contributors and AI agents.
