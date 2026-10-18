@@ -44,6 +44,8 @@ export const OFFERS = {
   /** `setup -- --second-fund`: one offer in tEUR over both funds, one in the second euro stablecoin on the second fund. */
   dual: { amount: 100_000n * ONE, rateBps: 300 },
   second: { amount: 50_000n * ONE, rateBps: 275 },
+  /** `setup -- --third-fund`: one offer in tEUR over every admitted fund, the classic-asset share included. */
+  third: { amount: 60_000n * ONE, rateBps: 325 },
 };
 
 /**
@@ -63,4 +65,23 @@ export const SECOND_FUND_SETTINGS = {
   maxYieldBps: 400,
   maxPrincipalPerRepo: 50_000n * ONE,
   maxOutstanding: 200_000n * ONE,
+};
+
+/**
+ * Third fund (`setup -- --third-fund`): the share is a classic Stellar asset
+ * issued by an account that carries the issuer's native flags (authorization
+ * required and revocable, clawback enabled), held through its Stellar Asset
+ * Contract. The token code is Stellar's, not this repository's: the host tests
+ * have used that contract as the share token from the first version. The
+ * demo scene `third` makes the issuer revoke the contract's authorization
+ * during a repo: the repurchase settles, the shares wait, delivery follows
+ * once the issuer authorizes again (decision S9).
+ */
+export const THIRD_FUND_SETTINGS = {
+  haircutBps: 100,
+  navMaxAgeSecs: 64 * 3600,
+  corridorFloorBps: 5,
+  maxYieldBps: 400,
+  maxPrincipalPerRepo: 50_000n * ONE,
+  maxOutstanding: 150_000n * ONE,
 };

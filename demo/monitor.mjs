@@ -215,6 +215,7 @@ const keeperRole = () => (state.keys.keeper ? "keeper" : "operator");
 function fundsOf() {
   const list = [{ label: "fund 1", shares: C.shares, navOracle: C.navOracle, stablecoin: C.euro }];
   if (C.shares2) list.push({ label: "fund 2", shares: C.shares2, navOracle: C.navOracle2, stablecoin: C.euro2 ?? C.euro });
+  if (C.shares3) list.push({ label: "fund 3", shares: C.shares3, navOracle: C.navOracle3, stablecoin: C.euro });
   return list;
 }
 const labelOf = (funds, shares) => funds.find((f) => f.shares === shares)?.label ?? `fund ${String(shares).slice(0, 6)}`;

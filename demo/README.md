@@ -22,8 +22,11 @@ npm run setup -- --fx=reflector  # back to the Reflector FX feed
 npm run setup -- --fresh         # new contracts, same funded accounts
 npm run setup -- --multisig      # governor becomes a 2-of-2 account with an outside co-signer
 npm run setup -- --second-fund   # admit a second fund (euro MMF share, own issuer and feed, no FX leg) and a second euro stablecoin
+npm run setup -- --third-fund    # admit a third fund whose share is a classic Stellar asset held through the Stellar Asset Contract (token code not ours), issuer flags: auth required, revocable, clawback
 npm run status                   # the board only
 npm run demo -- --only=second    # a repo on the second fund, in the second stablecoin (after --second-fund)
+npm run demo -- --only=third     # a repo on the classic-asset share; the issuer revokes the contract's authorization mid-repo (after --third-fund)
+OPEN_WINDOW_STATE=<name> npm run setup -- --fresh   # a disposable instance in .state/<name>.json; its deployment facts stay out of web/public/
 npm run demo                     # every scene, Enter between scenes
 npm run demo -- --auto           # no pauses, for rehearsal or recording
 npm run demo -- --only=open,repurchase
@@ -53,6 +56,7 @@ The seizure scene needs a repo past its maturity. The shortest term the contract
 | `value` | Reads only | The same need through a fund redemption at four moments of the week, against the measured latency |
 | `repair` | Unpause, NAV republished, live repo repurchased, each when needed | A clean state after an interrupted run |
 | `second` | `open_repo` on the second fund through the offer in the second stablecoin, then `repurchase`; needs `setup -- --second-fund` | Two issuers, two NAV feeds, two stablecoins sharing one currency cap, the same contract; the offer that lists both funds |
+| `third` | `open_repo` on a share held through the Stellar Asset Contract, then the issuer revokes the contract's authorization, `repurchase` settles the debt and records the shares owed, `release` is refused, the issuer authorizes again, `release` delivers; needs `setup -- --third-fund` | A share token whose code this repository did not write, with the issuer's native flags; the freeze is handled, never bypassed, and the exit never blocks (decision S9) |
 
 Refusals are shown by simulation: the transaction is built and simulated, the contract returns its typed error, nothing is submitted. Simulation does not check signatures, so the demo never uses it to show an authorization refusal. An error raised by another contract (the share token, the NAV feed, the stablecoin) is named after that contract, so it is never mistaken for an Open Window refusal.
 

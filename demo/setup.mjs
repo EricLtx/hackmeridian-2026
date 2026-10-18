@@ -14,6 +14,12 @@
 //                                   share, its own issuer and NAV feed, no FX
 //                                   leg) and a second euro stablecoin; one
 //                                   offer over both funds. No contract change.
+//   npm run setup -- --third-fund   admit a third fund whose share is a classic
+//                                   Stellar asset held through the Stellar Asset
+//                                   Contract (token code we did not write), with
+//                                   the issuer's native flags; one offer over
+//                                   every fund. No contract change.
+//   OPEN_WINDOW_STATE=<name> ...     use another state file (disposable instance)
 //
 // Each step is recorded in the state file once it succeeds, so a network
 // drop costs one step, not the whole setup.
@@ -48,11 +54,13 @@ import {
   writeDeployment,
   STATE_DIR,
   STATE_FILE,
+  STATE_NAME,
 } from "./lib.mjs";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_EUR_AT_SETUP, NAV_USD_AT_SETUP, OFFERS, SECOND_FUND_SETTINGS, navAt } from "./config.mjs";
+import { AuthClawbackEnabledFlag, AuthRequiredFlag, AuthRevocableFlag } from "@stellar/stellar-sdk";
+import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_EUR_AT_SETUP, NAV_USD_AT_SETUP, OFFERS, SECOND_FUND_SETTINGS, THIRD_FUND_SETTINGS, navAt } from "./config.mjs";
 
 // The provider is an independent lender the issuer designates: the issuer
 // (steward) approves lenders but never funds offers on its own fund, which
@@ -418,9 +426,11 @@ async function main() {
 
   // The second fund stays part of the deployment once admitted: a rerun keeps it consistent.
   if (process.argv.includes("--second-fund") || state.contracts.shares2) await secondFund(state, ow, shares, teur);
+  if (process.argv.includes("--third-fund") || state.contracts.shares3) await thirdFund(state, ow, shares, teur);
 
   writeDeployment(state);
-  console.log("\n  Public addresses written to web/public/deployment.testnet.json for the web interface.");
+  console.log(`
+  Public addresses written to ${STATE_NAME === "testnet" ? "web/public/deployment.testnet.json for the web interface" : `demo/.state/deployment-${STATE_NAME}.json (disposable instance: the web interface is not touched)`}.`);
   console.log("\nSetup complete. Run `npm run demo` from one hour after now.");
 }
 
@@ -619,6 +629,125 @@ async function secondFund(state, ow, shares, teur) {
     state.ids.secondOffer = Number(second.value);
     saveState(state);
     console.log(`  offer #${state.ids.secondOffer} ${fmt(OFFERS.second.amount, 7, 0)} tEURB at ${OFFERS.second.rateBps / 100} %, euro fund only`);
+  });
+}
+
+/**
+ * Third fund: the share is a classic Stellar asset, held through its Stellar
+ * Asset Contract. Nothing here is code of this repository: the issuer account
+ * carries the native flags (authorization required and revocable, clawback),
+ * authorizes holders and the contract through the asset contract, and can
+ * revoke that authorization at any time, which the demo scene `third` shows.
+ * Admission is the same two-key call as for any fund.
+ */
+async function thirdFund(state, ow, shares, teur) {
+  const pub = (role) => keypair(state, role).publicKey();
+  const s = THIRD_FUND_SETTINGS;
+
+  await once(state, "thirdAccounts", "Third issuer (a classic-asset issuer that is also the fund's steward), its backup, its NAV operator", async () => {
+    for (const role of ["issuer3", "stewardBackup3", "operator3"]) {
+      if (!state.keys[role]) state.keys[role] = Keypair.random().secret();
+      saveState(state);
+      await friendbot(pub(role));
+      console.log(`  ${role.padEnd(14)} ${pub(role)}`);
+    }
+  });
+
+  await once(state, "thirdIssuerFlags", "Issuer flags: authorization required and revocable, clawback enabled (native controls, as a permissioned fund share)", async () => {
+    await classic(state, "issuer3", Operation.setOptions({ setFlags: AuthRequiredFlag | AuthRevocableFlag | AuthClawbackEnabledFlag }));
+    console.log("  flags set on the issuer account");
+  });
+
+  const tshare = new Asset("tSHARE", pub("issuer3"));
+  await once(state, "thirdToken", "Share as a classic asset: trustlines, Stellar Asset Contract, authorizations, issuance", async () => {
+    for (const role of ["borrower", "provider", "lender"]) {
+      await classic(state, role, Operation.changeTrust({ asset: tshare }));
+    }
+    state.contracts.shares3 = await deploySac(state, "issuer3", tshare);
+    saveState(state);
+    console.log(`  share token (asset contract) ${state.contracts.shares3}`);
+    // The issuer authorizes each holder, and the Open Window contract itself, through the asset contract.
+    for (const holder of [pub("borrower"), pub("provider"), pub("lender"), ow]) {
+      await invoke(state, "issuer3", state.contracts.shares3, "set_authorized", [sv.address(holder), sv.bool(true)]);
+    }
+    const held = BigInt(await read(state, state.contracts.shares3, "balance", [sv.address(pub("borrower"))]));
+    if (held === 0n) await invoke(state, "issuer3", state.contracts.shares3, "mint", [sv.address(pub("borrower")), sv.i128(50_000n * ONE)]);
+    console.log("  holders and the contract authorized by the issuer; 50,000 tSHARE issued to the borrower");
+  });
+  const shares3 = state.contracts.shares3;
+
+  step("Third fund NAV feed");
+  if (!state.contracts.navOracle3) {
+    state.contracts.navOracle3 = await deploy(state, "operator3", "nav_oracle.wasm", [sv.address(pub("operator3")), asset.other("EUR"), sv.u32(14), sv.u32(300)]);
+    saveState(state);
+  }
+  console.log(`  NAV feed (EUR)   ${state.contracts.navOracle3}`);
+
+  await once(state, "thirdFeed", "Third NAV feed: the classic-asset share, published by its own operator", async () => {
+    const now = await ledgerTime();
+    await invoke(state, "operator3", state.contracts.navOracle3, "publish", [asset.stellar(shares3), sv.i128(NAV_EUR_AT_SETUP), sv.u64(now - 10)]);
+    state.nav3PublishedAt = now - 10;
+    console.log(`  NAV published    ${(Number(NAV_EUR_AT_SETUP) / 1e14).toFixed(4)} EUR`);
+  });
+
+  await once(state, "thirdAdmission", "Two-key admission of the third fund (governor and the issuer as steward), no FX leg; after the first admission this waits for the time delay", async () => {
+    const fundConfig = sv.struct({
+      oracle: sv.address(state.contracts.navOracle3),
+      oracle_asset: asset.stellar(shares3),
+      haircut_bps: sv.u32(s.haircutBps),
+      steward: sv.address(pub("issuer3")),
+      currency: sv.symbol("EUR"),
+      source: sv.variant("Direct"),
+      nav_max_age_secs: sv.u64(s.navMaxAgeSecs),
+      corridor_floor_bps: sv.u32(s.corridorFloorBps),
+      max_yield_bps: sv.u32(s.maxYieldBps),
+      max_principal_per_repo: sv.i128(s.maxPrincipalPerRepo),
+      max_outstanding: sv.i128(s.maxOutstanding),
+    });
+    const admitted = await read(state, ow, "get_fund", [sv.address(shares3)]);
+    await invoke(state, "governor", ow, "set_fund", [sv.address(shares3), fundConfig]);
+    if (admitted) {
+      const pending = await read(state, ow, "pending_fund_change", [sv.address(shares3)]);
+      const wait = Math.max(0, Number(pending.eta) - (await ledgerTime()));
+      console.log(`  replacement proposed; applying it after the time delay (${Math.ceil(wait / 60)} min)`);
+      while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
+      await invoke(state, "operator3", ow, "apply_fund_change", [sv.address(shares3)]);
+      console.log("  replacement applied");
+    } else {
+      console.log(`  admitted at once: haircut ${s.haircutBps / 100} %, NAV age ≤ ${s.navMaxAgeSecs / 3600} h, cap ${fmt(s.maxOutstanding, 7, 0)} EUR`);
+    }
+  });
+
+  await once(state, "thirdStewardBackup", "Third issuer: registers its backup key", async () => {
+    await invoke(state, "issuer3", ow, "set_steward_backup", [sv.address(shares3), sv.address(pub("stewardBackup3"))]);
+    console.log("  steward backup registered by the issuer alone");
+  });
+
+  await once(state, "thirdLenders", "Third fund: the provider is attested and approved by the issuer", async () => {
+    const declaration = crypto.createHash("sha256").update(`demo declaration of ${pub("provider")} for ${shares3}`).digest();
+    await invoke(state, "provider", ow, "attest_lender", [sv.address(shares3), sv.address(pub("provider")), sv.bytes(declaration)]);
+    await invoke(state, "issuer3", ow, "approve_lender", [sv.address(shares3), sv.address(pub("provider")), sv.bool(true)]);
+    console.log("  provider approved on the third fund by its issuer");
+  });
+
+  await once(state, "thirdOffer", "Offer in tEUR that lists every admitted fund", async () => {
+    if (state.ids.thirdOffer !== undefined) return;
+    const held = BigInt(await read(state, state.contracts.euro, "balance", [sv.address(pub("provider"))]));
+    if (held < OFFERS.third.amount) {
+      await classic(state, "euroIssuer", Operation.payment({ destination: pub("provider"), asset: teur, amount: fmtUnits(OFFERS.third.amount - held) }));
+    }
+    const funds = [shares, state.contracts.shares2, shares3].filter(Boolean).map((f) => sv.address(f));
+    const third = await invoke(state, "provider", ow, "create_offer", [
+      sv.address(pub("provider")),
+      sv.address(state.contracts.euro),
+      sv.i128(OFFERS.third.amount),
+      sv.u32(OFFERS.third.rateBps),
+      sv.u64(7 * 24 * 3600),
+      sv.vec(funds),
+    ]);
+    state.ids.thirdOffer = Number(third.value);
+    saveState(state);
+    console.log(`  offer #${state.ids.thirdOffer} ${fmt(OFFERS.third.amount, 7, 0)} tEUR at ${OFFERS.third.rateBps / 100} %, over ${funds.length} funds`);
   });
 }
 

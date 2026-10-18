@@ -8,7 +8,10 @@
 //
 // Scenes: board, open, guardrails, repurchase, seize, value; repair on demand;
 // second (after `setup -- --second-fund`): a repo on the second fund, in the
-// second stablecoin, through an offer that lists both funds.
+// second stablecoin, through an offer that lists both funds;
+// third (after `setup -- --third-fund`): a repo on a share held through the
+// Stellar Asset Contract, the issuer revoking the contract's authorization
+// mid-repo, the repurchase settling, delivery once authorized again.
 // Prerequisite: `npm run setup`, at least one hour earlier for the seizure.
 //
 // Figures come from the chain at that moment: feeds, fund settings, offers,
@@ -342,6 +345,12 @@ async function board() {
     const cfg2 = await read(state, C.openWindow, "get_fund", [sv.address(C.shares2)]);
     line("Second fund (euro MMF share)", `${fmt(fs2.outstanding)} / ${fmt(cfg2.max_outstanding)} EUR lent, haircut ${pct(cfg2.haircut_bps)}, no FX leg`);
   }
+  if (C.shares3) {
+    const fs3 = await read(state, C.openWindow, "get_fund_state", [sv.address(C.shares3)]);
+    const cfg3 = await read(state, C.openWindow, "get_fund", [sv.address(C.shares3)]);
+    const authorized = await read(state, C.shares3, "authorized", [sv.address(C.openWindow)]).catch(() => null);
+    line("Third fund (classic asset, SAC)", `${fmt(fs3.outstanding)} / ${fmt(cfg3.max_outstanding)} EUR lent, haircut ${pct(cfg3.haircut_bps)}, contract ${authorized === false ? red("not authorized by the issuer") : "authorized by the issuer"}`);
+  }
 }
 
 /**
@@ -412,6 +421,84 @@ async function second() {
   saveState(state);
   line("Repaid", `${fmt(principal + interest, 7, 4)} tEURB, of which interest ${fmt(interest, 7, 4)}; shares back to the borrower`);
   console.log(dim("\n  Two issuers, two NAV feeds, two stablecoins, one currency cap, zero contract changes."));
+}
+
+/**
+ * Third fund: the share token is the Stellar Asset Contract of a classic asset,
+ * code this repository did not write, with the issuer's native flags. The
+ * issuer revokes the contract's authorization while a repo is open: the
+ * repurchase still settles the debt and the shares wait; once the issuer
+ * authorizes again, anyone retries the delivery (decision S9).
+ */
+async function third() {
+  title("Third fund: a share token we did not write, the issuer's freeze handled");
+  if (!C.shares3) {
+    console.log("  No third fund: run `npm run setup -- --third-fund` first.");
+    return;
+  }
+  if (!(await requireOpen())) return;
+  const ow = C.openWindow;
+  const fund3 = sv.address(C.shares3);
+  const borrower = pub("borrower");
+  const now = await ledgerTime();
+  const nav = await read(state, C.navOracle3, "lastprice", [asset.stellar(C.shares3)]);
+  if (!nav || now - Number(nav.timestamp) >= 3600) {
+    await tx("Third operator publishes the share NAV", "operator3", C.navOracle3, "publish", [asset.stellar(C.shares3), sv.i128(NAV_EUR_AT_SETUP), sv.u64(Math.max(now - 1, Number(nav?.timestamp ?? 0)))]);
+  }
+  // Leftovers of an interrupted run: a repo still open, or shares still owed.
+  if (state.ids.thirdRepo !== undefined) {
+    const left = await getRepo(state.ids.thirdRepo).catch(() => null);
+    if (left && statusOf(left) === "Open") {
+      alarm(`Repo #${state.ids.thirdRepo} on the third fund is still open.`, "npm run demo -- --only=third (repurchases it first)");
+      await tx("repurchase (third fund)", "borrower", ow, "repurchase", [sv.u64(state.ids.thirdRepo)]);
+    }
+    if (await read(state, ow, "pending_release", [sv.u64(state.ids.thirdRepo)])) {
+      await tx("Issuer authorizes the contract again", "issuer3", C.shares3, "set_authorized", [sv.address(ow), sv.bool(true)]);
+      await tx("release of the shares still owed", "borrower", ow, "release", [sv.u64(state.ids.thirdRepo)]);
+    }
+    delete state.ids.thirdRepo;
+    saveState(state);
+  }
+  const cfg3 = await read(state, ow, "get_fund", [fund3]);
+  line("Fund 3: classic-asset share", `token code: Stellar Asset Contract (not this repository's); issuer flags: authorization required, revocable, clawback`);
+  line("Fund 3 admission", `NAV in EUR, source ${Array.isArray(cfg3.source) ? cfg3.source[0] : cfg3.source}, haircut ${pct(cfg3.haircut_bps)}, NAV age ≤ ${age(Number(cfg3.nav_max_age_secs))}`);
+  line("Contract authorized by the issuer", String(await read(state, C.shares3, "authorized", [sv.address(ow)])));
+  const offer = await read(state, ow, "get_offer", [sv.u64(state.ids.thirdOffer)]);
+  line(`Offer #${state.ids.thirdOffer} (tEUR, every fund)`, `${fmt(offer.available)} available at ${(offer.rate_bps / 100).toFixed(2)} %, funds listed: ${offer.funds.length}`);
+
+  const pledge = 5_000n * ONE;
+  const q = await read(state, ow, "quote", [fund3, sv.i128(pledge), sv.address(C.euro)]);
+  const principal = ((BigInt(q.max_principal) * LIVE_BORROW_BPS) / 10_000n / ONE) * ONE;
+  line(`Quote for ${fmt(pledge, 7, 0)} tSHARE`, `${fmt(q.price, Number(q.price_decimals), 4)} tEUR/share, haircut ${pct(q.haircut_bps)}, up to ${bold(`${fmt(q.max_principal)} tEUR`)}`);
+  const sharesBefore = await balance(C.shares3, borrower);
+  const opened = await tx("open_repo on the classic-asset share, in tEUR", "borrower", ow, "open_repo", [
+    sv.address(borrower),
+    sv.u64(state.ids.thirdOffer),
+    fund3,
+    sv.i128(pledge),
+    sv.i128(principal),
+    sv.u64(24 * 3600),
+  ]);
+  state.ids.thirdRepo = Number(opened.value);
+  saveState(state);
+  line("Borrower tSHARE balance", `${fmt(sharesBefore)} → ${bold(fmt(await balance(C.shares3, borrower)))} (pledged to the contract)`);
+
+  await tx("Issuer revokes the contract's authorization (native freeze)", "issuer3", C.shares3, "set_authorized", [sv.address(ow), sv.bool(false)]);
+  line("Contract authorized by the issuer", red(String(await read(state, C.shares3, "authorized", [sv.address(ow)]))));
+  const interest = BigInt(await read(state, ow, "repo_due", [sv.u64(state.ids.thirdRepo)]));
+  await tx("repurchase while the issuer blocks the shares", "borrower", ow, "repurchase", [sv.u64(state.ids.thirdRepo)]);
+  const pending = await read(state, ow, "pending_release", [sv.u64(state.ids.thirdRepo)]);
+  line("Debt settled", `${fmt(principal + interest, 7, 4)} tEUR repaid, of which interest ${fmt(interest, 7, 4)}; the lender is whole`);
+  line("Shares held back", pending ? `${fmt(pending.shares)} tSHARE owed to the borrower, recorded on chain (ReleaseDeferred)` : red("none recorded"));
+  const retried = await tx("release attempted while still blocked", "borrower", ow, "release", [sv.u64(state.ids.thirdRepo)]);
+  line("Delivery", retried.value === false ? "refused by the issuer's token; the record stays" : bold("delivered"));
+  await tx("Issuer authorizes the contract again", "issuer3", C.shares3, "set_authorized", [sv.address(ow), sv.bool(true)]);
+  const released = await tx("release: anyone retries the delivery", "borrower", ow, "release", [sv.u64(state.ids.thirdRepo)]);
+  line("Delivery", released.value === true ? bold("shares delivered to the borrower") : red("still refused"));
+  line("Borrower tSHARE balance", `${bold(fmt(await balance(C.shares3, borrower)))} (back to ${fmt(sharesBefore)})`);
+  delete state.ids.thirdRepo;
+  saveState(state);
+  console.log(dim("\n  A share token whose code is not ours, with the issuer's native controls: the freeze is handled, never bypassed; the exit never blocked."));
 }
 
 async function open() {
@@ -652,7 +739,7 @@ async function repair() {
 
 // ---------------------------------------------------------------------------
 
-const RUN = { board, open, guardrails, repurchase, seize, value, repair, second };
+const RUN = { board, open, guardrails, repurchase, seize, value, repair, second, third };
 
 async function main() {
   const list = STATUS ? ["board"] : (ONLY ?? SCENES);

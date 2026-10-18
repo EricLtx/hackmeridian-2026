@@ -26,9 +26,10 @@
     "sponsor": 1,
     "market": 2,
     "dual": 3,
-    "second": 4
+    "second": 4,
+    "third": 5
   },
-  "updatedAt": "2026-10-18T10:03:05.183Z",
+  "updatedAt": "2026-10-18T20:13:33.121Z",
   "funds": [
     {
       "symbol": "tMMF",
@@ -47,6 +48,16 @@
       "shares": "CCE42GVRYTFBVZY77KHMPNWVQDMTAUQHMPLUF6VR2GDBUIBFO5E2EY6J",
       "navFeed": "CC7YOEN6CJ5JSCU64MT7HMROVDW6CSUX5NA4ACIHAUM6DOWAJ6ZOSBBZ",
       "priceSource": "Direct"
+    },
+    {
+      "symbol": "tSHARE",
+      "name": "Test fund share as a classic asset (Stellar Asset Contract)",
+      "decimals": 7,
+      "navCurrency": "EUR",
+      "shares": "CAMKNCKFBPO4HHYW3KS4WEQTTKKLJMSHHGHNQ7VNW5JXEYDTZNFFPYY2",
+      "navFeed": "CAN7PFJEY3YKFXUT5647WG6TX6M5ASD4JK7D4SYPEU4SRGLPFE7V226F",
+      "priceSource": "Direct",
+      "tokenCode": "stellar-asset-contract"
     }
   ],
   "stablecoins": [

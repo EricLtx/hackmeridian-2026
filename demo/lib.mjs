@@ -31,7 +31,9 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(here, "..");
 export const STATE_DIR = path.join(here, ".state");
-export const STATE_FILE = path.join(STATE_DIR, "testnet.json");
+/** Name of the state file: `testnet` for the demo instance; `OPEN_WINDOW_STATE=<name>` points the tooling at a disposable instance (rehearsals), whose deployment facts stay out of `web/public/`. */
+export const STATE_NAME = process.env.OPEN_WINDOW_STATE ?? "testnet";
+export const STATE_FILE = path.join(STATE_DIR, `${STATE_NAME}.json`);
 export const WASM_DIR = path.join(ROOT, "target", "wasm32v1-none", "release");
 
 /**
@@ -127,7 +129,7 @@ const registry = new Map();
 
 /** Tells the error decoder which deployed contract is which. */
 export function registerContracts(contracts) {
-  const kinds = { openWindow: null, shares: "fund-token", navOracle: "nav-oracle", euro: "stellar-asset", shares2: "fund-token", navOracle2: "nav-oracle", euro2: "stellar-asset" };
+  const kinds = { openWindow: null, shares: "fund-token", navOracle: "nav-oracle", euro: "stellar-asset", shares2: "fund-token", navOracle2: "nav-oracle", euro2: "stellar-asset", shares3: "stellar-asset", navOracle3: "nav-oracle" };
   for (const [key, kind] of Object.entries(kinds)) {
     if (contracts?.[key]) registry.set(contracts[key], kind === null ? { kind: "open-window", table: ERRORS } : { kind, table: ERROR_TABLES[kind] });
   }
@@ -711,6 +713,10 @@ export function writeDeployment(state) {
     ...(state.contracts.shares2
       ? [{ symbol: "tEMMF", name: "Test euro money market fund share", decimals: 7, navCurrency: "EUR", shares: state.contracts.shares2, navFeed: state.contracts.navOracle2, priceSource: "Direct" }]
       : []),
+    // Third fund (`setup -- --third-fund`): a classic Stellar asset held through its Stellar Asset Contract, not a token this repository wrote.
+    ...(state.contracts.shares3
+      ? [{ symbol: "tSHARE", name: "Test fund share as a classic asset (Stellar Asset Contract)", decimals: 7, navCurrency: "EUR", shares: state.contracts.shares3, navFeed: state.contracts.navOracle3, priceSource: "Direct", tokenCode: "stellar-asset-contract" }]
+      : []),
   ];
   deployment.stablecoins = [
     { ...deployment.stablecoin, contract: state.contracts.euro },
@@ -718,8 +724,11 @@ export function writeDeployment(state) {
   ];
   if (state.ids.dualOffer !== undefined) deployment.offers.dual = state.ids.dualOffer;
   if (state.ids.secondOffer !== undefined) deployment.offers.second = state.ids.secondOffer;
-  const dir = path.join(ROOT, "web", "public");
+  if (state.ids.thirdOffer !== undefined) deployment.offers.third = state.ids.thirdOffer;
+  // A disposable instance (OPEN_WINDOW_STATE) never overwrites the facts the web interface serves.
+  const dir = STATE_NAME === "testnet" ? path.join(ROOT, "web", "public") : STATE_DIR;
+  const file = STATE_NAME === "testnet" ? "deployment.testnet.json" : `deployment-${STATE_NAME}.json`;
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "deployment.testnet.json"), `${JSON.stringify(deployment, null, 2)}\n`);
+  fs.writeFileSync(path.join(dir, file), `${JSON.stringify(deployment, null, 2)}\n`);
   return deployment;
 }
