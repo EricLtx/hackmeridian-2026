@@ -149,7 +149,7 @@ Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. 
 - The indexer anchored on a schedule and compared with an independent event source; `verify` run periodically.
 - The SFTR export checked with a reporting team; the master agreement and the DORA clauses signed.
 - The web interface completed by a real user with a standard wallet, with a position timeline, at phone width.
-- A deployment kit for an instance operator: named governor account, runbooks for incidents and upgrades (including the inventory of funds that a tightened admission rule would refuse), an off-chain instance register.
+- A deployment kit for an instance operator: runbooks for deployment, admission, daily operation and upgrades (including the inventory of funds that a tightened admission rule would refuse) and an off-chain instance register are in [operations.md](operations.md) with `npm run inventory` (18 October 2026); a setup that signs every governor step from an external account remains to do.
 - A third-party SEP-41 share admitted on testnet, then a real issuer's testnet share.
 
 **Could** (after the audit, as version 2 behind `migrate`)

@@ -38,6 +38,7 @@ npm run monitor -- --witness     # second instance elsewhere: alerts, never acts
 npm run keys -- --rehearse       # key ceremony: --plan builds the unsigned multisig setOptions transaction, --readback checks an account, --rehearse replays it on testnet
 npm run upgrade                  # governed upgrade: upload the built WASM, propose (governor + trustee), announce, wait, upgrade, migrate; --propose / --apply split it
 npm run setup -- --sentinel      # the guardian names the monitoring key as sentinel (rc4): it may only pause and cancel
+npm run inventory -- --json      # every admitted fund against the envelope and the admission rules; writes the off-chain instance register (docs/operations.md)
 ```
 
 `setup` records each completed step in the state file. When the network drops, rerun the same command: finished steps are skipped, and the steps that move funds check balances first, so nothing is paid or minted twice.

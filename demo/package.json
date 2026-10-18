@@ -13,9 +13,12 @@
     "measure": "node measure.mjs",
     "fxlog": "node fxlog.mjs",
     "keys": "node keys.mjs",
-    "upgrade": "node upgrade.mjs"
+    "upgrade": "node upgrade.mjs",
+    "inventory": "node inventory.mjs"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@stellar/stellar-sdk": "17.2.1"
   }

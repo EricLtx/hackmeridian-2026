@@ -242,6 +242,7 @@ npm run export -- --json --web      # feed web/public/history.json
 - [docs/security.md](docs/security.md): security baseline, threat model and invariants of the contract.
 - [docs/threat-model-stride.md](docs/threat-model-stride.md): STRIDE threat model and monitoring plan.
 - [docs/incident-procedure.md](docs/incident-procedure.md): incident procedure, roles, action per alert and the monitoring rehearsal.
+- [docs/operations.md](docs/operations.md): running an instance as its operator: roles and keys, deployment order, admission checklist, daily tasks, governed upgrades with the pre-upgrade inventory, the instance register.
 - [docs/audit-scope.md](docs/audit-scope.md): audit package: scope, reproducible build, trust model, invariants, reviews done, where to look hardest.
 - [docs/interface-reference.md](docs/interface-reference.md): interface reference: the long-form description of every entry point, type and error, kept out of the WASM.
 - [docs/stellar-platform.md](docs/stellar-platform.md): overview of the Stellar platform.
