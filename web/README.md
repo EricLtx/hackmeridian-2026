@@ -2,6 +2,8 @@
 
 A minimal interface for the Open Window contract on Stellar testnet: the market board (NAV, exchange rate, quote, offers, caps, pause state), borrowing, positions and repurchase, and lending. Plain JavaScript modules built with Vite; Freighter signs.
 
+A "How it works" card opens the page: one tab per party (holder of shares, lender, fund issuer) with what it needs, what it does and what it commits to, and the terms of the instance read from the chain (stablecoins, funds and haircuts, caps, interest rule, term range, time delay, pause state, contract version). Each position carries a timeline (opened, interest, term, closing, delivery), dated and linked to transactions when the indexer's export `public/history.json` is present. The layout works at phone width.
+
 The interface reads the deployment from `public/deployment.testnet.json` at runtime. The demo's `npm run setup` rewrites that file; no address is hard-coded in the code.
 
 `history.html` is the History page: every repo (lender of record, borrower, fund, shares, principal, rate, dates, state) and the latest events with a link to each transaction, read from `public/history.json`. That file is written by the indexer (`cd indexer && npm run export -- --json --web`) and is git-ignored; without it the page says so.

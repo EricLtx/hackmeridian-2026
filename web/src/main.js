@@ -28,6 +28,8 @@ import {
   sortOffers,
   withdrawalAmount,
 } from "./terms.js";
+import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
+import { eventsOfRepo, timelineOf } from "./timeline.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 
 const REFRESH_MS = 15_000;
@@ -56,6 +58,10 @@ const S = {
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
   releases: new Map(), // closed repo id -> shares the token refused to deliver
+  history: null, // the indexer's export (history.json) when the page can read it: events by repo, for the timelines
+  delay: null, // the contract's time delay, seconds
+  version: null, // contract version
+  guideRole: "borrower",
   eventsFrom: null,
   busy: false,
   refreshing: false,
@@ -164,6 +170,46 @@ const errorLine = (result, context) => {
   return `<span class="text-error">${esc(text)}</span> <code class="err">${esc(name)}</code>`;
 };
 
+/** The in-page guide: a tab per party, its steps and commitments, and the live terms of the instance. */
+function renderGuide() {
+  const tabs = $("guide-tabs");
+  const body = $("guide-body");
+  const terms = $("guide-terms");
+  if (!tabs || !body || !terms) return;
+  const b = S.board;
+  const config = b?.config.value;
+  const ctx = {
+    code: code(),
+    sym: sym(),
+    maxTermSecs: S.maxTerm || 7 * 24 * 3600,
+    delaySecs: S.delay ?? 48 * 3600,
+    haircutBps: config ? Number(config.haircut_bps) : null,
+  };
+  setHTML(
+    tabs,
+    ROLES.map(
+      (r) =>
+        `<button type="button" role="tab" class="tab" id="tab-${r}" aria-selected="${r === S.guideRole}" aria-controls="guide-body" data-role="${r}">${esc(ROLE_TITLES[r])}</button>`,
+    ).join(""),
+  );
+  const g = roleGuide(S.guideRole, ctx);
+  const list = (items) => `<ul class="guide-list">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`;
+  setHTML(
+    body,
+    `<p class="guide-intro">${esc(g.intro)}</p>
+     <div class="guide-grid">
+       <div><h3 class="sub">What you need</h3>${list(g.need)}</div>
+       <div><h3 class="sub">What you do</h3><ol class="guide-list guide-steps">${g.steps.map((i) => `<li>${esc(i)}</li>`).join("")}</ol></div>
+       <div><h3 class="sub">What you commit to, and what protects you</h3>${list(g.terms)}</div>
+     </div>`,
+  );
+  if (b) {
+    const rows = guideTerms({ dep: S.dep, board: b, maxTermSecs: ctx.maxTermSecs, delaySecs: ctx.delaySecs, version: S.version, paused: b.paused.value });
+    setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(note)}</span>` : ""}</dd></div>`).join(""));
+    $("guide-meta").textContent = `terms read from the chain ${S.dep.network === "testnet" ? "on testnet" : ""}`.trim();
+  }
+}
+
 function renderBoard() {
   const b = S.board;
   const config = b.config.value;
@@ -246,6 +292,7 @@ function renderBoard() {
   }
   setHTML($("tiles"), tiles.join(""));
   renderFunds(b.funds ?? []);
+  renderGuide();
 
   renderQuote(b.quote, S.quoteShares);
   renderOffers();
@@ -264,7 +311,7 @@ function renderFunds(funds) {
     const st = f.state.value;
     const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
     const lent = cfg && st ? `${formatAmount(BigInt(st.outstanding), SD(), "round")} of ${formatAmount(BigInt(cfg.max_outstanding), SD())} ${esc(code())}` : "—";
-    return `<tr><td>${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td>${esc(f.navCurrency)}</td><td>${source === "Cross" ? "exchange-rate leg" : source === "Direct" ? "none" : "—"}</td><td>${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td>${cfg ? `${Number(cfg.nav_max_age_secs) / 3600} h` : "—"}</td><td>${lent}</td></tr>`;
+    return `<tr><td data-label="Fund share">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="NAV in">${esc(f.navCurrency)}</td><td data-label="FX leg">${source === "Cross" ? "exchange-rate leg" : source === "Direct" ? "none" : "—"}</td><td data-label="Haircut">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="Max NAV age">${cfg ? `${Number(cfg.nav_max_age_secs) / 3600} h` : "—"}</td><td data-label="Lent">${lent}</td></tr>`;
   });
   setHTML(
     out,
@@ -775,6 +822,7 @@ function renderPositions() {
         <div><dt>Next hour of interest</dt><dd class="num">starts <span data-until="${step}" data-after="now"></span></dd></div>
         <div><dt>Term ends</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="passed: the lender may now keep the shares"></span></dd></div>
       </dl>
+      ${timelineMarkup(r)}
       ${short > 0n ? `<p class="text-error small">You hold ${esc(money(balance))}. You need ${esc(money(short, "ceil"))} more to repurchase.</p>` : ""}
       <div class="actions">
         <button type="button" class="btn btn-primary" data-write data-repurchase="${r.id}" ${short > 0n ? `data-blocked="1"` : ""}>Repurchase${
@@ -788,9 +836,9 @@ function renderPositions() {
     .slice(0, 10)
     .map(
       (r) =>
-        `<li><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
+        `<li><details class="tl-closed"><summary><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
           r.status === "Repurchased" ? "Repurchased" : "Shares kept by lender"
-        }</span> <span class="num">${esc(money(r.principal))}</span> ${openingLink(r.id)}${releaseNote(r.id)}</li>`,
+        }</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
     );
   setHTML(
     body,
@@ -959,6 +1007,7 @@ function renderLent() {
         <div><dt>Collateral</dt><dd class="num">${esc(shareAmount(r.shares))}</dd></div>
         <div><dt>Term ends</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="passed"></span></dd></div>
       </dl>
+      ${timelineMarkup(r)}
       <p class="muted small">${
         state.allowed
           ? "The borrower has not repurchased by the term. You may take the shares now; the borrower can still repurchase until you do."
@@ -974,9 +1023,9 @@ function renderLent() {
   });
   const history = closed.map(
     (r) =>
-      `<li><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
+      `<li><details class="tl-closed"><summary><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
         r.status === "Repurchased" ? "Repaid" : "Shares taken"
-      }</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</li>`,
+      }</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
   );
   setHTML(
     box,
@@ -985,6 +1034,31 @@ function renderLent() {
   );
   syncWriteButtons();
   tick();
+}
+
+/**
+ * The timeline of a repo: opened, interest, term, closing, delivery. Times and
+ * transactions of the closing steps come from the indexer's export when the
+ * page could load it; the chain alone gives the opening and the term.
+ */
+function timelineMarkup(repo) {
+  const steps = timelineOf(repo, {
+    now: now(),
+    opening: S.openings.get(repo.id) ?? null,
+    events: S.history ? eventsOfRepo(S.history.events, repo.id) : [],
+    pendingRelease: S.releases.get(repo.id) ?? null,
+  });
+  const items = steps.map((st) => {
+    const time =
+      st.at === null
+        ? ""
+        : st.state === "next"
+          ? `${esc(formatDateTime(st.at))}, <span data-until="${st.at}" data-after="now"></span>`
+          : esc(formatDateTime(st.at));
+    const tx = st.tx ? link(S.chain.explorerTx(st.tx), "transaction") : "";
+    return `<li class="tl-${st.state}"><div class="tl-head"><span class="tl-label">${esc(st.label)}</span>${time ? `<span class="tl-time">${time}</span>` : ""}${tx ? `<span class="small">${tx}</span>` : ""}</div><p class="tl-detail">${esc(st.detail)}</p></li>`;
+  });
+  return `<ol class="timeline" aria-label="Timeline of repo ${repo.id}">${items.join("")}</ol>`;
 }
 
 /** Held-back shares on a closed repo: a note, and a Release button for the beneficiary. */
@@ -1053,6 +1127,7 @@ async function refreshAll() {
   const updated = $("board-updated");
   try {
     await refreshBoard();
+    await loadHistory();
     await refreshWallet();
     updated.innerHTML = `Updated <span data-since="${now()}">just now</span>`;
     $("load-error").hidden = true;
@@ -1078,6 +1153,12 @@ function tick() {
 // ---------------------------------------------------------------------------
 
 function wire() {
+  $("guide-tabs")?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-role]");
+    if (!tab) return;
+    S.guideRole = tab.dataset.role;
+    renderGuide();
+  });
   document.addEventListener("click", async (event) => {
     const target = event.target.closest("button");
     if (!target) return;
@@ -1163,6 +1244,18 @@ function checkDeployment(dep) {
   return dep;
 }
 
+/** The indexer's export, when it sits next to the page: it dates and links the closing steps of the timelines. Optional. */
+async function loadHistory() {
+  try {
+    const response = await fetch("./history.json", { cache: "no-store" });
+    if (!response.ok) return;
+    const h = await response.json();
+    if (Array.isArray(h?.events)) S.history = { generatedAt: h.generatedAt, events: h.events };
+  } catch {
+    // No export: the timelines show what the chain alone tells.
+  }
+}
+
 async function start() {
   try {
     const response = await fetch("./deployment.testnet.json", { cache: "no-store" });
@@ -1175,6 +1268,12 @@ async function start() {
     return;
   }
   S.chain = new Chain(S.dep);
+  await loadHistory();
+  const ow = S.dep.contracts.openWindow;
+  const [delay, version] = await Promise.all([S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
+  S.delay = delay.value === undefined ? null : Number(delay.value);
+  S.version = version.value === undefined ? null : Number(version.value);
+  renderGuide();
   S.quoteShares = toUnits($("quote-shares").value, FD()) ?? 0n;
   for (const el of document.querySelectorAll("[data-fund-symbol]")) el.textContent = sym();
   for (const el of document.querySelectorAll("[data-stable-code]")) el.textContent = code();

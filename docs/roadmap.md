@@ -62,7 +62,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 | Item | State | Evidence |
 |---|---|---|
-| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; a manual run with Freighter is still to record |
+| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; since 18 October 2026 an in-page guide per party with the instance's terms read from the chain, a timeline per position fed by the indexer's export, and a phone-width layout; a manual run with Freighter by a real user is still to record |
 | Indexer | Done, first version (17 October 2026) | `indexer/` keeps every contract event in an append-only journal under a SHA-256 hash chain (`verify` recomputes it), behind a persistent cursor, and exports CSV, a per-repo register and the SFTR columns the chain can fill; the web interface's History page reads its export. Not yet consulted by the monitor; runs on the operator's machine |
 | Monitoring | Done | Thirteen detectors per admitted fund; nineteen drills replayed on testnet on 18 October 2026 against the upgraded instance, including a key-compromise, an issuer-freeze, a frozen-NAV and an unannounced-stablecoin drill, with the automatic actions signed by the sentinel key ([incident-procedure.md](incident-procedure.md)) |
 | Incident procedure | Done | [incident-procedure.md](incident-procedure.md) |
