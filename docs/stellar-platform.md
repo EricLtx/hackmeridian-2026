@@ -1,89 +1,89 @@
-# La plateforme Stellar en un coup d'œil
+# The Stellar platform at a glance
 
-Ces notes résument ce qu'on peut construire sur Stellar. Elles ont été rédigées à partir du skill officiel [`stellar-dev`](https://github.com/stellar/stellar-dev-skill) (v1.2.0) et de [developers.stellar.org](https://developers.stellar.org). Dans Claude Code, chaque section renvoie au skill qui la détaille : `/stellar-dev:<skill>`.
+These notes summarize what can be built on Stellar. They were written from the official [`stellar-dev`](https://github.com/stellar/stellar-dev-skill) skill (v1.2.0) and from [developers.stellar.org](https://developers.stellar.org). In Claude Code, each section points to the skill that covers it in detail: `/stellar-dev:<skill>`.
 
-## À quoi sert Stellar
+## What Stellar is for
 
-Stellar est un réseau de paiement ouvert, rapide (environ 5 s par ledger) et peu coûteux (une fraction de centime par transaction). Son domaine, ce sont les **paiements, les stablecoins et les actifs réels tokenisés**, pas la spéculation. Parmi ses utilisateurs : Circle (USDC et EURC natifs), MoneyGram (cash-in / cash-out), Société Générale-FORGE (stablecoin EURCV), et des anchors fiat dans de nombreux pays.
+Stellar is an open payment network, fast (about 5 s per ledger) and inexpensive (a fraction of a cent per transaction). Its domain is **payments, stablecoins and tokenized real-world assets**, not speculation. Its users include Circle (native USDC and EURC), MoneyGram (cash-in / cash-out), Société Générale-FORGE (EURCV stablecoin), and fiat anchors in many countries.
 
-## Les briques
+## The building blocks
 
-### 1. Smart contracts (ex-« Soroban ») — `/stellar-dev:smart-contracts`
+### 1. Smart contracts (formerly "Soroban"): `/stellar-dev:smart-contracts`
 
-- Écrits en **Rust** (`#![no_std]`, crate `soroban-sdk`) et compilés en **WebAssembly** pour la cible `wasm32v1-none`.
-- Taille maximale du binaire : 128 Ko. Pas d'I/O, pas de réseau : tout passe par `Env`.
-- **Stockage loué** : chaque entrée a un TTL. Trois types existent : `instance`, `persistent` et `temporary`. Sans `extend_ttl`, les données finissent archivées.
-- **Autorisation native** : `address.require_auth()` fonctionne aussi bien avec des comptes classiques qu'avec des smart accounts.
-- Constructeur atomique `__constructor` (CAP-58), événements `#[contractevent]`, erreurs typées `#[contracterror]`.
-- La réentrance cross-contract est bloquée par l'hôte, et `delegatecall` n'existe pas.
-- La version majeure de `soroban-sdk` suit celle du protocole. Ce repo utilise **SDK 28 ↔ protocole 28**.
+- Written in **Rust** (`#![no_std]`, `soroban-sdk` crate) and compiled to **WebAssembly** for the `wasm32v1-none` target.
+- Maximum binary size: 128 KB. No I/O, no network: everything goes through `Env`.
+- **Rented storage**: every entry has a TTL. Three types exist: `instance`, `persistent` and `temporary`. Without `extend_ttl`, data ends up archived.
+- **Native authorization**: `address.require_auth()` works with classic accounts as well as with smart accounts.
+- Atomic `__constructor` constructor (CAP-58), `#[contractevent]` events, `#[contracterror]` typed errors.
+- Cross-contract reentrancy is blocked by the host, and `delegatecall` does not exist.
+- The major version of `soroban-sdk` follows the protocol's. This repo uses **SDK 28 ↔ protocol 28**.
 
-### 2. Assets et stablecoins — `/stellar-dev:assets`
+### 2. Assets and stablecoins: `/stellar-dev:assets`
 
-Les tokens existent sous deux formes :
+Tokens come in two forms:
 
-| | Stellar Asset (classique) | Token contrat (SEP-41) |
+| | Stellar Asset (classic) | Contract token (SEP-41) |
 |---|---|---|
-| Création | Une opération, sans code | Contrat Rust |
-| Performance et coût | Optimal | Plus cher |
-| Logique métier | Flags : `auth_required`, `clawback`… | Libre |
-| Accès depuis un contrat | Via le **SAC** (Stellar Asset Contract) | Natif |
+| Creation | One operation, no code | Rust contract |
+| Performance and cost | Optimal | More expensive |
+| Business logic | Flags: `auth_required`, `clawback`... | Free-form |
+| Access from a contract | Through the **SAC** (Stellar Asset Contract) | Native |
 
-Il vaut mieux partir d'un Stellar Asset et passer par le **SAC** pour l'utiliser depuis un contrat. Un token custom ne se justifie que si la logique l'exige. Côté utilisateur, détenir un asset demande une **trustline**.
+It is better to start from a Stellar Asset and go through the **SAC** to use it from a contract. A custom token is only justified when the logic requires it. On the user side, holding an asset requires a **trustline**.
 
-### 3. Lire la chaîne — `/stellar-dev:data`
+### 3. Reading the chain: `/stellar-dev:data`
 
-| API | Usage | Testnet |
+| API | Use | Testnet |
 |---|---|---|
-| **Stellar RPC** (recommandé) | Contrats, simulation, événements, envoi de transactions | `https://soroban-testnet.stellar.org` |
-| Horizon (legacy) | Historique des comptes, paiements, carnets d'ordres | `https://horizon-testnet.stellar.org` |
-| Friendbot | Alimenter un compte testnet en XLM | `https://friendbot.stellar.org` |
+| **Stellar RPC** (recommended) | Contracts, simulation, events, transaction submission | `https://soroban-testnet.stellar.org` |
+| Horizon (legacy) | Account history, payments, order books | `https://horizon-testnet.stellar.org` |
+| Friendbot | Fund a testnet account with XLM | `https://friendbot.stellar.org` |
 
-Pour l'analytique historique : Hubble (BigQuery), Galexie, ou des indexeurs tiers.
+For historical analytics: Hubble (BigQuery), Galexie, or third-party indexers.
 
-### 4. Frontend et wallets — `/stellar-dev:dapp`
+### 4. Frontend and wallets: `/stellar-dev:dapp`
 
-- SDK JS `@stellar/stellar-sdk`. `contract.Client` génère un client typé à partir d'un contrat déployé, ce qui revient à l'équivalent de `stellar contract bindings typescript`.
-- Wallets : **Freighter** (extension navigateur), **Stellar Wallets Kit** (multi-wallet), **smart accounts avec passkeys** (connexion par empreinte digitale, sans seed phrase).
+- JS SDK `@stellar/stellar-sdk`. `contract.Client` generates a typed client from a deployed contract, which amounts to the equivalent of `stellar contract bindings typescript`.
+- Wallets: **Freighter** (browser extension), **Stellar Wallets Kit** (multi-wallet), **smart accounts with passkeys** (fingerprint login, no seed phrase).
 
-### 5. Standards (SEP / CAP) — `/stellar-dev:standards`
+### 5. Standards (SEP / CAP): `/stellar-dev:standards`
 
-| Besoin | Standard |
+| Need | Standard |
 |---|---|
-| Token fongible | SEP-41 (+ SEP-57 si régulé) |
-| Authentification web avec un wallet | SEP-10 |
-| Dépôt / retrait fiat via un anchor | SEP-24 (interactif), SEP-6 (API) |
+| Fungible token | SEP-41 (+ SEP-57 if regulated) |
+| Web authentication with a wallet | SEP-10 |
+| Fiat deposit / withdrawal through an anchor | SEP-24 (interactive), SEP-6 (API) |
 | KYC | SEP-12 |
-| Corridors de paiement transfrontaliers | SEP-31 |
-| Contrats upgradables | SEP-49 + CAP-58 (constructeurs) |
+| Cross-border payment corridors | SEP-31 |
+| Upgradable contracts | SEP-49 + CAP-58 (constructors) |
 | Passkeys / smart wallets | CAP-51 (secp256r1) |
 
-### 6. Paiements agentiques — `/stellar-dev:agentic-payments`
+### 6. Agentic payments: `/stellar-dev:agentic-payments`
 
-Ce sont des paiements d'IA à API, en USDC :
-- **x402** (HTTP 402 Payment Required) : une API payante à la requête, sans que le client ait besoin de XLM, les frais étant sponsorisés par un facilitateur. C'est l'option la plus simple pour démarrer.
-- **MPP** (Machine Payments Protocol) : en mode *Charge*, un paiement par requête ; en mode *Session*, des engagements off-chain via un canal de paiement, pour les agents qui envoient beaucoup de requêtes.
+These are AI-to-API payments, in USDC:
+- **x402** (HTTP 402 Payment Required): a pay-per-request API, without the client needing XLM, since the fees are sponsored by a facilitator. This is the simplest option to start with.
+- **MPP** (Machine Payments Protocol): in *Charge* mode, one payment per request; in *Session* mode, off-chain commitments through a payment channel, for agents that send many requests.
 
-### 7. Aller plus loin
+### 7. Going further
 
-- **ZK** — `/stellar-dev:zk-proofs` : vérification BLS12-381, Groth16, UltraHonk (Circom, Noir, RISC Zero).
-- **Cross-chain** — `/stellar-dev:cross-chain` : CCTP (USDC natif), Axelar, LayerZero.
+- **ZK** (`/stellar-dev:zk-proofs`): BLS12-381 verification, Groth16, UltraHonk (Circom, Noir, RISC Zero).
+- **Cross-chain** (`/stellar-dev:cross-chain`): CCTP (native USDC), Axelar, LayerZero.
 
-## Outils web
+## Web tools
 
-- [Stellar Lab](https://lab.stellar.org) : construire et signer des transactions, explorer les contrats, consulter les limites réseau.
-- [stellar.expert](https://stellar.expert/explorer/testnet) : explorateur de blocs (testnet et mainnet).
-- [soroban-examples](https://github.com/stellar/soroban-examples) : contrats de référence (token, escrow, atomic swap, timelock, liquidity pool…).
-- [OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stellar-contracts) : bibliothèques auditées (tokens, contrôle d'accès, pausable, upgradeable).
-- [llms.txt](https://developers.stellar.org/llms.txt) : la documentation dans un format pensé pour les LLM.
+- [Stellar Lab](https://lab.stellar.org): build and sign transactions, explore contracts, check network limits.
+- [stellar.expert](https://stellar.expert/explorer/testnet): block explorer (testnet and mainnet).
+- [soroban-examples](https://github.com/stellar/soroban-examples): reference contracts (token, escrow, atomic swap, timelock, liquidity pool...).
+- [OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stellar-contracts): audited libraries (tokens, access control, pausable, upgradeable).
+- [llms.txt](https://developers.stellar.org/llms.txt): the documentation in a format designed for LLMs.
 
-## Pistes d'idées par brique
+## Project ideas by building block
 
-| Brique | Exemples de projets |
+| Building block | Project examples |
 |---|---|
-| Stablecoins + anchors | Transferts de fonds entre étudiants Erasmus, paie de freelances en EURC |
-| SAC + contrat | Escrow pour des missions freelance, cagnotte d'asso avec règles de déblocage |
-| Passkeys | Wallet sans seed phrase pour primo-utilisateurs |
-| x402 / MPP | API payante consommée par des agents IA, micro-paiement par requête |
-| Assets régulés | Tokenisation de tickets d'événement, de bons ou d'actifs réels |
-| ZK | Preuve d'âge ou de diplôme sans révéler la donnée |
+| Stablecoins + anchors | Money transfers between Erasmus students, freelancer payroll in EURC |
+| SAC + contract | Escrow for freelance assignments, nonprofit fundraising pool with release rules |
+| Passkeys | Seed-phrase-free wallet for first-time users |
+| x402 / MPP | Paid API consumed by AI agents, per-request micropayment |
+| Regulated assets | Tokenization of event tickets, vouchers or real-world assets |
+| ZK | Proof of age or degree without revealing the data |

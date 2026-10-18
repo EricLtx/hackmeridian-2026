@@ -1,0 +1,278 @@
+# Security baseline of the Open Window contract (crate `night-window`)
+
+Date: 6 October 2026, revised on 13, 15 and 18 October 2026 · Status: **decisions S1 to S29 and DORA D1, D2 taken; version 4 (rc4) implemented, tested and reviewed internally, frozen at the tag `audit-v4-rc4`; external audit to come** · Business reference: the internal framing study, kept outside the public repository · STRIDE threat model: [threat-model-stride.md](threat-model-stride.md)
+
+This document sets out what is already in place in the code and the toolchain, what the specification will have to settle, and the review rules that apply to every change of the contract. It follows the review grid of the official `stellar-dev` skill (file `security.md`), applied to the case of a repo.
+
+---
+
+## 1. What must be protected
+
+| Asset | Where it lives | Who can lose it |
+|---|---|---|
+| Stablecoins deposited in offers | Contract balance, broken down by `Offer(id)` entry | Lenders |
+| Fund shares locked in repos | Contract balance, broken down by `Repo(id)` entry | Borrowers |
+| Registry of accepted funds (oracle, haircut) | `Fund(address)` entries | Everyone: a bad oracle or a zero haircut allows borrowing more than the value of the shares |
+| Administration key | `Admin` entry (instance storage) | Everyone: the admin changes the registry and the code |
+| Contract code | WASM referenced by the instance | Everyone: a malicious upgrade empties the contract |
+
+The contract is **value-bearing** as soon as an offer is deposited. The requirements of section 6 (pause, admin governance) apply before any real deposit, not only before mainnet.
+
+## 2. Threat model
+
+### 2.1 What the attacker controls
+
+Standard platform assumptions, taken as they are:
+
+- every argument passed to the contract's functions;
+- the order and timing of transactions (it sees an offer arrive and can take it or front-run it);
+- every account except those whose signature it does not hold;
+- the deployment of contracts that mimic an interface (a fake SEP-40 oracle, a fake SEP-41 token);
+- the shape of the on-chain state it can legally create: number of entries, and even the TTL of **our** entries, which it can extend.
+
+### 2.2 Actors and trust granted
+
+| Actor | Trust | Consequence for the contract |
+|---|---|---|
+| Borrower | None | Every function it calls checks its `require_auth` and its bounds |
+| Lender | None | Same; an offer can only be withdrawn by its author and only for the part not lent |
+| Administrator | High, to be framed | It chooses the oracles, the haircuts and the code. Section 6 proposes to frame it (multisig, time delay) |
+| Fund issuer | External, imposed | The shares are permissioned tokens: a permissioned Soroban token or a classic asset with authorization, depending on the issuer. The issuer can freeze or claw back a balance, including the contract's |
+| SEP-40 oracle | Allowlisted by the admin | Its price is external data: freshness and bounds to check at every read |
+| Soroban host | Full | Provides auth, blocks reentrancy, meters resources |
+
+### 2.3 What the platform guarantees
+
+- No `delegatecall`: no foreign code runs in the contract's context.
+- No reentrancy: the host blocks reentrant calls, direct or indirect. External calls remain failure and budget boundaries; the order of writes still needs care.
+- Protection against authorization replay: nonces and expirations are handled by the host.
+- Authorization is **explicit and optional**: a forgotten `require_auth` is the flaw to look for first.
+
+## 3. Contract invariants
+
+These invariants are the basis of the property tests and of the review. They are written here in plain language; the specification will formalize them.
+
+| # | Invariant | Status |
+|---|---|---|
+| I1 | The contract's stablecoin balance is at least equal to the sum of the available amounts of all offers; the outstanding of each currency equals the sum of the open principals | **In place**, checked by `check_invariants` after 300 random operations |
+| I2 | Every share held belongs to exactly one open repo or to one deferred release; the contract's share balance for a fund equals the sum of the shares of the open repos and of the pending releases | **In place**, tests and reconciliation detector of the monitoring |
+| I3 | At opening, principal ≤ value of the shares × (1 − haircut), with a non-stale price | **In place**, `open_lends_exactly_the_ceiling_and_not_one_unit_more` |
+| I4 | Before maturity, only the borrower can close the repo (repurchase). After maturity, repurchase remains possible as long as the seizure has not taken place, and only the lender can seize | **In place**, intruder tests and seizure-before-maturity tests |
+| I5 | A repo changes state exactly once: `Open` → `Repurchased` or `Open` → `Defaulted`. No going back | **In place**, `RepoNotOpen` on any second transition |
+| I6 | No function iterates over the set of offers or repos; every call touches a bounded number of entries | **In place by construction**: individual `Offer(u64)` and `Repo(u64)` keys, no global index |
+| I7 | Only the governor changes the registry, the envelope, the term ceiling, the governor and the code; a fund's steward only changes its limits, its lenders, its freeze and the reference downward | **In place**: `require_governor` and the steward role are loaded from storage, never from an argument |
+| I8 | Error codes and exported type variants are never renumbered or reshaped; we append | **In place** as a rule (comment in `lib.rs`, AGENTS.md) |
+| I9 | A repo's terms (rate, maturity, applied haircut) are frozen at opening; removing a fund from the registry or changing its haircut does not affect open repos | **In place**, `terms_are_frozen_at_opening` |
+
+## 4. Vulnerability classes applied to Open Window
+
+| Class | Risk for this contract | Response |
+|---|---|---|
+| 1. Missing authorization | Withdrawal of an offer by a third party, seizure by a non-lender, oracle change by a non-admin | **In place**: role loaded from storage for every privileged function; `lender` on `create_offer` and `withdraw_offer`, `borrower` on `open_repo`, borrower and lender loaded from `Repo` in `repurchase` and `seize`; one intruder test per function |
+| 2. Authorization replay through an intermediary | `open_repo` will make a `transfer` of shares on behalf of the borrower. Without the borrower's `require_auth` **in `open_repo` itself**, anyone can consume a pre-signed authorization | Rule: every layer that exercises an address's authority re-authenticates it. Mandatory test with targeted `mock_auths` and check of the `env.auths()` tree |
+| 3. Re-initialization | Capture of the admin by a second `initialize` | **Ruled out**: `__constructor` constructor, no `initialize` function |
+| 4. Arbitrary contract call | Fake oracle, fake share token, exotic stablecoin | Funds and oracles **allowlisted** by the admin (registry). Stablecoins of offers: to be allowlisted too (section 6) |
+| 5. Arithmetic overflow | Interest computation (`principal × rate × term`), price × shares conversion with decimals | Lint `clippy::arithmetic_side_effects` set to `deny`: every operation must go through `checked_*` or `saturating_*` and return a typed error. `overflow-checks = true` in release **and** in test. `i128` amounts: refuse `≤ 0` on input |
+| 6. Key collision | An offer overwritten by a repo | **Ruled out**: typed `DataKey` enumeration; unique type names in the crate |
+| 7. Check-then-act race | The lender withdraws its offer between the simulation and the execution of an `open_repo`; price that moves between two ledgers | Checks and writes in the same invocation; the borrower passes bounds (requested `principal`, term) and the contract refuses rather than adjusting silently |
+| 8. TTL and archiving | An archived repo blocks repurchase or seizure; a TTL used as a maturity | The maturity is **stored in the value** (`Repo.maturity`) and compared with `ledger().timestamp()`, never derived from the TTL. TTL of `Fund`, `Offer`, `Repo` entries extended at every write; instance TTL extended on the admin paths |
+| 9. Trust in an external value | Stale price, zero or aberrant price, oracle returning `None` | **In place**: freshness against the ledger clock, future timestamp refused, model-based corridor, FX band, backup feed that must agree; typed refusal rather than a default price over the weekend |
+| 10. Resource exhaustion | Accepted-fund list of an offer too long; iteration over positions | **In place**: I6; at most eight funds per offer (S10); at most sixteen backup feeds and eight pending caps; 200-repo test at constant cost |
+| 11. Custom accounts | Not applicable: the contract does not implement `__check_auth` | — |
+
+### "Token consumer" review, specific to fund shares
+
+| Point | Response |
+|---|---|
+| Accepted tokens | Allowlisted: shares through the registry; stablecoins to be allowlisted (section 6) |
+| Decimals | To be queried and stored at fund registration (`decimals()` of the token and of the oracle); never assume 7 |
+| Amount received after `transfer` | For permissioned tokens, check the balance before and after the transfer in `open_repo` and `create_offer` rather than trusting the requested amount |
+| SAC and permissioned-token specifics | **The risk specific to this project**: an issuer that freezes the contract's balance, removes a beneficiary from its allowlist or claws back the shares blocked the repurchase; a lender not authorized to hold the shares made the seizure fail. **Handled in version 3**: lenders are approved by the steward (S8); if the token refuses the transfer at repurchase or seizure (freeze, allowlist removal, clawback, deauthorization by the asset contract), the debt settles and the shares are delivered as soon as the issuer allows it (S9). Tested with the allowlisted token and with a revocable asset contract |
+| `transfer_from` flow | Not planned: transfers are made with `transfer` with the authorization of the address concerned in the same transaction |
+| Standard events | Tokens emit their own; the contract will emit its own lifecycle events (offer created, repo opened, repurchased, seized, withdrawal) |
+
+## 5. Controls already in place in the code
+
+Status as of 14 October 2026, full lifecycle implemented.
+
+- **Initialization.** Atomic constructor with the governor, who is also the first guardian; no initialization window.
+- **Roles.** Every privileged function loads its role from storage and calls `require_auth` on it: governor (registry, risk envelope, currency caps, upgrade, unpause), guardian (pause of entries, cancellation of proposals, removal of a backup feed, handing over its role), steward of each fund (approved lenders, settings inside the envelope, fund freeze, lowering of the reference). Two-step governor transfer. Fund admission signed by the governor and the steward in the same call.
+- **Authority of the parties.** `require_auth` on the lender in `create_offer` and `withdraw_offer`, on the borrower in `open_repo`; in `repurchase` and `seize`, the address is loaded from the stored repo, never taken as an argument.
+- **Prices.** Oracles read only from the registry; freshness enforced and future timestamps refused; model-based corridor (S2); cross price with its own FX band and FX haircut; reference that never falls and only rises at the pace of the model.
+- **Bounds.** Haircuts strictly below 100 % (`Bps` type); risk envelope bounding every steward setting; caps per repo, per fund and per currency; term from one hour to 30 days; at most eight funds per offer.
+- **Transfers.** Every token inflow is checked by the balance before and after (`TransferMismatch` otherwise).
+- **Pause.** Only `create_offer` and `open_repo` consult it; `repurchase`, `withdraw_offer` and `seize` always remain available.
+- **Storage.** Typed keys, one entry per fund, offer and repo; TTL extended at every write (threshold 30 days, extension to 120 days); maturities as timestamps.
+- **Errors and events.** 39 typed errors (34 is reserved), no `unwrap` or `panic!` (`deny` lints); one event per state change.
+- **Tests.** 145 tests for the contract: intruder refused on every privileged function, `env.auths()` trees checked, events compared in XDR, every error path, invariants checked after 300 random operations, constant footprint of `open_repo` (16 entries read, 9 written; 18 read with a backup feed), full cycle with a real allowlisted token and a real price feed.
+
+## 6. Decisions taken at framing (13 October 2026)
+
+Each decision below was taken while refining the framing, on the basis of verified facts: code of regulated issuers' contracts already deployed on Stellar, network documentation, public incidents, DeFi security standards published by the SDF on 20 July 2026, ESMA call for evidence of 9 October 2026. The specification formalizes them; every point must have a test.
+
+| # | Subject | Decision |
+|---|---|---|
+| S1 | Price freshness | The price read must carry a `timestamp` at most N hours old; N is a registry parameter, per fund, set to span a weekend if the feed does not publish on Saturday. Absent or stale price: refusal (`Error::NoPrice`, new error `StalePrice`), never a silent adjustment. **Version 3**: one backup feed per fund, admitted with two keys after the delay, replaces a stale or failing primary feed; when both are fresh, they must agree within `max_divergence_bps` (at most the corridor floor), otherwise `PriceDivergence`. A fresh but invalid backup makes the computation fail (refusal by default), a stale backup is ignored; its maximum age is capped by that of the fund's NAV |
+| S2 | Price bounds | **Model-based corridor**, not a relative deviation from the previous price. An accumulating fund share follows a predictable trajectory: the NAV read must lie between `reference × (1 − floor)` and `reference × (1 + floor + max_yield × term / year)`. The reference does not follow the oracle: it never falls and rises at most along the model (`model_path`), anyone being able to advance it; the steward can only lower it. A faulty feed therefore cannot make it drift, even by publishing at every ledger (finding H1 of the review of 14 October 2026, dedicated test). The exchange rate of a cross price has its own band around a reference fixed at the two-key admission. The YieldBlox incident of 22 February 2026 ($10.2M) bypassed a relative-deviation check because the two windows compared were already manipulated |
+| S3 | Interest and rounding | `principal × rate_bps × term / (10,000 × 365 × 86,400)` in checked `i128`, rounded in the lender's favor. **Amended on 14 October 2026**: the term counts per started hour, one hour at least, and interest keeps running after maturity until repurchase or seizure (decision Q2: lateness is not free). The started hour keeps the amount signed by the borrower stable between the simulation and the execution of its transaction. Principal and interest flow back into the offer, where the lender withdraws them: no transfer to a lender's address on the borrower's exit path (finding H2) |
+| S4 | Borrowing ceiling | `shares × price × (10,000 − haircut) / (10^oracle_decimals × 10,000)`, decimals of the share token and of the stablecoin taken into account, rounded down |
+| S5 | Accepted stablecoins | Registry kept by the admin, as for funds. **MiCA-compliant allowlist by construction** for any European use: EURC, EURCV, EURAU, USDC. USDT0 and PYUSD excluded: ESMA's opinion of 8 October 2026 expects national authorities to obtain from MiCA providers the end of services on non-compliant stablecoins within three months, that is around 8 January 2027; it goes through national authorities and is not directly binding (corrected on 15 October 2026) |
+| S6 | Emergency pause | `pause` by the guardian or the governor, `unpause` by the governor alone. The pause blocks `create_offer` and `open_repo`, **never** `repurchase`, `withdraw_offer` or `seize`: we stop entries, not exits. A single signer is enough to pause; the power is narrowly delimited |
+| S7 | Admin governance | Admin held by a native Stellar multisignature account with thresholds, with at least one signer outside the maintainer (**in place on testnet**, 2 of 2, on 15 October 2026; a single key is refused by the network). **Version 3: time delay built into the contract**, rather than an external TimelockController. Upgrade, replacement of a fund, backup feed, re-anchor of a reference, new guardian, increase of the term ceiling, loosening of the envelope, of a fund's limits or of a currency cap: proposal, delay (48 hours by default, settable before the first admission then only upward), application by anyone within the following seven days, cancellation by the guardian (and the steward for what concerns its fund). Every tightening is immediate and erases the pending loosening; a change of governor erases its proposals. The guardian can hand over its role at any time; the governor can replace it alone only after 30 days. The pause and `remove_fund` remain immediate. Two-step admin transfer, **in place**: `set_admin` proposes, `accept_admin` requires the successor's signature. Roles **in place**: governor, guardian (pause of entries only), one steward per fund (the issuer), who approves lenders and tunes its fund inside the risk envelope; the admission of a fund requires the governor and the steward, and a replacement also requires the steward in place. **Audit candidate rc2**: an optional trusted third party (*trustee*), fixed before the first admission and independent of all roles (checked in both directions), co-signs every upgrade and every forced guardian change and can veto them, as it can the governor transfer; it replaces only itself, with the successor's agreement, and a hand-over erases what it had co-signed; a lost trustee key forbids any upgrade, by design. Lender approvals carry the steward that granted them: after a steward change, new offers and loans wait for a new approval, open positions remain deliverable (S8). The replacement of a steward's backup key waits for the delay; the governor can cancel it, hence block it, never choose it |
+| S8 | Seized shares | **Lenders are necessarily holders authorized by the issuer**: the steward approves them fund by fund, the approval is re-checked at every opening, and the seizure goes to the lender or to another approved address. No presentation for redemption by the contract is needed |
+| S9 | Freeze or clawback by the issuer during a repo | The debt remains due. **Version 3**: if the share token refuses the transfer at repurchase or seizure (freeze of the contract, allowlist removal, clawback), the debt settles anyway (repayment into the offer, outstanding released, interest stopped) and the shares owed are recorded in the beneficiary's name (`PendingRelease`). Anyone can retry the delivery (`release`) as soon as the issuer allows it; the beneficiary can redirect it. The shares can only go to the recorded beneficiary, once. Replayed on testnet on 15 October 2026 |
+| S10 | Resource bounds | At most 8 funds per offer; a single share transfer and a single stablecoin transfer per operation; no loop over the set of offers or repos (I6) |
+| S11 | Minimum term | 1 hour |
+| S12 | Identifiers | Monotonic `NextOfferId` and `NextRepoId` counters in `u64`, never reused |
+| S13 | Events | One event per state transition, identifiers and addresses as topics, for audit, indexing and reconciliation on the issuer's side |
+| S14 | Schema migration | Stored schema version; idempotent `migrate` function reserved to the admin; data migration mechanism of SDK 28 |
+| S15 | End of upgradability | The contract remains upgradable behind the time delay and published roles. Commitment: give up upgrades after the pilot if an issuer asks for it. The delay has been built into the contract since version 3. Since rc2, the renunciation is obtained through the *trustee*: named to the issuer or to a third party, no upgrade passes without its signature, and a deliberately destroyed trustee key freezes the code for good. An explicit renunciation function remains possible by upgrading to code without `upgrade`, if an issuer asks for it |
+| S16 | First-loss buffer | Reserve of about 5 % of the offers deposited, in line with the benchmark of the SDF DeFi standards, built before any real deposit on the main network |
+| S17 | Monitoring plan | Written before any real deposit, derived from the threat model: triggers on the contract's events, on price deviation and on balances; alert within minutes; automatic pause possible on alert. Required by tranche 2 of the community fund |
+| S18 | Launch caps | Per repo, per fund and per currency (no all-currency cap in the code), derived from the maximum-loss scenarios (6.1). The total cap is aligned with the threshold of the Audit Bank's first free follow-up audit, $10M of locked value |
+| S19 | Designated offer | An offer can be marked "sponsor" by the steward of a fund it accepts; the mark is indicative, the interface shows it first, with no on-chain matching (invariant I6). It follows the same rules as any offer. No exit privilege |
+
+| S20 | Rent of the contract code | Operations extend the contract instance, never the code entry: rent grows with size, and extending a 75 KB code to 120 days cost about 530 XLM on testnet on 14 October 2026, beyond the maximum fee of a transaction. The user who crossed the threshold would have paid that rent. The operator now extends the code in slices of 30 days at most (TTL detector of the monitoring); test `operations_extend_the_instance_but_not_the_code` |
+| S21 | Re-anchor of the price reference | The NAV and FX reference leaves the model trajectory only through two paths signed with two keys: the admission of a fund and the re-anchor (`propose_reanchor`), which installs the values the two signers named (`expected_nav`, `expected_fx`), checked against the feeds at the proposal, bound to those feeds, and applied after the delay only if the NAV still follows the model since the proposal. A fund replacement or a re-admission keep the reference; a new feed must read inside the corridor in place. Nobody chooses the moment of a re-anchor at the day's price |
+| S22 | FX band and FX haircut | The FX band of a cross-priced fund (`fx.band_bps`, around the admission reference) cannot exceed its FX haircut (`fx.haircut_bps`): a rate the band admits remains covered by the haircut. Without this rule, a false FX feed at +4.9 % passed a 5 % band while the minimum haircut is 1.5 % (economic model of 17 October 2026, I16). Refusal at admission and at replacement, `FxBandExceedsHaircut` (48). Operational consequence: an EUR/USD drift beyond the haircut since admission requires a two-key re-anchor (S21). The rule is also checked when limits are set (`set_fund_limits`): a fund admitted before it with a band wider than its haircut must first be replaced (two-key proposal, delay), which the rc4 upgrade of the testnet instance showed on 18 October 2026 |
+| S23 | Sole lender mode | An instance can fix, once, before the first admission and the first offer, the only address allowed to create offers (`set_sole_lender`); the choice is irrevocable, checked at every `create_offer` without an extra entry, and held by an account with rotating signers, never a bare key. Errors `NotSoleLender` (41), `SoleLenderFixed` (44) |
+| S24 | The steward never lends | A fund's steward, and its last installed steward, cannot be attested, approved, lender of an offer listing that fund, recipient of a seizure or of a redirection; an approved lender cannot become steward or steward backup (MMF Regulation, Article 35: no external support). Error `StewardCannotLend` (40) |
+| S25 | Co-signed attestation before approval | An approval requires an attestation signed by the lender and by the steward in place (`attest_lender`), which records only the hash of an off-chain declaration; revocation erases the attestation; the approval carries the address of the steward that granted it, and new offers and loans require the approval of the steward in place, open positions remaining deliverable (S8). Error `AttestationMissing` (42) |
+| S26 | Role backups and recovery | The guardian hands its role over only to a backup registered by the governor and itself (`set_guardian_backup`, `hand_over_guardian`); the governor hand-over waits for the delay and can be vetoed; a lost steward key is replaced only by the backup the steward named, after 30 days, on a proposal by the governor and a distinct guardian, any action by the steward cancelling the procedure; a generation counter invalidates every proposal signed by replaced keys. **rc4**: a *sentinel*, an automated key named by the guardian (`set_sentinel`), can only pause and cancel proposals, never lift the pause, veto or hand over a role; the guardian or the governor removes it (`clear_sentinel`). Errors 43, 45, `SentinelNotIndependent` (49) |
+| S27 | Risk envelope | The governor sets bounds (minimum haircuts, corridor floor, yield, ages, FX band) that no fund setting may cross (`RiskEnvelope`, `set_envelope`); the default values are those of `default_envelope`; a tightening is immediate, a loosening waits for the delay; configurations already admitted are not re-checked. Error `OutsideEnvelope` (26) |
+| S28 | Trusted third party (*trustee*) | An optional trustee is named once, before the first admission, by the governor and by itself; it must be independent of all roles, checked in both directions; its signature is required for every upgrade proposal, every forced guardian change and, since rc4, the schema migration; it can cancel these proposals as well as the governor hand-over; it replaces only itself, with its successor's signature, and a hand-over erases what it had co-signed; a lost trustee key forbids any upgrade, by design (this is the renunciation of S15). Errors `TrusteeFixed` (46), `TrusteeNotIndependent` (47) |
+| S29 | Stablecoin registry behind the delay, and schema version | **rc4.** After the first admission, registering a stablecoin or changing its currency is a proposal (`set_stablecoin` proposes, `apply_stablecoin_change` applies after the delay, `cancel_stablecoin_change` cancels, `remove_stablecoin` remains immediate and erases the proposal): widening what a lender can be repaid in is a loosening (S7). The storage carries a schema version (`schema_version`, 1 for every instance earlier than rc4); after an upgrade, `migrate` (governor and trustee) brings the stored layout to the code's version, step by step; while it lags behind, entries (`create_offer`, `open_repo`) answer `SchemaOutdated` (51) and exits check nothing (S6). `NothingToMigrate` (50) when nothing is to be done |
+
+### 6.1 Maximum loss per scenario
+
+| Scenario | What limits the loss | Maximum loss |
+|---|---|---|
+| Manipulated price or compromised oracle | Model-based corridor (S2), FX band bounded by the FX haircut (S22) and haircuts: a manipulation inside the corridor or inside the band creates no under-collateralization (the envelope guarantees haircut > corridor: at worst 100 bps against 58 bps over three days); outside the corridor or the band, refusal | Zero inside the corridor and the band; cap per fund if the whole oracle is compromised |
+| Compromised admin key | Native multisig; 48 h delay on every loosening and every upgrade, with a guardian veto that the governor alone cannot lift before 30 days (S7); exits never blocked (S6); cancellation replayed on testnet 6 s after the proposal | Zero if the guardian watches; otherwise the flows entered after the application |
+| Freeze or clawback of the shares by the issuer | Debt settled, shares recorded and delivered when the freeze is lifted (S9, version 3); exits never blocked | Delivery delay; in case of a definitive clawback, the shares clawed back, at most the cap per fund |
+| Contract bug | Pause of entries; exits intact; buffer (S16) | Value locked at the time of the bug, hence the total cap |
+| Lender not authorized to receive the shares | Impossible by construction (S8) | Zero |
+
+### 6.2 Responses to external expectations
+
+- **SDF DeFi standards (20 July 2026)**: audit published with the code version; disclosure policy (`SECURITY.md`) and bug bounty sized to the exposed value; written risk procedures; stress tests; first-loss buffer (S16); no single price feed for a decision that touches collateral (S1, S2); multisig and time delay (S7); narrow emergency powers (S6); detection within minutes (S17); preliminary report within 48 hours; public risk page.
+- **ESMA, call for evidence of 9 October 2026, section 6**: the risks it names, key management, permissions, contract execution, administrative privileges, loss or compromise of private keys, contract malfunction, governance intervention, conversion of collateral under stress, correspond to the scenarios of 6.1 and to decisions S6, S7, S9 and S15.
+- **IMF, financial stability report of October 2026, chapter 3**: the warning that programmable collateral and instant settlement can accelerate forced liquidations does not apply to this design: fixed term, no margin call, no automatic liquidation; the contract refuses an operation rather than liquidating a position.
+- **DORA**: see 6.3.
+
+### 6.3 DORA: position and requirements retained (13 October 2026)
+
+**Scope.** DORA, Regulation (EU) 2022/2554, applies to the financial entities of Article 2, paragraph 1, points (a) to (t): notably management companies, AIF managers, investment firms, electronic money institutions, MiCA providers and ART issuers. The project is not one of them. Nor is it a critical provider designated under Article 31, a designation based on systemic impact, the number of entities served and substitutability.
+
+**What concerns us anyway.** The share and stablecoin issuers the contract works with are financial entities. They remain "at all times fully responsible" (Article 28, paragraph 1) and pass their obligations on by contract. Two cases stand apart, as a delivered firmware stands apart from an operated service:
+
+| Case | Qualification | Consequence |
+|---|---|---|
+| The issuer deploys and operates an instance of the open-source code itself | Software delivery, not a continuous service | Nothing enters its register on account of the project; DORA stays entirely with the issuer |
+| The project operates the instance: administration, fund registry, time delay, monitoring, support | ICT service "provided on an ongoing basis" (Article 3, point 21); the project becomes an ICT third-party service provider (Article 3, point 19) | One line in the issuer's register of information (Article 28, paragraph 3); contract compliant with Article 30 |
+
+The qualification of a service as an ICT service depends on the definition of Article 3, point 21: Q&A 2024_7290 (Commission answer published by the EBA on 14 November 2025) applies it to payment service providers and excludes services without a predominant ICT component, but does not say who settles the qualification; the question has been put to counsel (corrected on 15 October 2026). The same goes for the classification as a critical or important function (Article 3, point 22): no official list exists. A capped pilot, whose outage leaves the daily redemption at the fund's counter intact, likely falls under the clauses of Article 30, paragraph 2 only. An instant exit announced to the issuer's clients would likely be classified as important, which adds the clauses of Article 30, paragraph 3.
+
+**Decision D1: design for Article 30, paragraph 3, now.** The extra cost is low at this stage and a late catch-up would be expensive. Each clause is tied to a response:
+
+| Clause | Requirement | Project response | Status |
+|---|---|---|---|
+| 30(2)(a) | Full description of functions and services, subcontracting | Functional specification; named subcontractors: price provider, RPC, monitoring, host of the indexer | To write |
+| 30(2)(b) | Locations of provision and processing | The chain is public and global by nature; monitoring, indexer and hosting declared and located in the European Union | To decide |
+| 30(2)(c), (d) | Integrity, confidentiality, access, recovery and return of data | Events per transition (S13), public state, indexer keeping the history; readable export | Partial |
+| 30(2)(e) | Service levels | Exits available at all times by design (S6); human response times to quantify | Partial |
+| 30(2)(f) | Assistance in case of incident | Named incident manager; notification to the issuer within 4 hours, aligned with its own major-incident reporting deadlines; report within 48 hours | To write |
+| 30(2)(g), (h), (i) | Cooperation with authorities, termination, training | Commitment to cooperate; termination without penalty; participation in the issuer's awareness sessions | To write |
+| 30(3)(a) | Quantitative performance targets | Settlement time of a transaction; anomaly detection time (S17); availability of exits | To quantify |
+| 30(3)(b) | Notice periods and reporting obligations | 48-hour delay on every code or oracle change (S7); public timelock queue | In place by design |
+| 30(3)(c) | Tested continuity plans | Pause of entries (S6), end-of-life procedure within 7 days, first-loss buffer (S16); rehearsal on testnet | To test |
+| 30(3)(d) | Participation in threat-led penetration testing (TLPT) | Commitment to take part in the issuer's TLPT; STRIDE model and monitoring plan provided | New |
+| 30(3)(e) | Unrestricted right of monitoring, access, inspection and audit | Public code, published audit report, on-chain events; access to operations (logs, procedures) for the issuer and its authority | Partial |
+| 30(3)(f) | Exit strategy and transition period | The issuer can take the open-source instance in-house or entrust it to another operator; maturity of all repos within 7 days at most; end-of-upgradability policy (S15) | In place by design |
+| 28(5) | Information security standards | This security baseline, external audit; independent attestation at scale (SDF standards) | Partial |
+
+**Decision D2: offer both modes.** Instance operated by the project, or instance operated by the issuer from the public code. The second mode is the issuer's exit strategy and reduces its concentration risk (Article 29).
+
+
+### 6.4 Key custody: policy (17 October 2026)
+
+Every role of the contract (governor, guardian, steward, trustee) is held by an account whose signers can rotate, never by a bare key; the role's address stays stable when the keys change. The governor is a native multisig with thresholds, master key disabled in time, signers on hardware wallets, one of them outside the team; the Soroban host checks its signatures against the account's *medium* threshold. Hot keys (pause, code rent) live in a key management service with an audit log, outside any file. No person holds two roles; the incident manager holds none. Every signer change goes through an atomic transaction, rehearsed on testnet with the same devices, read back on chain and recorded in a written record (`npm run keys` in `demo/`). Rotations follow a written calendar, with a quarterly rotation exercise and an annual restoration exercise from the backups. A compromise playbook per role relies on the delay, the guardian's veto and the fact that exits are never blocked. The full policy follows the lifecycle required by RTS (EU) 2024/1774 (generation, backup, storage, rotation, revocation, destruction) and is kept available to issuers. Status as of 17 October: testnet, governor 2 of 2 with the master key still active; the target above applies to the guarded launch.
+
+## 7. Toolchain and review process
+
+### In place
+
+| Mechanism | Where | Role |
+|---|---|---|
+| Pinned toolchain (Rust 1.98.1, `wasm32v1-none` target, `rustfmt`, `clippy`) | `rust-toolchain.toml` | Same binary for everyone and for CI; version changes are deliberate and tracked |
+| Security lints set to `deny` | `Cargo.toml`, `[workspace.lints]` | `unsafe_code`, `arithmetic_side_effects`, `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`. Tests disable them explicitly at the top of `test.rs` |
+| `overflow-checks = true` in release and in test | `Cargo.toml` | Safety net if a computation escapes the lints |
+| Blocking CI | `.github/workflows/ci.yml` | `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo test`, `stellar contract build`, and `cargo audit` (RustSec advisories on `Cargo.lock`) in a separate job |
+| CI supply chain | `.github/workflows/ci.yml`, `.github/dependabot.yml` | Least-privilege permissions (`contents: read` by default, `issues: write` limited to the audit job); every third-party action pinned to a full commit SHA; Rust installed from `rust-toolchain.toml` without a third-party action; Dependabot proposes updates of actions and crates in reviewed PRs |
+| Make targets | `contracts/night-window/Makefile` | `make lint`, `make audit`, `make scout` reproduce the checks locally |
+
+### Review rules at every change of the contract
+
+1. For every public function, list every `Address` argument and say which authority every write consumes. Every authority consumed has its `require_auth` in that function.
+2. For every external call (token, oracle), say what happens if it fails, if it returns an absurd value, or if it consumes the whole budget.
+3. For every computation, show that it uses `checked_*` and in which direction it rounds.
+4. For every new storage entry, say who extends its TTL and what happens if it is archived.
+5. Every error path has a `try_` test; every privileged function has a test that proves an intruder is refused; every event is compared in XDR.
+6. No renumbering of errors, no modification of an existing exported type: we add variants.
+
+### Before the public testnet
+
+- STRIDE threat model kept up to date in [threat-model-stride.md](threat-model-stride.md): at least one issue identified per category, one treatment per issue, review at every architecture change. It is required by tranche 2 of the community fund and by the Audit Bank's readiness assessment.
+- Static analysis: `cargo scout-audit` (CoinFabrik) and the OpenZeppelin detectors for Soroban; fix or justify every alert in this document.
+  - **Scout: done** (14 October 2026, `cargo-scout-audit` 0.3.17, detectors compiled on `nightly-2025-09-18`, toolchain installed for the tool alone): 0 critical, 2 medium, 0 minor, 23 enhancements. None requires a fix in the contract.
+    - `missing-new-admin-auth` (medium), `set_admin`: justified: `set_admin` only records a proposed governor (`PendingAdmin`); the role changes only in `accept_admin`, after `require_auth` of the proposed address (S7, test `governor_handover_takes_two_steps`).
+    - `avoid-vec-map-input` (medium), `funds` parameter of `create_offer`: justified: every element is converted and checked before the write (1 to 8 funds, no duplicate, admitted funds, same currency, approved lender); a badly typed element fails only the caller's transaction and nothing is stored (test `offer_checks`).
+    - `storage-change-events` (enhancement), 23 functions that write to storage: justified: each publishes a `#[contractevent]` event through `.publish(&env)` (`events.rs`); the detector only recognizes the direct `env.events()` call. `refresh_reference` writes only when it publishes `ReferenceUpdated`.
+  - **Scout on the audit candidate rc2: done** (15 October 2026, same tool and same toolchain): 0 critical, 5 medium, 1 minor, 66 enhancements. None requires a fix in the contract.
+    - `avoid-vec-map-input` (medium), `funds` of `create_offer`: justification unchanged (1 to 8 funds, no duplicate, admitted, same currency, lender approved by the steward in place).
+    - `dynamic-storage` (medium), `PendingCurrencyCaps` in the instance: justified: the map is bounded by `MAX_PENDING_CURRENCY_CAPS` (`LimitReached` beyond) and removed when empty.
+    - `dos-unexpected-revert-with-storage` (medium), `set_currency_cap`: justified: the write is behind `require_governor` and bounded; the detector does not recognize access control loaded from storage.
+    - `unsafe-map-get` (medium, 2), `apply_currency_cap_change` and `pending_currency_cap_change`: justified: the SDK's `Map::get` returns `Option` (it is `get_unchecked` that panics) and every absence is handled (`NotProposed`, `None`).
+    - `unused-return-enum` (minor), `veto_admin`: justified: the function returns the `Result` of `drop_pending_admin`, both variants of which are produced and tested; the detector sees no literal `Ok(...)`.
+    - `storage-change-events` (enhancement, 66): justification unchanged, every write publishes a `#[contractevent]` event.
+  - OpenZeppelin detectors: blocked on Windows (stack overflow when analyzing the sources of soroban-sdk 28, even after two local fixes); to rerun on Linux.
+  - One-off review `cargo clippy --all-targets -- -W clippy::pedantic -W clippy::nursery`, not enforced: no real defect. In the contract, pass by value imposed by the ABI of the entry points, `# Errors` sections, `#[must_use]`, `const fn`, `Self`, global import; `suspicious_operation_groupings` on `check_fund_config` is a false positive (the `max_corridor_floor_bps` bound is the right one). The conversions flagged are in the tests, on bounded values.
+- Property tests on I1, I2, I5 and on the rounding of S3 and S4; load test that opens a large number of repos and checks a constant cost per operation (framing requirement).
+  - **Load test: done.** `many_repos_keep_a_constant_footprint_per_operation` opens 200 repos (4 offers, 2 lenders, 5 borrowers) then repurchases them all. From the second opening to the last, `open_repo` reads 16 entries and writes 9 (the first creates the contract's share balance); from the first repurchase to the last, `repurchase` reads 12 entries and writes 9 (measurement of 15 October, version 3). I1, I2 and the outstanding amounts are checked at the peak and at the end. About 25 s.
+- Upgrade test: nominal path with a WASM actually uploaded, and refusal of a non-admin.
+  - **Done.** `upgrade_to_the_built_wasm_keeps_offers_repos_and_roles` uploads the `night_window.wasm` produced by `stellar contract build` and switches to it a contract that holds two offers, two open repos, one repurchased repo, a distinct guardian, a modified term ceiling and the pause. After `upgrade` signed by the governor, the instance entry points to the uploaded hash; offers, repos, funds, roles, caps, lender approval, balances and pause are identical; `version` answers; under the WASM, an open repo is repurchased during the pause, then a new one is opened and repurchased; an intruder cannot upgrade again (also `intruder_cannot_upgrade`). CI and `make test` build the WASM before clippy and the tests; without it, the test does not compile and the message asks for `stellar contract build`.
+- Multisignature admin (S7), pause available (S6), written incident procedure (who calls `pause`, how, and how lenders and borrowers are informed) with a named incident manager.
+  - **Pause: done** (guardian, entries only). **Incident procedure: done**, [incident-procedure.md](incident-procedure.md), with the rehearsal of the monitoring plan of 14 October 2026. The holder of the incident manager role is designated outside the repository. **Multisig: in place on testnet (2 of 2); production key custody: not yet.**
+- Review during Runtime Verification's Security Office Hours, free one-to-one sessions offered by the ecosystem.
+
+### Before mainnet
+
+- **Key custody, critical path** (15 October 2026). No role must sit on a single machine as in the demonstration. Target: governor as a native 2-of-3 multisig, on hardware wallets that now sign Soroban calls, with one signer outside the team, master key disabled; guardian reduced to a smart account that can only pause and cancel, the hand-over of its role staying with the human signers; steward of each fund in multisig at the issuer, distinct from its token administration account; code rent payer on a capped account, with no role in the contract; no person holds two roles. The three contract hardenings that follow from it are **in place since version 4**: governor hand-over behind the delay, with a guardian veto; guardian hand-over limited to a backup address registered by the governor and the guardian together; replacement of a lost steward key only to the backup key the issuer itself registered, after 30 days, with the governor and a distinct guardian, any action by the steward cancelling the procedure. Version 4 also forbids the steward from lending on its fund, requires an attestation signed by the lender and the steward before any approval, and allows fixing a sole lender for the instance (mode D3). Remains to do: the devices and the signers.
+- External audit by a firm pre-approved by the Audit Bank (Certora, Code4rena, ChainSecurity, Halborn, Oak Security, OtterSec, Runtime Verification, Spearbit and Cantina, Veridise, Zellic). The program covers up to 100 % of the first audit of projects funded by the community fund, against a 5 % contribution refunded if every critical, high and medium finding is fixed within 20 business days; free follow-up audits at $10M and $100M of locked value. Entry conditions: complete code close to mainnet, deployed testnet, STRIDE model, static analysis results with a remediation plan. The final report is published by the firm. The code in production must be the one audited; any significant change triggers a targeted review.
+- Monitoring of events, prices and TTLs in production (Hypernative or OctoPos, SDF guide of July 2026), connected to the monitoring plan (S17), with pause on alert.
+- Published responsible disclosure policy (`SECURITY.md`) and bug bounty sized to the exposed value.
+- First-loss buffer built (S16), launch caps in place (S18), public risk page (audits, privileged roles, dependencies, incident history).
+- Technical watch (15 October 2026): use soroban-sdk 29.0.1 and never 29.0.0, whose `soroban-env-host` 29.0.0 dependency has been withdrawn; the migration from 28 requires no code change; it is planned after the hackathon, Rust 1.98.1 and CLI 28.1.0 staying pinned until the audit. A `try_` call does not catch a called contract that exhausts the CPU budget: a share token or a backup feed that did so would fail the whole transaction instead of being ignored; this is accepted for contracts chosen at admission, and documented. The documentation comments of exported items are compiled into the WASM (about 23 % of its size in version 3): trimming them before freezing the audit footprint also reduces the code rent. The CAP-88 proposal (sub-second ledgers) would shorten TTLs expressed in ledgers: to reassess if it is scheduled.
+- Maintenance rule: stay within the two latest major versions of `soroban-sdk`, the only ones that receive security fixes; rebuild and tests at every protocol upgrade; maturities in seconds, never derived from TTLs.
+
+## 8. Framing questions and answers given
+
+1. **Who holds the administration key?** A single key during the hackathon; a native multisig with thresholds and an outside signer from the public testnet on; a time delay in front of upgrades and the oracle before any real deposit, built into the contract since version 3 (S7, S15).
+2. **Does the issuer accept that the contract holds shares?** Technically, the contract is an address like any other for an issuer's allowlist: on Stellar, a regulated issuer's token requires the same role on the sender and on the recipient, and that issuer's own redemption contract must hold it. For a classic asset with authorization required, the issuer authorizes the contract's address through `set_authorized`. The business decision remains the issuer's; S8 and S9 set the rules for freeze and seizure.
+3. **Does the oracle publish over the weekend?** NAV feeds for fund shares exist on Stellar (RedStone, 18 SEP-40 feeds including BENJI; Pyth); their publication rhythm is a per-fund parameter (S1), complemented by the corridor (S2) and the haircut.
+4. **Is a global cap needed?** Yes (S18): per repo, per fund and in total, aligned with the first follow-up audit threshold.
+5. **Who decides on the pause?** A single signer, power limited to entries (S6); lenders keep the withdrawal of the part not lent at any time.
+
+Open questions remaining: the price of a NAV feed for a fund that does not have one yet; the classification of the service as a critical or important function by each issuer (the design targets the most demanding case, decision D1 of section 6.3); the location of the monitoring and the indexer in the European Union; the actual cost of the monitoring.
+
+## 9. Sources
+
+- Official `stellar-dev` skill, files `security.md`, `development.md` and `testing.md` (v1.2.0), applied to the present case.
+- Documentation: [storage strategies](https://developers.stellar.org/docs/build/guides/storage/storage-strategies), [upgrading contracts](https://developers.stellar.org/docs/build/guides/conventions/upgrading-contracts), [SAC balance authorization](https://developers.stellar.org/docs/tokens/stellar-asset-contract#balance-authorization-required), [fees and limits](https://developers.stellar.org/docs/learn/fundamentals/fees-resource-limits-metering).
+- Standards: [SEP-40](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0040.md) (oracle), [SEP-41](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md) (token), [SEP-49](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0049.md) (upgradeable contracts).
+- Public audits of lending protocols on Stellar, for the liquidation defects that iterate over all positions: [Slender, Certora](https://stellarsecurityportal.com/report/24), [Peridot, Halborn](https://stellarsecurityportal.com/report/83).
+- Tools: [Scout for Soroban](https://github.com/CoinFabrik/scout-soroban), [Security Detectors SDK](https://github.com/OpenZeppelin/soroban-security-detectors-sdk), [RustSec](https://rustsec.org), [Audit Bank](https://stellar.org/grants-and-funding/soroban-audit-bank), [official Audit Bank rules](https://stellar.gitbook.io/scf-handbook/supporting-programs/audit-bank/official-rules), [TimelockController for Soroban](https://docs.openzeppelin.com/stellar-contracts/governance/timelock-controller), [native multisig](https://developers.stellar.org/docs/learn/fundamentals/transactions/signatures-multisig#thresholds).
+- External standards and expectations: [Stellar DeFi Security Standards and Best Practices, SDF, 20 July 2026](https://stellar.org/blog/ecosystem/stellar-defi-security-standards-and-best-practices); [community fund submission criteria, tranche 2](https://stellar.gitbook.io/scf-handbook/scf-awards/build-award/submission-criteria); [STRIDE threat modeling guide, Stellar](https://developers.stellar.org/docs/build/security-docs/threat-modeling/threat-modeling-how-to); [Auditing Smart Contracts on Stellar, Certora, 7 October 2026](https://www.certora.com/blog/auditing-smart-contracts-stellar); [Monitoring Stellar with Hypernative, SDF](https://stellar.org/blog/developers/monitoring-stellar-with-hypernative); [ESMA, Call for evidence on CCP collateral tokenisation, 9 October 2026](https://www.esma.europa.eu/sites/default/files/2026-10/ESMA91-1505572268-4934_-_Call_for_evidence_tokenisation.pdf); [ESMA, opinion of 8 October 2026 on stablecoins not compliant with MiCA, via CoinDesk](https://www.coindesk.com/policy/2026/10/08/eu-securities-regulator-gives-crypto-platforms-3-months-to-remove-unauthorized-stablecoins); [IMF, GFSR October 2026, chapter 3](https://www.imf.org/-/media/files/publications/gfsr/2026/october/english/ch3.pdf).
+- DORA: [Regulation (EU) 2022/2554, EUR-Lex](https://eur-lex.europa.eu/eli/reg/2022/2554/oj/eng); [Article 2](https://www.springlex.eu/en/packages/dora/dora-regulation/article-2/), [Article 3](https://www.springlex.eu/en/packages/dora/dora-regulation/article-3/), [Article 28](https://www.springlex.eu/en/packages/dora/dora-regulation/article-28/), [Article 30](https://www.springlex.eu/en/packages/dora/dora-regulation/article-30/), [Article 31](https://www.springlex.eu/en/packages/dora/dora-regulation/article-31/); [Q&A 2024_7290 on the notion of ICT service, EBA, 14 November 2025](https://www.eba.europa.eu/single-rule-book-qa/qna/view/publicId/2024_7290).
+- Reference incidents: [YieldBlox, 22 February 2026, Blockaid post-mortem](https://www.blockaid.io/blog/73-quarantined-how-blockaid-and-stellar-validators-contained-a-10m-price-manipulation-attack); [Comet, 25 August 2026, post-mortem](https://lumenloop.com/news/comet-blnd-usdc-lp-incident-post-mortem).
+- Rust conventions (error handling with `Result`, no `unwrap` in production, rustfmt and Clippy): *Mastering Rust Programming*, A. M. Veldt, 2025, kept outside the repository in `references/`.

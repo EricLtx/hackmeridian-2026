@@ -23,7 +23,7 @@ This page shows two things. First, what the minimum viable product already prove
 | The fund issuer keeps control of who holds its shares | Tests `issuer_must_whitelist_the_contract_before_any_repo`, `seizure_delivers_permissioned_shares_to_the_whitelisted_lender` |
 | Accounting stays exact under any sequence of operations | Test `invariants_hold_over_random_sequences`: invariants checked after 300 random operations |
 | Cost per operation does not grow with usage | Tests `opening_a_repo_touches_a_constant_number_of_entries` and `many_repos_keep_a_constant_footprint_per_operation`: 16 entries read and 9 written by every `open_repo` over 200 repos |
-| The code meets its own security rules | CI on every push: format, WASM build, clippy with warnings as errors, 188 tests, web build and tests, RustSec advisories; internal reviews of versions 2 and 3 with every finding fixed and tested |
+| The code meets its own security rules | CI on every push: format, WASM build, clippy with warnings as errors, 210 contract tests, web build and tests, RustSec advisories; internal reviews of versions 2, 3 and 4 with every finding fixed and tested |
 
 The value for a holder is shown in the demo's last scene. It compares the measured latency with the earliest cash through a fund redemption, at four moments of the week. On a weekday after the cut-off, the redemption route takes about 42 hours. From a Friday evening it takes about 89 hours. Open Window answers within one ledger at any of those moments.
 
@@ -44,7 +44,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 **Adds:**
 - a minimal web interface: quote, open, repurchase, offers, positions;
 - an indexer built from the contract's events;
-- the monitoring plan of [modele-menace-stride.md](modele-menace-stride.md), section 3.1, run against the testnet deployment;
+- the monitoring plan of [threat-model-stride.md](threat-model-stride.md), section 3.1, run against the testnet deployment;
 - a written incident procedure: who pauses, how, and how lenders and borrowers are told;
 - static analysis with Scout and the OpenZeppelin detectors;
 - an upgrade test with a real uploaded WASM;
@@ -52,22 +52,22 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **Exit criteria:**
 - Each monitoring detector has fired at least once on a real trigger, and the matching action was taken.
-- Static analysis has no unresolved finding: each one is fixed or justified in [securite.md](securite.md).
+- Static analysis has no unresolved finding: each one is fixed or justified in [security.md](security.md).
 - The upgrade test passes and keeps every open repo intact.
 - The interface completes the full cycle with a standard Stellar wallet.
 
 **What it retires:** the operating risk. The team can see, explain and stop what happens on chain.
 
-**Status on 14 October 2026:**
+**Status on 18 October 2026:**
 
 | Item | State | Evidence |
 |---|---|---|
 | Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; a manual run with Freighter is still to record |
 | Indexer | Done, first version (17 October 2026) | `indexer/` keeps every contract event in an append-only journal under a SHA-256 hash chain (`verify` recomputes it), behind a persistent cursor, and exports CSV, a per-repo register and the SFTR columns the chain can fill; the web interface's History page reads its export. Not yet consulted by the monitor; runs on the operator's machine |
-| Monitoring | Done | Every detector with a possible real trigger fired on one on testnet and the action was taken, including a key-compromise and an issuer-freeze drill; the TTL threshold had to be forced, and the event trail has no possible real trigger ([procedure-incident.md](procedure-incident.md)) |
-| Incident procedure | Done | [procedure-incident.md](procedure-incident.md) |
+| Monitoring | Done | Thirteen detectors per admitted fund; nineteen drills replayed on testnet on 18 October 2026 against the upgraded instance, including a key-compromise, an issuer-freeze, a frozen-NAV and an unannounced-stablecoin drill, with the automatic actions signed by the sentinel key ([incident-procedure.md](incident-procedure.md)) |
+| Incident procedure | Done | [incident-procedure.md](incident-procedure.md) |
 | Static analysis | Partly | Scout: 2 medium and 23 enhancement alerts, all justified; OpenZeppelin detectors not run yet |
-| Upgrade test | Done | `upgrade_to_the_built_wasm_keeps_offers_repos_and_roles` |
+| Upgrade test | Done | `upgrade_to_the_built_wasm_keeps_offers_repos_and_roles`; and `an_rc2_instance_upgrades_then_migrates_with_a_repo_open` runs the real rc2 WASM, upgrades it, repays a repo opened before the upgrade and migrates the stored layout. The governed upgrade and the migration were then executed on the testnet instance on 18 October 2026 (`npm run upgrade`) |
 | Load test | Done | `many_repos_keep_a_constant_footprint_per_operation`: 200 repos, 16 entries read and 9 written by every `open_repo` |
 
 ### Step 2: hardening for real assets
@@ -91,8 +91,11 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 | Item | State | Evidence |
 |---|---|---|
-| Multisig governor | Done on testnet; custody not done | 2-of-2 native account with a co-signer; both signing paths succeed, a single key is refused with `txBadAuth`. The demo holds both keys on one machine: real custody (separate people and hardware devices) is the critical path to any deployment that holds value. Since 17 October 2026 the ceremony is tooled (`npm run keys`: unsigned atomic setOptions plan, read-back, testnet rehearsal with minutes) and the key policy is summarised in [securite.md](securite.md), section 6.4 |
-| Time delay | Done, version 3 | Upgrades, feed changes, re-anchoring, a new guardian and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
+| Multisig governor | Done on testnet; custody not done | 2-of-2 native account with a co-signer; both signing paths succeed, a single key is refused with `txBadAuth`. The demo holds both keys on one machine: real custody (separate people and hardware devices) is the critical path to any deployment that holds value. Since 17 October 2026 the ceremony is tooled (`npm run keys`: unsigned atomic setOptions plan, read-back, testnet rehearsal with minutes) and the key policy is summarised in [security.md](security.md), section 6.4 |
+| Time delay | Done, version 3; stablecoin registry behind the delay since rc4 | Upgrades, feed changes, re-anchoring, a new guardian, stablecoin registrations after the first admission and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
+| Schema version and migration | Done, rc4 | The contract stores a schema version; `migrate` (governor and trustee) transforms the stored layout after an upgrade; entries refuse to open while the layout is outdated, exits never check. Demonstrated on testnet on 18 October 2026 |
+| Sentinel | Done, rc4 | A hot key named by the guardian that can pause and cancel proposals, and nothing else; the monitoring host acts with it, so the guardian key leaves that host |
+| Several funds and stablecoins as data | Done, 18 October 2026 | Two funds (a dollar T-bill share with an FX leg, a euro money market share without one) and two euro stablecoins sharing one currency cap, admitted on the same testnet instance without a code change |
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
 | Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |
 | Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 6 seconds later, with 295 of the 300 seconds of the testnet delay left |
@@ -103,7 +106,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Third-party audit | Not started | Needs an auditor and a budget |
 | Bug bounty | Not started | Needs a budget sized to the value at stake |
 
-Found on the way and fixed: operations used to extend the contract's code entry, whose rent grows with its size. On testnet the user who crossed the extension threshold would have paid about 530 XLM, more than one transaction may carry. The contract now extends only its instance, and the operator keeps the code alive (decision S20 in [securite.md](securite.md)).
+Found on the way and fixed: operations used to extend the contract's code entry, whose rent grows with its size. On testnet the user who crossed the extension threshold would have paid about 530 XLM, more than one transaction may carry. The contract now extends only its instance, and the operator keeps the code alive (decision S20 in [security.md](security.md)).
 
 ### Step 3: guarded launch
 
@@ -130,6 +133,39 @@ Found on the way and fixed: operations used to extend the contract's code entry,
 
 **What it retires:** the concentration risk on one fund or one issuer.
 
+## Next developments, sorted MoSCoW
+
+Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. "Must" items gate the guarded launch; nothing below changes the contract before the external audit, except a fix the audit itself requires.
+
+**Must**
+- External audit of the frozen tag; every critical, high and medium finding fixed, each on its own commit.
+- Key custody on hardware with separate signers: governor signers, guardian, sentinel and keeper keys off the development machine; the ceremony replayed on devices; the monitor's witness on a second host.
+- A NAV feed for the pilot fund published to a SEP-40 interface, with the freshness policy written into the fund's admission.
+- One public story: the first-loss item of step 3 restated as the lender's own reserve, held off chain and sized from the maximum-loss scenarios (decision pending).
+- A second maintainer with keys, so that no role depends on one person.
+
+**Should**
+- A second RPC provider, so the monitor's cross-check detector runs and a mainnet exchange-rate log can be kept.
+- The indexer anchored on a schedule and compared with an independent event source; `verify` run periodically.
+- The SFTR export checked with a reporting team; the master agreement and the DORA clauses signed.
+- The web interface completed by a real user with a standard wallet, with a position timeline, at phone width.
+- A deployment kit for an instance operator: named governor account, runbooks for incidents and upgrades (including the inventory of funds that a tightened admission rule would refuse), an off-chain instance register.
+- A third-party SEP-41 share admitted on testnet, then a real issuer's testnet share.
+
+**Could** (after the audit, as version 2 behind `migrate`)
+- A fixed-repurchase-date offer mode; an irrevocable-commitment event at opening; a holding address per lender, if legal review asks for them.
+- Formal verification of the interest and haircut arithmetic; instruction measurements on the real WASM.
+- Partial repurchase and rollover; a second loan currency; a confidentiality track for amounts.
+- A read-only risk assistant that proposes bounded parameter changes and applies none.
+
+**Won't** (this cycle)
+- A multi-lender instance operated by the project: one regulated lender per instance, by design.
+- Automatic liquidation or margin calls: a fixed-term bilateral repo does not need them, and exits must never block.
+- An on-chain commission: it would finance nothing at the pilot's scale.
+- Pooled lending, or stablecoins outside the MiCA allowlist.
+- A deployment factory before several instances exist.
+- A soroban-sdk upgrade before the audit intake: it changes the hash of the frozen code.
+
 ## Running it over time
 
 These tasks run continuously from step 1 on. Each one has an owner in the incident procedure.
@@ -145,7 +181,10 @@ These tasks run continuously from step 1 on. Each one has an owner in the incide
 
 ## Where the details are
 
-- [securite.md](securite.md): security baseline, decisions S1 to S19, maximum loss, DORA (French).
-- [modele-menace-stride.md](modele-menace-stride.md): threat model and monitoring plan (French).
+- [security.md](security.md): security baseline, decisions S1 to S29, maximum loss, DORA.
+- [threat-model-stride.md](threat-model-stride.md): threat model and monitoring plan.
+- [incident-procedure.md](incident-procedure.md): who acts, how and within what time when an alert fires.
+- [interface-reference.md](interface-reference.md): every entry point, type and error, in long form.
+- [audit-scope.md](audit-scope.md): what an external auditor needs; the code is frozen at the tag `audit-v4-rc4`.
 - [faq.md](faq.md): questions and answers for users, the Stellar ecosystem, engineers and security reviewers.
 - [demo/README.md](../demo/README.md): the live testnet demo and its recovery procedures.

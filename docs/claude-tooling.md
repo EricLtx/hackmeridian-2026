@@ -1,17 +1,17 @@
-# Outillage IA : marketplaces Claude, skills et MCP
+# AI tooling: Claude marketplaces, skills and MCP servers
 
-Ce document recense ce qui existe pour développer des smart contracts Stellar avec Claude Code. Le tour d'horizon date du 5 octobre 2026.
+This document lists what exists for developing Stellar smart contracts with Claude Code. The survey dates from 5 October 2026.
 
-## Ce qui est préconfiguré dans ce repo
+## What is preconfigured in this repo
 
-À l'ouverture du dossier, Claude Code propose d'installer les outils suivants. Il suffit d'accepter.
+When the folder is opened, Claude Code offers to install the following tools. Just accept.
 
-| Outil | Fichier | Rôle |
+| Tool | File | Role |
 |---|---|---|
-| Plugin **`stellar-dev`** (officiel, [stellar/stellar-dev-skill](https://github.com/stellar/stellar-dev-skill)) | `.claude/settings.json` | 8 skills : `smart-contracts`, `dapp`, `assets`, `data`, `standards`, `agentic-payments`, `zk-proofs`, `cross-chain` |
-| MCP **`stellar-raven`** ([raven.stellar.buzz](https://raven.stellar.buzz/playground)) | `.mcp.json` | `search` dans la doc Stellar et l'écosystème, `execute` pour interroger les données live |
+| **`stellar-dev`** plugin (official, [stellar/stellar-dev-skill](https://github.com/stellar/stellar-dev-skill)) | `.claude/settings.json` | 8 skills: `smart-contracts`, `dapp`, `assets`, `data`, `standards`, `agentic-payments`, `zk-proofs`, `cross-chain` |
+| **`stellar-raven`** MCP ([raven.stellar.buzz](https://raven.stellar.buzz/playground)) | `.mcp.json` | `search` across the Stellar docs and the ecosystem, `execute` to query live data |
 
-Installation manuelle, hors de ce repo :
+Manual installation, outside this repo:
 
 ```sh
 claude plugin marketplace add stellar/stellar-dev-skill
@@ -19,34 +19,34 @@ claude plugin install stellar-dev@stellar-dev
 claude mcp add --transport http stellar-raven "https://raven.stellar.buzz/mcp"
 ```
 
-Pour un autre agent (Cursor, Codex, VS Code), voir [Building with AI](https://developers.stellar.org/docs/build/building-with-ai). Les skills sont aussi consultables sans installation sur [skills.stellar.org](https://skills.stellar.org).
+For another agent (Cursor, Codex, VS Code), see [Building with AI](https://developers.stellar.org/docs/build/building-with-ai). The skills can also be browsed without installation at [skills.stellar.org](https://skills.stellar.org).
 
-## Les marketplaces déjà configurées
+## The marketplaces already configured
 
-| Marketplace | Contenu lié aux smart contracts | Utile pour Stellar ? |
+| Marketplace | Smart-contract-related content | Useful for Stellar? |
 |---|---|---|
-| `claude-plugins-official` (Anthropic) | `circle-skills` (USDC, wallets, Circle Smart Contract Platform), `rust-analyzer-lsp`, `solidity-lsp` | `rust-analyzer-lsp` : **oui** (contrats en Rust). `circle-skills` : partiellement (USDC et EURC existent sur Stellar, mais les skills ciblent surtout l'EVM). |
-| `claude-code-workflows` (wshobson/agents) | `blockchain-web3` : Solidity, DeFi, NFT, web3-testing | Non : EVM et Solidity uniquement. Les concepts DeFi restent transposables. |
-| `anthropic-agent-skills`, `claude-code-skills`, `impeccable` | Rien de spécifique à la blockchain | — |
-| Anthropic Directory (claude.ai) | Analyse crypto (marchés, ETF) | Non : on ne fait pas de spéculation. |
+| `claude-plugins-official` (Anthropic) | `circle-skills` (USDC, wallets, Circle Smart Contract Platform), `rust-analyzer-lsp`, `solidity-lsp` | `rust-analyzer-lsp`: **yes** (contracts in Rust). `circle-skills`: partially (USDC and EURC exist on Stellar, but the skills mostly target the EVM). |
+| `claude-code-workflows` (wshobson/agents) | `blockchain-web3`: Solidity, DeFi, NFT, web3-testing | No: EVM and Solidity only. DeFi concepts remain transferable. |
+| `anthropic-agent-skills`, `claude-code-skills`, `impeccable` | Nothing blockchain-specific | - |
+| Anthropic Directory (claude.ai) | Crypto analysis (markets, ETFs) | No: we do not do speculation. |
 
-Conclusion : aucune marketplace préinstallée ne couvre Stellar. La marketplace officielle **`stellar/stellar-dev-skill`** est la référence. On peut la compléter avec `rust-analyzer-lsp` :
+Conclusion: no preinstalled marketplace covers Stellar. The official **`stellar/stellar-dev-skill`** marketplace is the reference. It can be complemented with `rust-analyzer-lsp`:
 
 ```sh
 claude plugin install rust-analyzer-lsp@claude-plugins-official
 ```
 
-## Alternatives communautaires (non vérifiées)
+## Community alternatives (unverified)
 
-À n'utiliser qu'en complément et après relecture du code, puisque ce sont des sources tierces :
+To be used only as a complement and after reviewing the code, since these are third-party sources:
 
-- [kaankacar/stellar-plugin](https://github.com/kaankacar/stellar-plugin) : plugin Claude Code pour le dev Stellar
-- [rawritude/stellar-expert-skills](https://awesomeclaudeplugins.com/rawritude/stellar-expert-skills) : requêtes sur l'API stellar.expert
-- Serveurs MCP : [syronlabs/stellar-mcp](https://github.com/syronlabs/stellar-mcp) (Horizon + Soroban), [Soroban MCP Server](https://glama.ai/mcp/servers/firstJOASH/soroban-mcp-server) (build, deploy, invoke)
+- [kaankacar/stellar-plugin](https://github.com/kaankacar/stellar-plugin): Claude Code plugin for Stellar development
+- [rawritude/stellar-expert-skills](https://awesomeclaudeplugins.com/rawritude/stellar-expert-skills): queries against the stellar.expert API
+- MCP servers: [syronlabs/stellar-mcp](https://github.com/syronlabs/stellar-mcp) (Horizon + Soroban), [Soroban MCP Server](https://glama.ai/mcp/servers/firstJOASH/soroban-mcp-server) (build, deploy, invoke)
 
-## Bonnes pratiques avec l'IA
+## Good practices with AI
 
-1. **Commencer par le skill** : `/stellar-dev:smart-contracts écris un contrat d'escrow…`. Le skill impose le bon SDK, la bonne cible Wasm et les bons patterns de stockage et d'authentification.
-2. **Vérifier les versions** : la version majeure du SDK doit correspondre au protocole du réseau visé (`stellar network settings --network testnet`).
-3. **Tester avant de déployer** : `cargo test` avec `Env::default()` et `mock_all_auths()`.
-4. **Relire la sécurité** : `/stellar-dev:smart-contracts` puis `security.md`, qui fournit une checklist d'audit.
+1. **Start with the skill**: `/stellar-dev:smart-contracts write an escrow contract...`. The skill enforces the right SDK, the right Wasm target and the right storage and authentication patterns.
+2. **Check the versions**: the SDK major version must match the protocol of the target network (`stellar network settings --network testnet`).
+3. **Test before deploying**: `cargo test` with `Env::default()` and `mock_all_auths()`.
+4. **Review security**: `/stellar-dev:smart-contracts` then `security.md`, which provides an audit checklist.

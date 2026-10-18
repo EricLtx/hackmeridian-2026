@@ -24,7 +24,7 @@ Do not substitute this with `cargo build --target wasm32v1-none`. `stellar contr
 
 ## Security baseline
 
-Read `docs/securite.md` before changing the contract. The enforced rules:
+Read `docs/security.md` before changing the contract. The enforced rules:
 
 - Workspace lints (`Cargo.toml`, `[workspace.lints]`) deny `unsafe_code`, unchecked arithmetic, `unwrap`, `expect`, `panic!` and slice indexing in contract code. Use `checked_*` arithmetic and return a typed `Error`, or `panic_with_error!`. Tests opt out at the top of `test.rs`; do not opt out in `lib.rs`.
 - Every privileged function loads the admin from storage and calls `require_auth` on it. Every `Address` argument whose authority a function consumes gets its own `require_auth` in that function.

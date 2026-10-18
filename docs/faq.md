@@ -222,8 +222,8 @@ The demo runner is described in [demo/README.md](../demo/README.md). It never re
 
 ### Where is the threat model?
 
-- **[securite.md](securite.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S21, maximum loss per scenario and the DORA mapping.
-- **[modele-menace-stride.md](modele-menace-stride.md)** holds 21 STRIDE problems, the treatment of each and a first monitoring plan.
+- **[security.md](security.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S21, maximum loss per scenario and the DORA mapping.
+- **[threat-model-stride.md](threat-model-stride.md)** holds 21 STRIDE problems, the treatment of each and a first monitoring plan.
 
 Both are in French.
 
@@ -264,18 +264,18 @@ It blocks `create_offer` and `open_repo` and nothing else. Repurchase, withdrawa
 
 ### What is the maximum loss?
 
-It is bounded by construction through the caps. Section 6.1 of [securite.md](securite.md) gives it scenario by scenario: compromised feed, compromised key, issuer freeze, contract bug.
+It is bounded by construction through the caps. Section 6.1 of [security.md](security.md) gives it scenario by scenario: compromised feed, compromised key, issuer freeze, contract bug.
 
 ### What about DORA?
 
-Open Window is designed to be operated as an ICT service a regulated entity can rely on: exit always possible, roles separated, events for audit, documented incident steps. The requirements retained, and the two operating modes, are in section 6.3 of [securite.md](securite.md).
+Open Window is designed to be operated as an ICT service a regulated entity can rely on: exit always possible, roles separated, events for audit, documented incident steps. The requirements retained, and the two operating modes, are in section 6.3 of [security.md](security.md).
 
 ### What is not done yet?
 
 - **Third-party audit:** not done; the package for it is ready in [audit-scope.md](audit-scope.md).
 - **Bug bounty:** not set up; it needs a budget sized to the value at stake.
-- **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where every detector with a possible real trigger fired on one ([procedure-incident.md](procedure-incident.md)); it is not yet run continuously on dedicated infrastructure.
-- **Static analysis:** Scout has run, with every alert justified in [securite.md](securite.md), section 7; the OpenZeppelin detectors have not run yet.
+- **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where every detector with a possible real trigger fired on one ([incident-procedure.md](incident-procedure.md)); it is not yet run continuously on dedicated infrastructure.
+- **Static analysis:** Scout has run, with every alert justified in [security.md](security.md), section 7; the OpenZeppelin detectors have not run yet.
 - **Multisig governor in production:** in place on testnet as a 2-of-2 account; the outside signer's organisation is a decision for launch.
 
 Each item has a place in the [roadmap](roadmap.md), before any real deposit.

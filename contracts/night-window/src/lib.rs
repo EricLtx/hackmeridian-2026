@@ -35,7 +35,7 @@
 //! withdrawal of an offer or a seizure. Upgrades, replacements of an admitted
 //! fund and fallback NAV feeds wait for a time delay, during which the
 //! guardian can cancel them (decision S7). Security baseline, invariants and
-//! decisions: `docs/securite.md`.
+//! decisions: `docs/security.md`.
 
 use soroban_sdk::{
     contract, contractimpl, contractmeta, panic_with_error, Address, BytesN, ContractExecutable,

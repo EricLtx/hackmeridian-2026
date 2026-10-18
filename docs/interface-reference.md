@@ -1,6 +1,6 @@
 # Interface reference
 
-The long-form description of every entry point, type and error of the Open Window contract (`contracts/night-window/src/`). The doc comments in the source are kept to one sentence each, because `#[contractimpl]`, `#[contracttype]`, `#[contracterror]` and `#[contractevent]` compile them into the `contractspecv0` section of the WASM, which counts against the network's size cap; this file holds the explanations that used to sit there. Who may call what and the one-line summary of each function are in the [README](../README.md#contract-interface); the decisions referred to as S7, S8, S9 and the custody gaps I12 to I14 are in [securite.md](securite.md).
+The long-form description of every entry point, type and error of the Open Window contract (`contracts/night-window/src/`). The doc comments in the source are kept to one sentence each, because `#[contractimpl]`, `#[contracttype]`, `#[contracterror]` and `#[contractevent]` compile them into the `contractspecv0` section of the WASM, which counts against the network's size cap; this file holds the explanations that used to sit there. Who may call what and the one-line summary of each function are in the [README](../README.md#contract-interface); the decisions referred to as S7, S8, S9 and the custody gaps I12 to I14 are in [security.md](security.md).
 
 Conventions used below:
 

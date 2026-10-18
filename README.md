@@ -52,7 +52,7 @@ sequenceDiagram
 - The NAV is checked against a corridor predicted from a reference, not against the previous reading: a money market fund share grows slowly and predictably, so a jump is a faulty price, not a market move. The reference follows the feed only along that model, never upward faster than a maximum yield; only the fund's steward can lower it, and only a two-key re-anchor can move it off the model, so a faulty feed cannot drag it.
 - Three roles: a governor (registry, risk envelope, upgrades), a guardian (pause new entries, cancel pending proposals, remove a backup feed, hand its role over), and a steward per fund, the issuer, who approves lenders and tunes its fund inside the envelope. A fund is admitted only when the governor and its steward sign the same call. Error codes and exported types are append-only.
 - Footprint: a repo is three transactions (offer, open, repurchase). The network's published estimates are about 0.2 Wh and 0.06 g CO2 per transaction (SDF and PwC, 2022; an independent 2021 measurement gives 0.222 Wh), so one repo costs well under one watt-hour. The design keeps it that way: constant cost per operation, no loops, minimal storage with TTL management, no polling.
-- Controls in place: an allowlist of accepted stablecoins; caps per repo, per fund and per currency; an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure; a time delay with a guardian veto on upgrades, feed changes and every loosening; shares delivered later, never blocked, when an issuer freezes them. Details in [docs/securite.md](docs/securite.md).
+- Controls in place: an allowlist of accepted stablecoins; caps per repo, per fund and per currency; an emergency pause that blocks new offers and new repos but never repurchase, withdrawal or seizure; a time delay with a guardian veto on upgrades, feed changes and every loosening; shares delivered later, never blocked, when an issuer freezes them. Details in [docs/security.md](docs/security.md).
 - Keys: every role is an ordinary Stellar account, so the governor is a native multisig and any role can sit on hardware wallets that sign Soroban calls. Operations extend the contract instance but never its code entry, whose rent the operator pays.
 
 ## Contract interface
@@ -91,7 +91,7 @@ The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry poin
 | `seize(repo, to)` | lender, from maturity | Sends the shares to an approved address |
 | `release(repo)`, `redirect_release(repo, to)`, `pending_release(repo)` | anyone / beneficiary | Delivers shares the issuer's token refused at repurchase or seizure, once the issuer allows it |
 
-How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), agree with the backup feed when one is set, and, when the NAV is not in the loan currency, be crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/securite.md](docs/securite.md), section 6.
+How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), agree with the backup feed when one is set, and, when the NAV is not in the loan currency, be crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/security.md](docs/security.md), section 6.
 
 ## Roadmap
 
@@ -107,10 +107,10 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Model-based NAV corridor, cross price through an FX feed with its own band and haircut
 - [x] Independent security review; every finding fixed or recorded, with a test per fix
 - [x] Demo contracts: allowlisted fund share token (`fund-token`) and operator-fed SEP-40 feed (`nav-oracle`)
-- [x] Monitoring plan implemented and rehearsed on testnet: every detector with a possible real trigger fired on one ([docs/procedure-incident.md](docs/procedure-incident.md))
+- [x] Monitoring plan implemented and rehearsed on testnet: every detector with a possible real trigger fired on one ([docs/incident-procedure.md](docs/incident-procedure.md))
 - [x] Upgrade test with the real WASM, 200-repo load test at constant cost, Scout static analysis with every alert justified
 - [x] Version 3 (October 2026): time delay on upgrades, feed changes and every loosening; guardian veto that the governor alone cannot remove inside a window; backup NAV feed; shares delivered later when the issuer blocks them, instead of a blocked exit
-- [x] Native multisig governor with an outside co-signer, on testnet; key-compromise and issuer-freeze drills rehearsed ([docs/procedure-incident.md](docs/procedure-incident.md))
+- [x] Native multisig governor with an outside co-signer, on testnet; key-compromise and issuer-freeze drills rehearsed ([docs/incident-procedure.md](docs/incident-procedure.md))
 - [x] Three internal security reviews of version 3, every finding fixed with a test; audit package ready ([docs/audit-scope.md](docs/audit-scope.md))
 - [x] Testnet deployment with test fund tokens and a test oracle: a scripted live demo in [demo/](demo/README.md), with a fallback FX feed
 - [x] Minimal web interface with Freighter: market board, borrow, positions, repurchase, lend, withdraw, take the shares at maturity ([web/](web/README.md))
@@ -125,7 +125,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 
 ## Security
 
-[docs/securite.md](docs/securite.md) (French) holds the threat model, the contract invariants, the vulnerability classes mapped to this contract, the controls already in place and the decisions taken for the specification (price freshness and a model-based NAV corridor per fund, MiCA-only stablecoin allowlist, emergency pause limited to new entries, multisig administrator with a time delay, launch caps, first-loss buffer), and maps the contractual requirements an EU-regulated issuer must pass on to its ICT providers under DORA (Regulation (EU) 2022/2554, Article 30). [docs/modele-menace-stride.md](docs/modele-menace-stride.md) (French) is the STRIDE threat model with its monitoring plan, rehearsed on testnet; [docs/procedure-incident.md](docs/procedure-incident.md) (French) says who acts on each alert; [docs/audit-scope.md](docs/audit-scope.md) is the package for external auditors. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
+[docs/security.md](docs/security.md) holds the threat model, the contract invariants, the vulnerability classes mapped to this contract, the controls already in place and the decisions taken for the specification (price freshness and a model-based NAV corridor per fund, MiCA-only stablecoin allowlist, emergency pause limited to new entries, multisig administrator with a time delay, launch caps, first-loss buffer), and maps the contractual requirements an EU-regulated issuer must pass on to its ICT providers under DORA (Regulation (EU) 2022/2554, Article 30). [docs/threat-model-stride.md](docs/threat-model-stride.md) is the STRIDE threat model with its monitoring plan, rehearsed on testnet; [docs/incident-procedure.md](docs/incident-procedure.md) says who acts on each alert; [docs/audit-scope.md](docs/audit-scope.md) is the package for external auditors. [SECURITY.md](SECURITY.md) says how to report a vulnerability.
 
 The enforced part of the baseline:
 
@@ -147,13 +147,13 @@ The enforced part of the baseline:
 ├── indexer/                 # append-only event journal under a hash chain; register and SFTR views
 ├── web/                     # minimal web interface (Vite, plain JavaScript, Freighter), history page
 ├── docs/
-│   ├── securite.md          # security baseline: threat model, invariants, framing decisions S1-S29 (French)
-│   ├── modele-menace-stride.md # STRIDE threat model and monitoring plan (French)
-│   ├── procedure-incident.md # incident procedure and monitoring rehearsal (French)
+│   ├── security.md          # security baseline: threat model, invariants, framing decisions S1-S29
+│   ├── threat-model-stride.md # STRIDE threat model and monitoring plan
+│   ├── incident-procedure.md # incident procedure and monitoring rehearsal
 │   ├── faq.md               # questions and answers for five audiences
 │   ├── roadmap.md           # from MVP to a product in operation
-│   ├── stellar-platform.md  # overview of the Stellar platform (French)
-│   └── claude-tooling.md    # AI tooling: plugins, skills, MCP (French)
+│   ├── stellar-platform.md  # overview of the Stellar platform
+│   └── claude-tooling.md    # AI tooling: plugins, skills, MCP
 ├── .github/
 │   ├── workflows/ci.yml     # format, lint, test, WASM build and size budget, cargo-deny, RustSec audit, link check
 │   └── dependabot.yml       # weekly bumps of pinned actions and crates
@@ -239,18 +239,18 @@ npm run export -- --json --web      # feed web/public/history.json
 - [docs/faq.md](docs/faq.md): questions and answers for newcomers, users, the Stellar ecosystem, engineers and security reviewers.
 - [docs/roadmap.md](docs/roadmap.md): what the MVP proves, and the steps to a product in operation.
 
-- [docs/securite.md](docs/securite.md): security baseline, threat model and invariants of the contract (French).
-- [docs/modele-menace-stride.md](docs/modele-menace-stride.md): STRIDE threat model and monitoring plan (French).
-- [docs/procedure-incident.md](docs/procedure-incident.md): incident procedure, roles, action per alert and the monitoring rehearsal (French).
+- [docs/security.md](docs/security.md): security baseline, threat model and invariants of the contract.
+- [docs/threat-model-stride.md](docs/threat-model-stride.md): STRIDE threat model and monitoring plan.
+- [docs/incident-procedure.md](docs/incident-procedure.md): incident procedure, roles, action per alert and the monitoring rehearsal.
 - [docs/audit-scope.md](docs/audit-scope.md): audit package: scope, reproducible build, trust model, invariants, reviews done, where to look hardest.
-- [docs/reference-interface.md](docs/reference-interface.md): interface reference: the long-form description of every entry point, type and error, kept out of the WASM.
-- [docs/stellar-platform.md](docs/stellar-platform.md): overview of the Stellar platform (French).
-- [docs/claude-tooling.md](docs/claude-tooling.md): AI tooling (French).
+- [docs/interface-reference.md](docs/interface-reference.md): interface reference: the long-form description of every entry point, type and error, kept out of the WASM.
+- [docs/stellar-platform.md](docs/stellar-platform.md): overview of the Stellar platform.
+- [docs/claude-tooling.md](docs/claude-tooling.md): AI tooling.
 - [AGENTS.md](AGENTS.md): build, test and security rules for contributors and AI agents.
 
 ## Contributing
 
-Issues and pull requests are welcome. Before opening a pull request, run `make lint` and `make test` in `contracts/night-window/`, or the same commands CI runs. Keep error codes and exported types append-only, and read [docs/securite.md](docs/securite.md) before touching the contract.
+Issues and pull requests are welcome. Before opening a pull request, run `make lint` and `make test` in `contracts/night-window/`, or the same commands CI runs. Keep error codes and exported types append-only, and read [docs/security.md](docs/security.md) before touching the contract.
 
 ## Building with AI
 

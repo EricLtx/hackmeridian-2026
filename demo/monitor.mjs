@@ -1,5 +1,5 @@
 // Monitoring for Open Window on testnet: the detectors of the monitoring plan
-// in docs/modele-menace-stride.md, section 3.1.
+// in docs/threat-model-stride.md, section 3.1.
 //
 //   npm run monitor                  one pass, prints alerts
 //   npm run monitor -- --watch       a pass every 30 s

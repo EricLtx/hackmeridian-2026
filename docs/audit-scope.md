@@ -51,7 +51,7 @@ The hash to compare is the `wasmHash` of the contract instance's executable, as 
 | Date | Review | Outcome |
 |---|---|---|
 | 14 October 2026 | Independent review of version 2 | Every finding fixed with a test, or recorded as a decision |
-| 14 October 2026 | Scout (CoinFabrik) 0.3.17 on version 2 | 2 medium and 23 enhancement alerts, all false positives, justified in [securite.md](securite.md), section 7 |
+| 14 October 2026 | Scout (CoinFabrik) 0.3.17 on version 2 | 2 medium and 23 enhancement alerts, all false positives, justified in [security.md](security.md), section 7 |
 | 15 October 2026 | Independent review of version 3, first pass | 2 high, 3 medium, 9 low; all fixed with tests |
 | 15 October 2026 | Second pass on the fixes | 3 medium, 8 low; all fixed with tests, one recorded (L7, no migration needed) |
 | 15 October 2026 | Targeted pass on the re-anchoring round | No exploitable finding; 3 low and 2 informational items fixed with tests (signed values, feeds bound to the proposal, model-based apply check, pricing rule for the reading) |
