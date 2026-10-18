@@ -112,7 +112,7 @@ Found on the way and fixed: operations used to extend the contract's code entry,
 
 **Adds:**
 - deployment on mainnet with one fund, one stablecoin and allowlisted participants only;
-- low caps and a first-loss buffer;
+- low caps and the lender's reserve, held off chain by agreement (S16);
 - monitoring in production with pause on alert;
 - a public risk page: audits, privileged roles, dependencies, incident history.
 
@@ -141,7 +141,7 @@ Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. 
 - External audit of the frozen tag; every critical, high and medium finding fixed, each on its own commit.
 - Key custody on hardware with separate signers: governor signers, guardian, sentinel and keeper keys off the development machine; the ceremony replayed on devices; the monitor's witness on a second host.
 - A NAV feed for the pilot fund published to a SEP-40 interface, with the freshness policy written into the fund's admission.
-- One public story: the first-loss item of step 3 restated as the lender's own reserve, held off chain and sized from the maximum-loss scenarios (decision pending).
+- One public story: the reserve of step 3 is the lender's own, held off chain by agreement and sized from the maximum-loss scenarios (S16, amended 18 October 2026).
 - A second maintainer with keys, so that no role depends on one person.
 
 **Should**

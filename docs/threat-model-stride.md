@@ -122,7 +122,7 @@ State as of 14 October 2026, lifecycle implemented:
 
 - **In place and tested**: Spoof.1, Spoof.2, Spoof.3, Tamper.1, Tamper.2, Tamper.3, Repud.2, Disc.2, DoS.1, DoS.2, DoS.3, DoS.4, DoS.6, Elev.1, Elev.3, Elev.4. The caps per repo, per fund and per currency are in place.
 - **Partial**: Repud.1 (events in place, indexer to build), Tamper.4 (upgrade reserved to the governor; time delay and test with a real WASM to do), DoS.5 (limit documented, treatment in version 1.1).
-- **To put in place before any real deposit**: Elev.2 (multisig, time delay), the monitoring plan below in production, the first-loss buffer.
+- **To put in place before any real deposit**: Elev.2 (multisig, time delay), the monitoring plan below in production, the lender's reserve (S16).
 
 The monitoring plan is implemented (`demo/monitor.mjs`) and was rehearsed on testnet on 14 October 2026: six detectors out of seven were fired by a real event, the planned action was taken and the state restored. Results and what to do in [incident-procedure.md](incident-procedure.md).
 
