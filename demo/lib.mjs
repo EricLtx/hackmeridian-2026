@@ -127,7 +127,7 @@ const registry = new Map();
 
 /** Tells the error decoder which deployed contract is which. */
 export function registerContracts(contracts) {
-  const kinds = { openWindow: null, shares: "fund-token", navOracle: "nav-oracle", euro: "stellar-asset" };
+  const kinds = { openWindow: null, shares: "fund-token", navOracle: "nav-oracle", euro: "stellar-asset", shares2: "fund-token", navOracle2: "nav-oracle", euro2: "stellar-asset" };
   for (const [key, kind] of Object.entries(kinds)) {
     if (contracts?.[key]) registry.set(contracts[key], kind === null ? { kind: "open-window", table: ERRORS } : { kind, table: ERROR_TABLES[kind] });
   }
@@ -704,6 +704,20 @@ export function writeDeployment(state) {
     offers: { sponsor: state.ids.sponsorOffer ?? null, market: state.ids.marketOffer ?? null },
     updatedAt: new Date().toISOString(),
   };
+  // Every admitted fund and every registered stablecoin, for the pages that list them.
+  // The first entries repeat `fund` and `stablecoin`: readers of the old shape keep working.
+  deployment.funds = [
+    { ...deployment.fund, shares: state.contracts.shares, navFeed: state.contracts.navOracle, priceSource: "Cross" },
+    ...(state.contracts.shares2
+      ? [{ symbol: "tEMMF", name: "Test euro money market fund share", decimals: 7, navCurrency: "EUR", shares: state.contracts.shares2, navFeed: state.contracts.navOracle2, priceSource: "Direct" }]
+      : []),
+  ];
+  deployment.stablecoins = [
+    { ...deployment.stablecoin, contract: state.contracts.euro },
+    ...(state.contracts.euro2 ? [{ code: "tEURB", issuer: pub("euroIssuer"), currency: "EUR", decimals: 7, contract: state.contracts.euro2 }] : []),
+  ];
+  if (state.ids.dualOffer !== undefined) deployment.offers.dual = state.ids.dualOffer;
+  if (state.ids.secondOffer !== undefined) deployment.offers.second = state.ids.secondOffer;
   const dir = path.join(ROOT, "web", "public");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "deployment.testnet.json"), `${JSON.stringify(deployment, null, 2)}\n`);

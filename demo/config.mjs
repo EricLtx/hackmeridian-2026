@@ -41,4 +41,26 @@ export const DEMO_TIMELOCK_SECS = 300;
 export const OFFERS = {
   sponsor: { amount: 300_000n * ONE, rateBps: 250 },
   market: { amount: 150_000n * ONE, rateBps: 350 },
+  /** `setup -- --second-fund`: one offer in tEUR over both funds, one in the second euro stablecoin on the second fund. */
+  dual: { amount: 100_000n * ONE, rateBps: 300 },
+  second: { amount: 50_000n * ONE, rateBps: 275 },
+};
+
+/**
+ * Second fund (`setup -- --second-fund`): a euro money market fund share, so
+ * the NAV feed reports in the loan currency and the admission has no FX leg
+ * (`PriceSource::Direct`). Its own issuer (steward), its own NAV operator,
+ * its own settings: a lower haircut than the T-bill fund, a NAV age bound
+ * that spans a weekend (a fund that publishes on business days is 64 hours
+ * old on Monday morning), a smaller cap. Nothing in the contract is edited
+ * to admit it: the second fund is data.
+ */
+export const NAV_EUR_AT_SETUP = 100_200_000_000_000n;
+export const SECOND_FUND_SETTINGS = {
+  haircutBps: 150,
+  navMaxAgeSecs: 64 * 3600,
+  corridorFloorBps: 5,
+  maxYieldBps: 400,
+  maxPrincipalPerRepo: 50_000n * ONE,
+  maxOutstanding: 200_000n * ONE,
 };

@@ -245,9 +245,33 @@ function renderBoard() {
     );
   }
   setHTML($("tiles"), tiles.join(""));
+  renderFunds(b.funds ?? []);
 
   renderQuote(b.quote, S.quoteShares);
   renderOffers();
+}
+
+/** The funds this instance admits, each with its own issuer, feed and settings; shown when there is more than one. */
+function renderFunds(funds) {
+  const out = $("funds");
+  if (!out) return;
+  if (funds.length < 2) {
+    setHTML(out, "");
+    return;
+  }
+  const rows = funds.map((f) => {
+    const cfg = f.config.value;
+    const st = f.state.value;
+    const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
+    const lent = cfg && st ? `${formatAmount(BigInt(st.outstanding), SD(), "round")} of ${formatAmount(BigInt(cfg.max_outstanding), SD())} ${esc(code())}` : "—";
+    return `<tr><td>${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td>${esc(f.navCurrency)}</td><td>${source === "Cross" ? "exchange-rate leg" : source === "Direct" ? "none" : "—"}</td><td>${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td>${cfg ? `${Number(cfg.nav_max_age_secs) / 3600} h` : "—"}</td><td>${lent}</td></tr>`;
+  });
+  setHTML(
+    out,
+    `<h3 class="sub">Funds admitted</h3>
+     <p class="muted small">Each fund is admitted by the governor and its own issuer, with its own NAV feed and settings. The contract is the same for all of them.</p>
+     <table class="table"><thead><tr><th>Fund share</th><th>NAV in</th><th>FX leg</th><th>Haircut</th><th>Max NAV age</th><th>Lent</th></tr></thead><tbody>${rows.join("")}</tbody></table>`,
+  );
 }
 
 function renderQuote(result, shares) {
