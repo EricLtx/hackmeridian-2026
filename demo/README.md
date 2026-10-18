@@ -56,6 +56,10 @@ Refusals are shown by simulation: the transaction is built and simulated, the co
 
 The two cleanup steps of `guardrails`, the NAV correction and the unpause, are retried three times and then checked on chain. If either did not take, the scene prints a red line with the repair command.
 
+## Day of a live demo
+
+The evening before: fund every demo account (≥ 50 XLM), run one monitor pass (no TTL alert), play the full rehearsal, `setup -- --restage`, then `demo -- --auto` and `demo -- --only=second --auto` end to end; refresh the indexer (`index`, `verify --anchors`, `anchor`) and rebuild the web interface; save the text output of every scene and a screen recording as fallbacks. One hour before: `setup -- --restage` again (the seizure repo must mature during the talk), `npm run status`, the monitor in `--watch` mode without `--act`. On stage, one scene per command, `board` → `open` → `guardrails` → `repurchase` → `seize` → `second` → `value`. Fallbacks: a second endpoint in `STELLAR_RPC_URLS` (automatic failover); `setup -- --fx=local` if the exchange-rate feed is down (before the talk: it re-admits the fund through the time delay); `demo -- --only=repair` for a dirty state; the recording and the saved outputs if the network is gone.
+
 ## How a transaction is confirmed
 
 Each transaction is valid for 60 seconds. The script waits until it has landed or until the ledger has closed past that window, then reports one of two outcomes: confirmed, with its link, or expired, in which case nothing changed on chain. A lost response, a resend the network refuses because the first copy already applied, or a congested queue are resolved by looking the transaction up by its hash. A rerun therefore never repeats a step that landed late.
