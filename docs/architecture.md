@@ -26,7 +26,7 @@ flowchart LR
     BK[Backup NAV feed<br/>SEP-40, optional]
   end
   subgraph Tooling["Tooling (demo/, indexer/, web/)"]
-    W[Web interface<br/>Freighter, guide, positions, history]
+    W[Web interface<br/>Freighter; guided view and terminal view;<br/>positions, history]
     D[setup / run / upgrade / inventory]
     M[monitor: 13 detectors per fund<br/>actor with the sentinel, witness elsewhere]
     X[indexer: append-only journal,<br/>hash chain anchored on chain,<br/>register and SFTR views]
@@ -65,7 +65,7 @@ Three facts shape everything else. The issuer never lends against its own fund (
 | Stellar Asset Contract | Stellar's own token contract for classic assets | the third demo fund's share: a token this repository did not write, with the issuer's native flags | testnet |
 | `demo/` | Node 20, `@stellar/stellar-sdk` 17 | `setup` (deployment, roles, admissions, offers), `run` (scenes), `upgrade` (governed upgrade and migration), `inventory`, `monitor`, `keys` (ceremonies), `measure`, `fxlog`, `onboard` | the operator's host |
 | `indexer/` | Node 20 | event journal beyond the RPC's retention, SHA-256 hash chain, on-chain anchor, CSV, register and SFTR exports, `history.json` for the web | the operator's host |
-| `web/` | Vite, plain JavaScript, Freighter | guide per party with live terms, market board, borrow, positions with timelines, lend, history page | static files |
+| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page | static files |
 | CI | GitHub Actions | `cargo fmt --check`, `stellar contract build`, size budget, `clippy -D warnings`, `cargo test`, web tests and build, `cargo deny`, RustSec audit, link check | GitHub |
 
 ## 3. The contract's components
@@ -275,7 +275,7 @@ flowchart LR
   RPC1 --> IDX[indexer: journal + hash chain]
   IDX --> ANC[anchor on chain]
   IDX --> VIEWS[register, SFTR, CSV, history.json]
-  VIEWS --> WEB[web: guide, board, positions with timelines, history page]
+  VIEWS --> WEB[web: guided view, terminal view with tape and blotter, history page]
   IDX --> MON
 ```
 

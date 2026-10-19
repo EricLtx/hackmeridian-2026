@@ -19,6 +19,7 @@ export const ERRORS = {
   37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached", 40: "StewardCannotLend", 41: "NotSoleLender",
   42: "AttestationMissing", 43: "NotGuardianBackup", 44: "SoleLenderFixed", 45: "NoStewardBackup",
   46: "TrusteeFixed", 47: "TrusteeNotIndependent", 48: "FxBandExceedsHaircut",
+  49: "SentinelNotIndependent", 50: "NothingToMigrate", 51: "SchemaOutdated",
 };
 
 /** Error tables of the other contracts a transaction can reach. */
@@ -155,6 +156,11 @@ const SENTENCES = {
     NotSoleLender: () => "This instance is run by a single lender: only that lender can make offers here.",
     StewardCannotLend: () => "The fund's issuer cannot lend against its own fund.",
     AttestationMissing: () => "The issuer must record this lender's declaration before approving it.",
+    FxBandExceedsHaircut: () => "The exchange-rate band of this fund would be wider than its exchange-rate haircut, which the contract refuses.",
+    SentinelNotIndependent: () => "The sentinel must be a key that holds no other role.",
+    NothingToMigrate: () => "The contract's stored records are already at the current version.",
+    SchemaOutdated: () =>
+      "The contract was just upgraded and its stored records are not migrated yet: new loans and offers resume once the governor migrates them. Repurchases, withdrawals and deliveries still work.",
   },
   "fund-token": {
     NotWhitelisted: (c) => `This wallet is not on the fund's allowlist.${c.command ? ` Ask the operator to run: ${c.command}` : " Ask the operator to onboard it."}`,

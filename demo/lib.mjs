@@ -105,6 +105,7 @@ export const ERRORS = {
   37: "NoFallback", 38: "ProposalExpired", 39: "LimitReached", 40: "StewardCannotLend", 41: "NotSoleLender",
   42: "AttestationMissing", 43: "NotGuardianBackup", 44: "SoleLenderFixed", 45: "NoStewardBackup",
   46: "TrusteeFixed", 47: "TrusteeNotIndependent", 48: "FxBandExceedsHaircut",
+  49: "SentinelNotIndependent", 50: "NothingToMigrate", 51: "SchemaOutdated",
 };
 
 /** Error tables of the other contracts the demo calls. */

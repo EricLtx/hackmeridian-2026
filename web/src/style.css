@@ -53,6 +53,11 @@
   box-sizing: border-box;
 }
 
+/* Hidden means hidden, whatever display a class sets. */
+[hidden] {
+  display: none !important;
+}
+
 html {
   -webkit-text-size-adjust: 100%;
   scroll-padding-top: 72px;
@@ -1204,5 +1209,584 @@ code.err {
 
   .nav a {
     flex: none;
+  }
+}
+
+/* View switch in the header */
+
+.face-switch {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.face-btn {
+  font: inherit;
+  font-size: 0.85rem;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.face-btn + .face-btn {
+  border-left: 1px solid var(--border);
+}
+
+.face-btn[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.face-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* Terminal face: the page takes the terminal palette, whatever the system theme. */
+
+body.face-terminal {
+  --bg: #07090c;
+  --surface: #0d1116;
+  --surface-2: #131922;
+  --text: #d9e0e8;
+  --muted: #8b96a5;
+  --border: #222a35;
+  --accent: #ffb000;
+  --accent-text: #07090c;
+  --accent-soft: #2a1f00;
+  --ok: #3fd18b;
+  --ok-soft: #0e261a;
+  --warn: #ffb000;
+  --warn-soft: #2a1f00;
+  --danger: #ff6b5e;
+  --danger-soft: #2c1210;
+  --focus: #ffb000;
+  --shadow: none;
+  --t-id: #63c7ff;
+  color-scheme: dark;
+}
+
+body.face-terminal .nav {
+  display: none;
+}
+
+body.face-terminal .top {
+  background: #000;
+  backdrop-filter: none;
+}
+
+.term {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.45;
+  max-width: 1720px;
+  margin: 0 auto;
+  padding: 10px 12px 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.term .spinner {
+  animation: none;
+  border-style: dotted;
+}
+
+.t-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 16px;
+  padding: 6px 10px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.t-status {
+  font-size: 12px;
+}
+
+.tb-item {
+  white-space: nowrap;
+}
+
+.tb-help {
+  white-space: normal;
+}
+
+.tb-k {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.tb-v {
+  color: var(--text);
+}
+
+.t-ok {
+  color: var(--ok);
+}
+
+.t-warn,
+.t-amber {
+  color: var(--warn);
+}
+
+.t-bad {
+  color: var(--danger);
+}
+
+.t-id {
+  color: var(--t-id);
+}
+
+.t-dim {
+  color: var(--muted);
+}
+
+/* Command line: Enter is GO */
+
+.t-cmd {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: #000;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+
+.t-cmd:focus-within {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.t-prompt {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.t-input {
+  font: inherit;
+  font-size: 16px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  caret-color: var(--accent);
+  text-transform: uppercase;
+}
+
+.t-input::placeholder {
+  color: #3d4652;
+}
+
+.t-input:focus {
+  outline: none;
+}
+
+.t-key {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.t-key-go {
+  background: #1fa35c;
+  color: #000;
+}
+
+.t-key-cancel {
+  background: #c0392b;
+  color: #fff;
+}
+
+.t-key:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.t-act .t-key {
+  min-height: 0;
+  padding: 1px 6px;
+  font-size: 11px;
+  cursor: default;
+}
+
+.t-console {
+  min-height: 4.6em;
+  max-height: 9.6em;
+  overflow-y: auto;
+  padding: 4px 10px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.t-console.is-help {
+  max-height: 28em;
+}
+
+.tc {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tc-in {
+  color: #fff;
+}
+
+.tc-in::before {
+  content: "OW> ";
+  color: var(--accent);
+}
+
+.tc-out {
+  color: var(--muted);
+}
+
+.tc-ok {
+  color: var(--ok);
+}
+
+.tc-warn {
+  color: var(--warn);
+}
+
+.tc-err {
+  color: var(--danger);
+}
+
+.tc-help {
+  color: var(--text);
+}
+
+/* Panels */
+
+.t-grid {
+  display: grid;
+  gap: 8px;
+  align-items: start;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 4fr) minmax(0, 4fr);
+  grid-template-areas:
+    "book ticket funds"
+    "pos pos tape";
+}
+
+.t-area-book {
+  grid-area: book;
+}
+
+.t-area-ticket {
+  grid-area: ticket;
+}
+
+.t-area-funds {
+  grid-area: funds;
+}
+
+.t-area-pos {
+  grid-area: pos;
+}
+
+.t-area-tape {
+  grid-area: tape;
+}
+
+.t-panel {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.t-panel.is-focus {
+  border-color: var(--accent);
+}
+
+.t-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 5px 8px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.t-meta {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.t-mn {
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 2px;
+  background: var(--accent);
+  color: #000;
+  cursor: pointer;
+}
+
+.t-mn-static {
+  cursor: default;
+}
+
+.t-mn:focus-visible,
+.t-pick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.t-body {
+  max-height: 26em;
+  overflow: auto;
+}
+
+.t-area-pos .t-body,
+.t-area-tape .t-body {
+  max-height: 32em;
+}
+
+.tt {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.tt th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 6px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-align: left;
+}
+
+.tt td {
+  padding: 3px 6px;
+  border-bottom: 1px solid #151b23;
+}
+
+.tt .n {
+  text-align: right;
+}
+
+.tt tbody tr:hover td {
+  background: #111821;
+}
+
+.tt .t-total td {
+  border-top: 1px solid var(--border);
+  color: #fff;
+  font-weight: 700;
+}
+
+.tt-tape td {
+  vertical-align: top;
+}
+
+.t-wrap {
+  min-width: 18ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.t-code {
+  font-weight: 700;
+}
+
+.t-flag {
+  margin-right: 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.t-pick {
+  font: inherit;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--t-id);
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.t-pick:hover {
+  color: #fff;
+}
+
+.t-tx {
+  color: var(--t-id);
+}
+
+.t-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--muted);
+}
+
+/* Ticket */
+
+.t-ticket {
+  padding-bottom: 4px;
+}
+
+.t-dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 14px;
+  margin: 0;
+  padding: 6px 10px;
+}
+
+.t-dl dt {
+  color: var(--muted);
+}
+
+.t-dl dd {
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.t-dl dd.strong {
+  color: #fff;
+  font-weight: 700;
+}
+
+.t-checks {
+  list-style: none;
+  margin: 0;
+  padding: 4px 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.t-checks li::before {
+  content: "✓ ";
+  color: var(--ok);
+}
+
+.t-checks li.fail {
+  color: var(--danger);
+}
+
+.t-checks li.fail::before {
+  content: "✗ ";
+  color: var(--danger);
+}
+
+.t-checks li.warn {
+  color: var(--warn);
+}
+
+.t-checks li.warn::before {
+  content: "! ";
+  color: var(--warn);
+}
+
+.t-note {
+  margin: 0;
+  padding: 4px 10px;
+  color: var(--muted);
+}
+
+.t-act {
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.t-start {
+  padding: 8px 10px;
+}
+
+.t-start p {
+  margin: 0 0 6px;
+}
+
+.term kbd {
+  font: inherit;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: #1a212b;
+  color: #fff;
+}
+
+.t-txline {
+  margin: 0 8px 8px;
+}
+
+@media (max-width: 1280px) {
+  .t-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "book ticket"
+      "pos pos"
+      "funds tape";
+  }
+}
+
+@media (max-width: 760px) {
+  .term {
+    padding: 8px;
+  }
+
+  .t-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "ticket"
+      "book"
+      "pos"
+      "funds"
+      "tape";
+  }
+
+  .t-key {
+    padding: 6px 8px;
+  }
+
+  .t-body,
+  .t-area-pos .t-body,
+  .t-area-tape .t-body {
+    max-height: none;
   }
 }

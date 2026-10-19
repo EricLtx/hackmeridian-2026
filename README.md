@@ -114,6 +114,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Three internal security reviews of version 3, every finding fixed with a test; audit package ready ([docs/audit-scope.md](docs/audit-scope.md))
 - [x] Testnet deployment with test fund tokens and a test oracle: a scripted live demo in [demo/](demo/README.md), with a fallback FX feed
 - [x] Minimal web interface with Freighter: market board, borrow, positions, repurchase, lend, withdraw, take the shares at maturity ([web/](web/README.md))
+- [x] Two views of the web interface (19 October 2026): a guided page with a guide per party, the instance's terms read from the chain and a timeline per position; and a terminal view for desk users, keyboard-first, with an offer book, tickets that show every number and check before signing, a positions blotter, the funds and a tape of contract events ([web/README.md](web/README.md#terminal-view))
 - [x] Treasurer's return priced in the live demo with the contract's own interest rule
 - [ ] Key custody, the critical path: governor signers on separate hardware devices with one outside the team, a guardian restricted to pause and cancel, issuer stewards held in multisig
 - [x] Version 4 (October 2026): lenders independent of the fund (the issuer can never lend, attestation before approval, optional single-lender instance); custody safeguards found by the custody study (governor handover behind the delay with a guardian veto, guardian handover only to a registered backup, steward recovery only to the issuer's backup); two internal review passes, every finding fixed with a test
@@ -149,7 +150,7 @@ The enforced part of the baseline:
 │   └── nav-oracle/          # demo: SEP-40 feed an operator publishes a NAV to
 ├── demo/                    # testnet demo runner, wallet onboarding, monitoring, key-ceremony tooling (Node.js)
 ├── indexer/                 # append-only event journal under a hash chain; register and SFTR views
-├── web/                     # minimal web interface (Vite, plain JavaScript, Freighter), history page
+├── web/                     # web interface (Vite, plain JavaScript, Freighter): guided view, terminal view, history page
 ├── docs/
 │   ├── security.md          # security baseline: threat model, invariants, framing decisions S1-S29
 │   ├── threat-model-stride.md # STRIDE threat model and monitoring plan

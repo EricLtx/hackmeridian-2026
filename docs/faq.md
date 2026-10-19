@@ -88,6 +88,10 @@ The fund shares held for that repo, at maturity, sent to your address or to anot
 - **Admission.** Your fund can only be admitted with your signature and the governor's, on the same transaction.
 - **Custody.** The contract must be on your allowlist like any other holder, so nothing moves without your consent.
 
+### Is there a view for trading and treasury desks?
+
+Yes. The web interface has a terminal view (`?view=terminal`): a command line where Enter is the GO key, the offer book best rate first, tickets that show every number and every check before anything is signed, a positions blotter with the amount due now and a countdown to the term, every fund's NAV and its age against the fund's own bound, and the tape of contract events. `Q 1000` values 1,000 shares; `O 1 1K 64` prepares a 64-hour loan on offer 1; `HELP` lists the rest. It signs through the same wallet and the same functions as the guided page, described in [web/README.md](../web/README.md#terminal-view).
+
 ### What is a designated offer?
 
 An offer from an approved lender that the fund's steward marks as designated by the issuer (`set_sponsor` in the interface, a name kept for compatibility), for instance the lender the issuer works with. Interfaces show it first. The mark says nothing about who funds the offer and gives no special right to take shares or exit first. The issuer itself should not fund offers on its own fund (see "Where does the money come from?").
@@ -286,7 +290,7 @@ Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 ## Status and limits
 
 - **Testnet only.** Nothing is deployed on mainnet, and no real asset is at stake.
-- **A minimal web interface** in `web/` covers the market board, borrowing, positions, repurchase, lending and seizure at maturity, with the Freighter wallet on testnet. The scripted demo runs in a terminal, and every transaction can be checked on the testnet explorer.
+- **A web interface** in `web/` covers the market board, borrowing, positions, repurchase, lending and seizure at maturity, with the Freighter wallet on testnet, in two views: a guided page for a first visit and a terminal view for desk users. The scripted demo runs in a console, and every transaction can be checked on the testnet explorer.
 - **Version 1 scope:**
   - whole repurchase only, no partial repayment and no rollover;
   - one NAV feed per fund, plus an optional backup feed;

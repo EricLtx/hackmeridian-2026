@@ -22,6 +22,10 @@
           <span>Open Window</span>
         </a>
         <span class="pill pill-net" id="network">Testnet</span>
+        <div class="face-switch" role="group" aria-label="View">
+          <button type="button" class="face-btn" data-face="guide" aria-pressed="true">Guide</button>
+          <button type="button" class="face-btn" data-face="terminal" aria-pressed="false" title="Dense keyboard view for desk users">Terminal</button>
+        </div>
         <nav class="nav" aria-label="Sections">
           <a href="#guide">How it works</a>
           <a href="#board">Market</a>
@@ -199,6 +203,53 @@
         <div id="my-offers"></div>
         <div id="lent"></div>
       </section>
+    </main>
+
+
+    <!-- Terminal face: dense, keyboard-first; same state and same signing as the guided view -->
+    <main id="terminal" class="term" hidden aria-label="Open Window terminal">
+      <div class="t-band" id="t-band" aria-label="Live facts"></div>
+      <form class="t-cmd" id="t-form" autocomplete="off" novalidate>
+        <label for="t-input" class="t-prompt">OW&gt;</label>
+        <input
+          id="t-input"
+          class="t-input"
+          spellcheck="false"
+          autocapitalize="characters"
+          autocorrect="off"
+          enterkeyhint="go"
+          aria-describedby="t-hint"
+          placeholder="HELP"
+        />
+        <button type="submit" class="t-key t-key-go">GO</button>
+        <button type="button" class="t-key t-key-cancel" data-cmd="CANCEL">CANCEL</button>
+      </form>
+      <p class="sr-only" id="t-hint">Type a command and press Enter. HELP lists the commands. Escape cancels a ticket.</p>
+      <div class="t-console" id="t-console" role="log" aria-live="polite" aria-label="Console"></div>
+      <div class="t-grid">
+        <section class="t-panel t-area-book" id="t-book-panel" aria-labelledby="t-book-title">
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="OFF">OFF</button><span id="t-book-title">Offer book</span><span class="t-meta" id="t-book-meta"></span></h2>
+          <div class="t-body" id="t-book"></div>
+        </section>
+        <section class="t-panel t-area-ticket" id="t-ticket-panel" aria-labelledby="t-ticket-title">
+          <h2 class="t-title"><span class="t-mn t-mn-static">Q·O·R·L</span><span id="t-ticket-title">TICKET</span></h2>
+          <div class="t-body t-ticket" id="t-ticket" aria-live="polite"></div>
+          <div class="tx t-txline" id="t-tx" role="status" aria-live="polite"></div>
+        </section>
+        <section class="t-panel t-area-funds" id="t-funds-panel" aria-labelledby="t-funds-title">
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="FND">FND</button><span id="t-funds-title">Funds</span><span class="t-meta" id="t-funds-meta"></span></h2>
+          <div class="t-body" id="t-funds"></div>
+        </section>
+        <section class="t-panel t-area-pos" id="t-pos-panel" aria-labelledby="t-pos-title">
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="POS">POS</button><span id="t-pos-title">Positions</span><span class="t-meta" id="t-pos-meta"></span></h2>
+          <div class="t-body" id="t-pos"></div>
+        </section>
+        <section class="t-panel t-area-tape" id="t-tape-panel" aria-labelledby="t-tape-title">
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="EV">EV</button><span id="t-tape-title">Tape</span><span class="t-meta" id="t-tape-meta"></span></h2>
+          <div class="t-body" id="t-tape"></div>
+        </section>
+      </div>
+      <div class="t-band t-status" id="t-status" aria-label="Wallet and status"></div>
     </main>
 
     <footer class="wrap foot">

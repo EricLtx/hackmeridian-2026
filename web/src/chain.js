@@ -105,6 +105,30 @@ function cursorLedger(cursor) {
 
 const normalizeRepo = (id, repo) => ({ id, ...repo, status: Array.isArray(repo.status) ? repo.status[0] : repo.status });
 
+/** Decoded Soroban values as plain JSON, as the indexer writes them: big integers as strings, bytes as hex. */
+export function plain(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") return value;
+  if (value instanceof Uint8Array) return toHex(value);
+  if (Array.isArray(value)) return value.map(plain);
+  if (value instanceof Map) return Object.fromEntries([...value.entries()].map(([k, v]) => [String(plain(k)), plain(v)]));
+  if (typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, plain(v)]));
+  return String(value);
+}
+
+/** One `getEvents` entry in the shape of the indexer's export: the event name is topic 0. */
+function decodeEvent(raw) {
+  const topics = (raw.topic ?? []).map((t) => plain(scValToNative(t)));
+  let data = null;
+  try {
+    data = plain(scValToNative(raw.value));
+  } catch {
+    data = null;
+  }
+  return { ledger: raw.ledger, closedAt: raw.ledgerClosedAt, txHash: raw.txHash, id: raw.id, event: String(topics[0] ?? ""), topics: topics.slice(1), data };
+}
+
 export class Chain {
   /** `deployment` is the parsed deployment.testnet.json. */
   constructor(deployment) {
@@ -114,6 +138,14 @@ export class Chain {
     this.fund = deployment.contracts.fundShares;
     this.server = new rpc.Server(deployment.rpcUrl);
     this.kinds = contractKinds(deployment.contracts);
+    // Every admitted fund's share token and NAV feed, and every registered stablecoin, so a refusal names its contract.
+    for (const f of deployment.funds ?? []) {
+      if (f.shares && !this.kinds.has(f.shares)) this.kinds.set(f.shares, f.tokenCode === "stellar-asset-contract" ? "stellar-asset" : "fund-token");
+      if (f.navFeed && !this.kinds.has(f.navFeed)) this.kinds.set(f.navFeed, "nav-oracle");
+    }
+    for (const c of deployment.stablecoins ?? []) {
+      if (c.contract && !this.kinds.has(c.contract)) this.kinds.set(c.contract, "stellar-asset");
+    }
     this.nativeContract = Asset.native().contractId(this.passphrase);
   }
 
@@ -184,8 +216,9 @@ export class Chain {
     }
   }
 
-  quote(shares) {
-    return this.read(this.contracts.openWindow, "quote", [sv.address(this.fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]);
+  /** What `shares` of `fund` (default: the interface's fund) secure now, fully checked by the contract. */
+  quote(shares, fund = this.fund) {
+    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]);
   }
 
   async offers() {
@@ -296,6 +329,68 @@ export class Chain {
       request = { cursor: response.cursor, filters, limit: 100 };
     }
     return { openings, nextLedger: latest };
+  }
+
+  /**
+   * A fund's NAV as the contract reads it (`fund_price`) and, for a
+   * cross-priced fund, its exchange rate. Each `{ value }` or `{ error }`.
+   */
+  async feeds(fund, config) {
+    const source = config?.source;
+    const [nav, fx] = await Promise.all([
+      this.settle(this.contracts.openWindow, "fund_price", [sv.address(fund)]),
+      Array.isArray(source) && source[0] === "Cross" ? this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]) : { value: null },
+    ]);
+    return { nav, fx };
+  }
+
+  /**
+   * Governance changes waiting for their time delay, each `{ value }` (null
+   * when nothing is pending) or `{ error }`: upgrade, governor handover,
+   * guardian, envelope, term ceiling, the currency cap, and each fund; plus
+   * the stored layout version.
+   */
+  async pendingChanges(funds = []) {
+    const ow = this.contracts.openWindow;
+    const currency = sv.symbol(this.deployment.stablecoin.currency);
+    const [upgrade, admin, guardian, envelope, maxTerm, cap, schema] = await Promise.all([
+      this.settle(ow, "pending_upgrade"),
+      this.settle(ow, "pending_admin"),
+      this.settle(ow, "pending_guardian_change"),
+      this.settle(ow, "pending_envelope_change"),
+      this.settle(ow, "pending_max_term_change"),
+      this.settle(ow, "pending_currency_cap_change", [currency]),
+      this.settle(ow, "schema_version"),
+    ]);
+    const fundChanges = await Promise.all(
+      funds.map(async (f) => ({ symbol: f.symbol, change: await this.settle(ow, "pending_fund_change", [sv.address(f.shares)]) })),
+    );
+    return { upgrade, admin, guardian, envelope, maxTerm, cap, funds: fundChanges, schema };
+  }
+
+  /**
+   * The contract's events from `startLedger` on (default: the oldest
+   * ledger the RPC still keeps, about a week), decoded like the indexer's
+   * export: `{ ledger, closedAt, txHash, id, event, topics, data }`, the
+   * event name taken out of the topics. Returns `{ events, nextLedger }`.
+   */
+  async contractEvents(startLedger = null, { maxPages = 20 } = {}) {
+    const health = await this.net(() => this.server.getHealth());
+    const wanted = startLedger ?? health.oldestLedger;
+    const start = Math.min(Math.max(wanted, health.oldestLedger), health.latestLedger);
+    const filters = [{ type: "contract", contractIds: [this.contracts.openWindow] }];
+    const events = [];
+    let request = { startLedger: start, filters, limit: 100 };
+    let latest = health.latestLedger;
+    for (let page = 0; page < maxPages; page += 1) {
+      const response = await this.net(() => this.server.getEvents(request));
+      for (const raw of response.events) events.push(decodeEvent(raw));
+      latest = response.latestLedger;
+      if (!response.cursor || response.cursor === request.cursor) break;
+      if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
+      request = { cursor: response.cursor, filters, limit: 100 };
+    }
+    return { events, nextLedger: latest };
   }
 
   // -------------------------------------------------------------------------

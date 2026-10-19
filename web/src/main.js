@@ -30,10 +30,12 @@ import {
 } from "./terms.js";
 import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
 import { eventsOfRepo, timelineOf } from "./timeline.js";
+import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 
 const REFRESH_MS = 15_000;
 const REMEMBER_KEY = "openwindow.connect";
+const FACE_KEY = "openwindow.face";
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) =>
@@ -62,6 +64,7 @@ const S = {
   delay: null, // the contract's time delay, seconds
   version: null, // contract version
   guideRole: "borrower",
+  face: "guide", // "guide": the explained page; "terminal": the dense keyboard view
   eventsFrom: null,
   busy: false,
   refreshing: false,
@@ -81,6 +84,21 @@ const money = (units, rounding) => `${formatAmount(units, SD(), rounding)} ${cod
 const exact = (units) => `${formatUnits(units, SD())} ${code()}`;
 const shareAmount = (units) => `${formatAmount(units, FD())} ${sym()}`;
 const onboardCommand = (address, lender = false) => `cd demo && npm run onboard -- ${address}${lender ? " --role=lender" : ""}`;
+
+/** The terminal face: same state, same reads, same signing; its own screen. */
+const terminal = createTerminal({
+  S,
+  $,
+  esc,
+  now,
+  setHTML: (el, html) => setHTML(el, html),
+  runTx: (el, context, action, message) => runTx(el, context, action, message),
+  connect: () => connect(),
+  refreshAll: () => refreshAll(),
+  setFace: (face) => setFace(face),
+  fundLimits: () => fundLimits(),
+  onboardCommand,
+});
 
 /** Replaces an element's markup only when it changed, so focus and selection survive refreshes. */
 function setHTML(el, html) {
@@ -531,6 +549,7 @@ function renderAllWalletViews() {
   renderPositions();
   renderLend();
   if (S.board) renderOffers();
+  terminal.render();
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,7 +1137,8 @@ async function refreshWallet() {
   renderWallet();
   renderBorrow();
   renderLend();
-  await refreshPositions();
+  // The terminal keeps its own view of every repo; the guided view's positions catch up when it returns.
+  if (S.face !== "terminal") await refreshPositions();
 }
 
 async function refreshAll() {
@@ -1129,6 +1149,7 @@ async function refreshAll() {
     await refreshBoard();
     await loadHistory();
     await refreshWallet();
+    await terminal.refresh();
     updated.innerHTML = `Updated <span data-since="${now()}">just now</span>`;
     $("load-error").hidden = true;
   } catch (error) {
@@ -1149,6 +1170,48 @@ function tick() {
 }
 
 // ---------------------------------------------------------------------------
+// Views: the guided page, or the terminal
+// ---------------------------------------------------------------------------
+
+/** Shows one face. The choice is kept in the URL (?view=terminal) and, when allowed, in local storage. */
+function setFace(face, { persist = true } = {}) {
+  const term = face === "terminal";
+  S.face = term ? "terminal" : "guide";
+  document.body.classList.toggle("face-terminal", term);
+  $("main").hidden = term;
+  $("terminal").hidden = !term;
+  for (const button of document.querySelectorAll("[data-face]")) button.setAttribute("aria-pressed", String(button.dataset.face === S.face));
+  document.querySelector(".skip")?.setAttribute("href", term ? "#t-input" : "#main");
+  if (persist) {
+    try {
+      localStorage.setItem(FACE_KEY, S.face);
+    } catch {
+      // Storage blocked: the URL still carries the choice.
+    }
+    const url = new URL(window.location.href);
+    if (term) url.searchParams.set("view", "terminal");
+    else url.searchParams.delete("view");
+    window.history.replaceState(null, "", url);
+  }
+  if (term) terminal.mount();
+  else {
+    terminal.unmount();
+    refreshAll();
+  }
+}
+
+/** The face to open with: the URL first, then the remembered choice, then the guided page. */
+function initialFace() {
+  const asked = new URLSearchParams(window.location.search).get("view");
+  if (asked === "terminal" || asked === "guide") return asked;
+  try {
+    return localStorage.getItem(FACE_KEY) === "terminal" ? "terminal" : "guide";
+  } catch {
+    return "guide";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
 
@@ -1165,6 +1228,7 @@ function wire() {
     if (target.id === "connect") return connect();
     if (target.id === "disconnect") return disconnect();
     if (target.id === "refresh") return refreshAll();
+    if (target.dataset.face) return setFace(target.dataset.face);
     if (target.dataset.copy !== undefined) {
       try {
         await navigator.clipboard.writeText(target.dataset.copy);
@@ -1288,6 +1352,7 @@ async function start() {
 
   wire();
   renderAllWalletViews();
+  setFace(initialFace(), { persist: false });
   await refreshAll();
   setInterval(() => {
     if (!document.hidden) refreshAll();
