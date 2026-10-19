@@ -1,0 +1,30 @@
+// French translations of src/timeline.js, keyed by the English source text.
+export default {
+  "Opened": "Ouvert le",
+  "shares locked, stablecoins received, in one transaction": "parts bloquées, stablecoins reçus, en une seule transaction",
+  "Interest running": "Intérêts en cours",
+  "Interest charged": "Intérêts facturés",
+  "{n} started hour so far, one more at each started hour": "{n} heure entamée jusqu'ici, une de plus à chaque heure entamée",
+  "{n} started hours so far, one more at each started hour": "{n} heures entamées jusqu'ici, une de plus à chaque heure entamée",
+  "{n} started hour": "{n} heure entamée",
+  "{n} started hours": "{n} heures entamées",
+  "{n} started hour (closing time not on chain)": "{n} heure entamée (heure de clôture absente de la chaîne)",
+  "{n} started hours (closing time not on chain)": "{n} heures entamées (heure de clôture absente de la chaîne)",
+  "Term ends": "Échéance",
+  "past term: the lender may take the shares; repurchase still possible until it does":
+    "échéance dépassée : le prêteur peut prendre les parts ; le rachat reste possible tant qu'il ne l'a pas fait",
+  "repurchase any time before; after, the lender may take the shares": "rachat possible à tout moment avant ; après, le prêteur peut prendre les parts",
+  "Term end": "Échéance",
+  "closed before the term": "clôturé avant l'échéance",
+  "term reached": "échéance atteinte",
+  "Repurchased": "Racheté",
+  "Shares taken by the lender": "Parts prises par le prêteur",
+  "principal and interest returned to the offer": "principal et intérêts reversés à l'offre",
+  "the borrower did not repurchase by the term": "l'emprunteur n'a pas racheté avant l'échéance",
+  "Shares held back": "Parts retenues",
+  "the share token refused the transfer; the shares are recorded for the beneficiary and can be released once the issuer allows":
+    "le jeton de part a refusé le transfert ; les parts sont enregistrées pour le bénéficiaire et pourront être libérées dès que l'émetteur l'autorise",
+  "Shares delivered": "Parts livrées",
+  "held back by the share token at closing, delivered after the issuer allowed it": "retenues par le jeton de part à la clôture, livrées après autorisation de l'émetteur",
+  "delivered": "livrées",
+};

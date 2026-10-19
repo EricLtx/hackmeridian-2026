@@ -4,6 +4,7 @@
 // that repo (optional), and the deferred release record (optional). It returns
 // ordered steps the page renders; nothing here touches the network or the DOM.
 
+import { t, tn } from "./i18n.js";
 import { chargedHours } from "./terms.js";
 
 /** Step states: `done` happened, `now` is running, `next` is due later, `late` needs attention, `off` did not happen. */
@@ -18,13 +19,14 @@ const first = (events, name) => events.find((e) => e.event === name) ?? null;
  */
 export function eventsOfRepo(events, repoId) {
   const id = String(repoId);
-  return (events ?? []).filter((e) => (e.topics ?? []).some((t) => String(t) === id) || String(e.data?.repo_id ?? "") === id);
+  return (events ?? []).filter((e) => (e.topics ?? []).some((topic) => String(topic) === id) || String(e.data?.repo_id ?? "") === id);
 }
 
 /**
  * @param repo  { id, status, opened_at, maturity, principal, rate_bps, shares }
  * @param opts  { now, opening?: { txHash }, events?: [], pendingRelease?: { shares, to } }
- * @returns [{ key, label, at, tx, state, detail }] with `at` in Unix seconds or null
+ * @returns [{ key, label, at, tx, state, detail }] with `at` in Unix seconds or null;
+ *   `label` and `detail` are in the interface language, `key` and `state` are codes
  */
 export function timelineOf(repo, { now, opening = null, events = [], pendingRelease = null } = {}) {
   const openedAt = Number(repo.opened_at);
@@ -40,70 +42,76 @@ export function timelineOf(repo, { now, opening = null, events = [], pendingRele
 
   steps.push({
     key: "opened",
-    label: "Opened",
+    label: t("Opened"),
     at: openedAt,
     tx: opening?.txHash ?? opened?.txHash ?? null,
     state: "done",
-    detail: "shares locked, stablecoins received, in one transaction",
+    detail: t("shares locked, stablecoins received, in one transaction"),
   });
 
   const until = isOpen ? now : (closedAt ?? now);
   const hours = chargedHours(Math.max(until - openedAt, 0));
   steps.push({
     key: "interest",
-    label: isOpen ? "Interest running" : "Interest charged",
+    label: isOpen ? t("Interest running") : t("Interest charged"),
     at: null,
     tx: null,
     state: isOpen ? "now" : "done",
-    detail: `${hours} started hour${hours === 1 ? "" : "s"}${isOpen ? " so far, one more at each started hour" : closedAt ? "" : " (closing time not on chain)"}`,
+    detail: isOpen
+      ? tn("{n} started hour so far, one more at each started hour", "{n} started hours so far, one more at each started hour", hours)
+      : closedAt
+        ? tn("{n} started hour", "{n} started hours", hours)
+        : tn("{n} started hour (closing time not on chain)", "{n} started hours (closing time not on chain)", hours),
   });
 
   if (isOpen) {
     const late = now >= maturity;
     steps.push({
       key: "maturity",
-      label: "Term ends",
+      label: t("Term ends"),
       at: maturity,
       tx: null,
       state: late ? "late" : "next",
-      detail: late ? "past term: the lender may take the shares; repurchase still possible until it does" : "repurchase any time before; after, the lender may take the shares",
+      detail: late
+        ? t("past term: the lender may take the shares; repurchase still possible until it does")
+        : t("repurchase any time before; after, the lender may take the shares"),
     });
     return steps;
   }
 
   steps.push({
     key: "maturity",
-    label: "Term end",
+    label: t("Term end"),
     at: maturity,
     tx: null,
     state: closedAt !== null && closedAt < maturity ? "off" : "done",
-    detail: closedAt !== null && closedAt < maturity ? "closed before the term" : "term reached",
+    detail: closedAt !== null && closedAt < maturity ? t("closed before the term") : t("term reached"),
   });
   steps.push({
     key: "closed",
-    label: repurchased ? "Repurchased" : "Shares taken by the lender",
+    label: repurchased ? t("Repurchased") : t("Shares taken by the lender"),
     at: closedAt,
     tx: closedEvent?.txHash ?? null,
     state: "done",
-    detail: repurchased ? "principal and interest returned to the offer" : "the borrower did not repurchase by the term",
+    detail: repurchased ? t("principal and interest returned to the offer") : t("the borrower did not repurchase by the term"),
   });
   if (pendingRelease) {
     steps.push({
       key: "release",
-      label: "Shares held back",
+      label: t("Shares held back"),
       at: deferred ? unix(deferred.closedAt) : null,
       tx: deferred?.txHash ?? null,
       state: "late",
-      detail: "the share token refused the transfer; the shares are recorded for the beneficiary and can be released once the issuer allows",
+      detail: t("the share token refused the transfer; the shares are recorded for the beneficiary and can be released once the issuer allows"),
     });
   } else if (deferred || released) {
     steps.push({
       key: "release",
-      label: "Shares delivered",
+      label: t("Shares delivered"),
       at: released ? unix(released.closedAt) : null,
       tx: released?.txHash ?? null,
       state: "done",
-      detail: deferred ? "held back by the share token at closing, delivered after the issuer allowed it" : "delivered",
+      detail: deferred ? t("held back by the share token at closing, delivered after the issuer allowed it") : t("delivered"),
     });
   }
   return steps;

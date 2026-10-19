@@ -96,3 +96,33 @@ test("every command has a usage and a help line, and every alias resolves to it"
     for (const word of [c.name, ...c.aliases]) assert.equal(findCommand(word.toLowerCase()), c);
   }
 });
+
+test("AIDE and AYUDA are HELP; LANG shows or switches the language", () => {
+  assert.deepEqual(parseCommand("aide", ctx), { ok: true, cmd: "help" });
+  assert.deepEqual(parseCommand("AYUDA", ctx), { ok: true, cmd: "help" });
+  assert.deepEqual(parseCommand("LANG", ctx), { ok: true, cmd: "lang", code: null });
+  assert.deepEqual(parseCommand("lang fr", ctx), { ok: true, cmd: "lang", code: "fr" });
+  assert.deepEqual(parseCommand("LANGUE ES", ctx), { ok: true, cmd: "lang", code: "es" });
+  assert.deepEqual(parseCommand("idioma en", ctx), { ok: true, cmd: "lang", code: "en" });
+  const unknown = parseCommand("LANG DE", ctx);
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /DE is not a language here/);
+  assert.equal(unknown.usage, "LANG [EN|FR|ES]");
+  assert.equal(parseCommand("LANG FR ES", ctx).ok, false);
+});
+
+test("errors and usages follow the interface language", async () => {
+  const { setLang } = await import("../src/i18n.js");
+  try {
+    setLang("fr");
+    const fr = parseCommand("O 3 5000", ctx);
+    assert.equal(fr.usage, "O <offre> <parts> <durée> [montant]");
+    assert.match(fr.error, /^O demande une offre/);
+    assert.deepEqual(parseCommand("L 10K 3,25 2J", ctx), { ok: true, cmd: "lend", amount: 10_000n * ONE, rateBps: 325, termSecs: 48 * 3600 });
+    setLang("es");
+    assert.match(parseCommand("BUY 3", ctx).error, /^Comando desconocido: BUY\. Escriba AYUDA/);
+    assert.equal(parseCommand("O 1 1,5K 1S", ctx).shares, 1500n * ONE);
+  } finally {
+    setLang("en");
+  }
+});

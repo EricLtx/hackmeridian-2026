@@ -4,16 +4,16 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="description" content="Borrow stablecoins against tokenized fund shares at any hour, on Stellar testnet." />
+    <meta name="description" content="Borrow stablecoins against tokenized fund shares at any hour, on Stellar testnet." data-i18n-attr="content" />
     <title>Open Window</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
-    <a class="skip" href="#main">Skip to content</a>
+    <a class="skip" href="#main" data-i18n>Skip to content</a>
     <header class="top">
       <div class="wrap top-inner">
-        <a class="brand" href="#main" aria-label="Open Window, home">
+        <a class="brand" href="#main" aria-label="Open Window, home" data-i18n-attr="aria-label">
           <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2" />
             <path d="M12 3v18M3 12h9" stroke="currentColor" stroke-width="2" />
@@ -22,17 +22,22 @@
           <span>Open Window</span>
         </a>
         <span class="pill pill-net" id="network">Testnet</span>
-        <div class="face-switch" role="group" aria-label="View">
-          <button type="button" class="face-btn" data-face="guide" aria-pressed="true">Guide</button>
-          <button type="button" class="face-btn" data-face="terminal" aria-pressed="false" title="Dense keyboard view for desk users">Terminal</button>
+        <div class="face-switch" role="group" aria-label="View" data-i18n-attr="aria-label">
+          <button type="button" class="face-btn" data-face="guide" aria-pressed="true" data-i18n>Guide</button>
+          <button type="button" class="face-btn" data-face="terminal" aria-pressed="false" title="Dense keyboard view for desk users" data-i18n data-i18n-attr="title">Terminal</button>
         </div>
-        <nav class="nav" aria-label="Sections">
-          <a href="#guide">How it works</a>
-          <a href="#board">Market</a>
-          <a href="#borrow">Borrow</a>
-          <a href="#positions">Positions</a>
-          <a href="#lend">Lend</a>
-          <a href="./history.html">History</a>
+        <div class="face-switch lang-switch" role="group" aria-label="Language" data-i18n-attr="aria-label">
+          <button type="button" class="face-btn lang-btn" data-lang="en" lang="en" title="English" aria-pressed="true">EN</button>
+          <button type="button" class="face-btn lang-btn" data-lang="fr" lang="fr" title="Français" aria-pressed="false">FR</button>
+          <button type="button" class="face-btn lang-btn" data-lang="es" lang="es" title="Español" aria-pressed="false">ES</button>
+        </div>
+        <nav class="nav" aria-label="Sections" data-i18n-attr="aria-label">
+          <a href="#guide" data-i18n>How it works</a>
+          <a href="#board" data-i18n>Market</a>
+          <a href="#borrow" data-i18n>Borrow</a>
+          <a href="#positions" data-i18n>Positions</a>
+          <a href="#lend" data-i18n>Lend</a>
+          <a href="./history.html" data-i18n>History</a>
         </nav>
         <div class="wallet-chip" id="wallet-chip">
           <button type="button" class="btn btn-primary" id="connect">Connect Freighter</button>
@@ -42,8 +47,8 @@
 
     <main id="main" class="wrap">
       <section class="intro">
-        <h1>Borrow against fund shares, at any hour.</h1>
-        <p>
+        <h1 data-i18n>Borrow against fund shares, at any hour.</h1>
+        <p data-i18n>
           Lock tokenized money market fund shares, receive stablecoins in one transaction, and buy the shares back when
           you are done. Interest runs per started hour. Testnet only: nothing here has real value.
         </p>
@@ -54,13 +59,13 @@
       <!-- 0. How it works: the parties, their steps, the terms of this instance -->
       <section class="card" id="guide" aria-labelledby="guide-title">
         <div class="card-head">
-          <h2 id="guide-title">How it works</h2>
+          <h2 id="guide-title" data-i18n>How it works</h2>
           <span class="muted small" id="guide-meta"></span>
         </div>
-        <div class="tabs" role="tablist" aria-label="Who are you" id="guide-tabs"></div>
+        <div class="tabs" role="tablist" aria-label="Who are you" id="guide-tabs" data-i18n-attr="aria-label"></div>
         <div id="guide-body"></div>
         <details class="terms" id="guide-terms-box">
-          <summary>Terms of this instance, read from the chain</summary>
+          <summary data-i18n>Terms of this instance, read from the chain</summary>
           <dl class="facts facts-terms" id="guide-terms"></dl>
         </details>
       </section>
@@ -68,11 +73,11 @@
       <!-- 1. Market board: no wallet needed -->
       <section class="card" id="board" aria-labelledby="board-title">
         <div class="card-head">
-          <h2 id="board-title">Market</h2>
+          <h2 id="board-title" data-i18n>Market</h2>
           <div class="head-meta">
             <span id="board-status" class="pill">Loading…</span>
             <span class="muted small" id="board-updated" aria-live="polite"></span>
-            <button type="button" class="btn btn-ghost btn-small" id="refresh">Refresh</button>
+            <button type="button" class="btn btn-ghost btn-small" id="refresh" data-i18n>Refresh</button>
           </div>
         </div>
         <div class="tiles" id="tiles" aria-live="off"></div>
@@ -80,35 +85,35 @@
 
         <form class="quote" id="quote-form" novalidate>
           <div class="field">
-            <label for="quote-shares">Shares to value</label>
+            <label for="quote-shares" data-i18n>Shares to value</label>
             <div class="input-unit">
               <input id="quote-shares" name="shares" inputmode="decimal" autocomplete="off" value="1000" aria-describedby="quote-help" />
               <span class="unit" data-fund-symbol>tMMF</span>
             </div>
           </div>
           <p class="quote-out" id="quote-out" aria-live="polite"></p>
-          <p class="muted small" id="quote-help">The most you can borrow against these shares right now, after the haircut.</p>
+          <p class="muted small" id="quote-help" data-i18n>The most you can borrow against these shares right now, after the haircut.</p>
         </form>
 
-        <h3 class="sub">Offers</h3>
+        <h3 class="sub" data-i18n>Offers</h3>
         <div id="offers"></div>
       </section>
 
       <!-- 2. Wallet and onboarding -->
       <section class="card" id="wallet" aria-labelledby="wallet-title">
-        <div class="card-head"><h2 id="wallet-title">Your wallet</h2></div>
+        <div class="card-head"><h2 id="wallet-title" data-i18n>Your wallet</h2></div>
         <div id="wallet-body"></div>
         <div class="tx" id="wallet-tx" role="status" aria-live="polite"></div>
       </section>
 
       <!-- 4. Borrow -->
       <section class="card" id="borrow" aria-labelledby="borrow-title">
-        <div class="card-head"><h2 id="borrow-title">Borrow</h2></div>
+        <div class="card-head"><h2 id="borrow-title" data-i18n>Borrow</h2></div>
         <p class="muted" id="borrow-gate"></p>
         <form id="borrow-form" class="split" novalidate hidden>
           <div class="fields">
             <div class="field">
-              <label for="b-shares">Shares to lock</label>
+              <label for="b-shares" data-i18n>Shares to lock</label>
               <div class="input-unit">
                 <input id="b-shares" inputmode="decimal" autocomplete="off" aria-describedby="b-shares-help" />
                 <span class="unit" data-fund-symbol>tMMF</span>
@@ -116,12 +121,12 @@
               <p class="help" id="b-shares-help"></p>
             </div>
             <div class="field">
-              <label for="b-offer">Offer</label>
+              <label for="b-offer" data-i18n>Offer</label>
               <select id="b-offer" aria-describedby="b-offer-help"></select>
-              <p class="help" id="b-offer-help">The offer the fund issuer designates comes first, then the cheapest.</p>
+              <p class="help" id="b-offer-help" data-i18n>The offer the fund issuer designates comes first, then the cheapest.</p>
             </div>
             <div class="field">
-              <label for="b-principal">Amount to borrow</label>
+              <label for="b-principal" data-i18n>Amount to borrow</label>
               <div class="input-unit">
                 <input id="b-principal" inputmode="decimal" autocomplete="off" aria-describedby="b-principal-help" />
                 <span class="unit" data-stable-code>tEUR</span>
@@ -129,24 +134,24 @@
               <p class="help" id="b-principal-help"></p>
             </div>
             <div class="field">
-              <label for="b-term">Term, in hours</label>
+              <label for="b-term" data-i18n>Term, in hours</label>
               <div class="input-unit">
                 <input id="b-term" type="number" min="1" step="1" value="64" inputmode="numeric" aria-describedby="b-term-help" />
-                <span class="unit">hours</span>
+                <span class="unit" data-i18n>hours</span>
               </div>
-              <div class="chips" role="group" aria-label="Term presets">
-                <button type="button" class="chip" data-term="1">1 hour</button>
-                <button type="button" class="chip" data-term="24">1 day</button>
-                <button type="button" class="chip" data-term="64">Weekend, 64 h</button>
-                <button type="button" class="chip" data-term="max">Longest</button>
+              <div class="chips" role="group" aria-label="Term presets" data-i18n-attr="aria-label">
+                <button type="button" class="chip" data-term="1" data-i18n>1 hour</button>
+                <button type="button" class="chip" data-term="24" data-i18n>1 day</button>
+                <button type="button" class="chip" data-term="64" data-i18n>Weekend, 64 h</button>
+                <button type="button" class="chip" data-term="max" data-i18n>Longest</button>
               </div>
               <p class="help" id="b-term-help"></p>
             </div>
           </div>
           <aside class="preview" aria-labelledby="preview-title">
-            <h3 id="preview-title" class="sub">What it costs</h3>
+            <h3 id="preview-title" class="sub" data-i18n>What it costs</h3>
             <dl id="b-preview"></dl>
-            <p class="muted small">
+            <p class="muted small" data-i18n>
               Interest runs at the offer's rate for every started hour until you repurchase, with a minimum of one hour.
               Repay early and you pay less. After the term, the lender may keep your shares.
             </p>
@@ -159,7 +164,7 @@
       <!-- 5. Positions -->
       <section class="card" id="positions" aria-labelledby="positions-title">
         <div class="card-head">
-          <h2 id="positions-title">Your positions</h2>
+          <h2 id="positions-title" data-i18n>Your positions</h2>
           <span class="muted small" id="positions-meta"></span>
         </div>
         <div id="positions-body"></div>
@@ -168,11 +173,11 @@
 
       <!-- 6. Lend -->
       <section class="card" id="lend" aria-labelledby="lend-title">
-        <div class="card-head"><h2 id="lend-title">Lend</h2></div>
+        <div class="card-head"><h2 id="lend-title" data-i18n>Lend</h2></div>
         <div id="lend-gate"></div>
         <form id="lend-form" class="lend-form" novalidate hidden>
           <div class="field">
-            <label for="l-amount">Amount to lend</label>
+            <label for="l-amount" data-i18n>Amount to lend</label>
             <div class="input-unit">
               <input id="l-amount" inputmode="decimal" autocomplete="off" value="1000" aria-describedby="l-amount-help" />
               <span class="unit" data-stable-code>tEUR</span>
@@ -180,7 +185,7 @@
             <p class="help" id="l-amount-help"></p>
           </div>
           <div class="field">
-            <label for="l-rate">Annual rate</label>
+            <label for="l-rate" data-i18n>Annual rate</label>
             <div class="input-unit">
               <input id="l-rate" inputmode="decimal" autocomplete="off" value="3.00" aria-describedby="l-rate-help" />
               <span class="unit">%</span>
@@ -188,15 +193,15 @@
             <p class="help" id="l-rate-help">Up to two decimals. Charged per started hour.</p>
           </div>
           <div class="field">
-            <label for="l-term">Longest term</label>
+            <label for="l-term" data-i18n>Longest term</label>
             <div class="input-unit">
               <input id="l-term" type="number" min="1" step="1" value="168" inputmode="numeric" aria-describedby="l-term-help" />
-              <span class="unit">hours</span>
+              <span class="unit" data-i18n>hours</span>
             </div>
             <p class="help" id="l-term-help"></p>
           </div>
           <div class="field field-submit">
-            <button type="submit" class="btn btn-primary" id="l-submit" data-write>Create offer</button>
+            <button type="submit" class="btn btn-primary" id="l-submit" data-write data-i18n>Create offer</button>
           </div>
         </form>
         <div class="tx" id="lend-tx" role="status" aria-live="polite"></div>
@@ -207,8 +212,8 @@
 
 
     <!-- Terminal face: dense, keyboard-first; same state and same signing as the guided view -->
-    <main id="terminal" class="term" hidden aria-label="Open Window terminal">
-      <div class="t-band" id="t-band" aria-label="Live facts"></div>
+    <main id="terminal" class="term" hidden aria-label="Open Window terminal" data-i18n-attr="aria-label">
+      <div class="t-band" id="t-band" aria-label="Live facts" data-i18n-attr="aria-label"></div>
       <form class="t-cmd" id="t-form" autocomplete="off" novalidate>
         <label for="t-input" class="t-prompt">OW&gt;</label>
         <input
@@ -224,11 +229,11 @@
         <button type="submit" class="t-key t-key-go">GO</button>
         <button type="button" class="t-key t-key-cancel" data-cmd="CANCEL">CANCEL</button>
       </form>
-      <p class="sr-only" id="t-hint">Type a command and press Enter. HELP lists the commands. Escape cancels a ticket.</p>
-      <div class="t-console" id="t-console" role="log" aria-live="polite" aria-label="Console"></div>
+      <p class="sr-only" id="t-hint" data-i18n>Type a command and press Enter. HELP lists the commands. Escape cancels a ticket.</p>
+      <div class="t-console" id="t-console" role="log" aria-live="polite" aria-label="Console" data-i18n-attr="aria-label"></div>
       <div class="t-grid">
         <section class="t-panel t-area-book" id="t-book-panel" aria-labelledby="t-book-title">
-          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="OFF">OFF</button><span id="t-book-title">Offer book</span><span class="t-meta" id="t-book-meta"></span></h2>
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="OFF">OFF</button><span id="t-book-title" data-i18n>Offer book</span><span class="t-meta" id="t-book-meta"></span></h2>
           <div class="t-body" id="t-book"></div>
         </section>
         <section class="t-panel t-area-ticket" id="t-ticket-panel" aria-labelledby="t-ticket-title">
@@ -237,19 +242,19 @@
           <div class="tx t-txline" id="t-tx" role="status" aria-live="polite"></div>
         </section>
         <section class="t-panel t-area-funds" id="t-funds-panel" aria-labelledby="t-funds-title">
-          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="FND">FND</button><span id="t-funds-title">Funds</span><span class="t-meta" id="t-funds-meta"></span></h2>
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="FND">FND</button><span id="t-funds-title" data-i18n>Funds</span><span class="t-meta" id="t-funds-meta"></span></h2>
           <div class="t-body" id="t-funds"></div>
         </section>
         <section class="t-panel t-area-pos" id="t-pos-panel" aria-labelledby="t-pos-title">
-          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="POS">POS</button><span id="t-pos-title">Positions</span><span class="t-meta" id="t-pos-meta"></span></h2>
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="POS">POS</button><span id="t-pos-title" data-i18n>Positions</span><span class="t-meta" id="t-pos-meta"></span></h2>
           <div class="t-body" id="t-pos"></div>
         </section>
         <section class="t-panel t-area-tape" id="t-tape-panel" aria-labelledby="t-tape-title">
-          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="EV">EV</button><span id="t-tape-title">Tape</span><span class="t-meta" id="t-tape-meta"></span></h2>
+          <h2 class="t-title"><button type="button" class="t-mn" data-cmd="EV">EV</button><span id="t-tape-title" data-i18n>Tape</span><span class="t-meta" id="t-tape-meta"></span></h2>
           <div class="t-body" id="t-tape"></div>
         </section>
       </div>
-      <div class="t-band t-status" id="t-status" aria-label="Wallet and status"></div>
+      <div class="t-band t-status" id="t-status" aria-label="Wallet and status" data-i18n-attr="aria-label"></div>
     </main>
 
     <footer class="wrap foot">

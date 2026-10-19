@@ -6,6 +6,7 @@
 // Vite and Node, named imports only under a bundler.
 import freighter from "@stellar/freighter-api";
 import { WalletError } from "./errors.js";
+import { t } from "./i18n.js";
 
 const { WatchWalletChanges, getNetworkDetails, isConnected, requestAccess, signTransaction } = freighter;
 
@@ -13,16 +14,16 @@ const DECLINED = /reject|declin|denied|cancel/i;
 
 function walletMessage(error, fallback) {
   const text = error?.message ?? String(error ?? "");
-  return DECLINED.test(text) ? "You declined the request in your wallet." : text || fallback;
+  return DECLINED.test(text) ? t("You declined the request in your wallet.") : text || fallback;
 }
 
 /** Throws unless Freighter is on the network of the deployment. */
 async function checkNetwork(passphrase) {
   const details = await getNetworkDetails();
-  if (details.error) throw new WalletError(walletMessage(details.error, "Freighter did not report its network."));
+  if (details.error) throw new WalletError(walletMessage(details.error, t("Freighter did not report its network.")));
   if (details.networkPassphrase !== passphrase) {
-    const name = details.network || "another network";
-    throw new WalletError(`Freighter is on ${name}. This interface runs on Stellar Testnet only. Switch Freighter to Testnet, then connect again.`);
+    const network = details.network || t("another network");
+    throw new WalletError(t("Freighter is on {network}. This interface runs on Stellar Testnet only. Switch Freighter to Testnet, then connect again.", { network }));
   }
 }
 
@@ -33,10 +34,10 @@ async function checkNetwork(passphrase) {
 export async function connectFreighter(passphrase) {
   const installed = await isConnected();
   if (installed.error || !installed.isConnected) {
-    throw new WalletError("Freighter was not found in this browser. Install it from freighter.app, then reload this page.");
+    throw new WalletError(t("Freighter was not found in this browser. Install it from freighter.app, then reload this page."));
   }
   const access = await requestAccess();
-  if (access.error || !access.address) throw new WalletError(walletMessage(access.error, "Freighter did not share an address."));
+  if (access.error || !access.address) throw new WalletError(walletMessage(access.error, t("Freighter did not share an address.")));
   await checkNetwork(passphrase);
   const address = access.address;
   return {
@@ -45,9 +46,9 @@ export async function connectFreighter(passphrase) {
     async sign(txXdr, networkPassphrase) {
       await checkNetwork(networkPassphrase);
       const signed = await signTransaction(txXdr, { networkPassphrase, address });
-      if (signed.error) throw new WalletError(walletMessage(signed.error, "Freighter did not sign."));
+      if (signed.error) throw new WalletError(walletMessage(signed.error, t("Freighter did not sign.")));
       if (signed.signerAddress && signed.signerAddress !== address) {
-        throw new WalletError("Freighter signed with another account. Select the connected account in Freighter and try again.");
+        throw new WalletError(t("Freighter signed with another account. Select the connected account in Freighter and try again."));
       }
       return signed.signedTxXdr;
     },

@@ -1,12 +1,39 @@
 // Formatting and parsing of on-chain values. Amounts stay BigInt end to end:
 // a 7-decimal token amount does not survive a round trip through a float.
+// Separators, units and dates follow the interface language (i18n.js).
 
-/** Parses a decimal string ("1,250.5") into integer units, or null when invalid. */
+import { locale, numberStyle, t, tn } from "./i18n.js";
+
+/**
+ * Parses a decimal string into integer units, or null when invalid. English:
+ * "1,250.5" (commas group thousands by threes). French and Spanish:
+ * "1 250,5", "1.250,5" or "1250,5" (a comma before the fraction, spaces or
+ * dots grouping thousands by threes); a single dot not followed by exactly
+ * three digits is read as a decimal point ("1250.5"). Spaces and underscores
+ * are ignored in every language.
+ */
 export function toUnits(text, decimals) {
-  const clean = String(text ?? "").replace(/[\s,_]/g, "");
-  const match = /^(\d*)(?:\.(\d*))?$/.exec(clean);
-  if (!match || clean === "" || clean === ".") return null;
-  const [, whole = "", fraction = ""] = match;
+  const raw = String(text ?? "").replace(/[\s  _]/g, "");
+  let match;
+  let whole;
+  let fraction;
+  if (numberStyle().decimal === ".") {
+    match = /^(\d{1,3}(?:,\d{3})+|\d*)(?:\.(\d*))?$/.exec(raw);
+    if (!match) return null;
+    whole = match[1].replace(/,/g, "");
+    fraction = match[2] ?? "";
+  } else {
+    match = /^(\d{1,3}(?:\.\d{3})+|\d*)(?:,(\d*))?$/.exec(raw);
+    if (match) {
+      whole = match[1].replace(/\./g, "");
+      fraction = match[2] ?? "";
+    } else {
+      match = /^(\d*)\.(\d*)$/.exec(raw);
+      if (!match) return null;
+      [, whole, fraction] = match;
+    }
+  }
+  if (whole === "" && fraction === "") return null;
   if (fraction.length > decimals) return null;
   return BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
 }
@@ -22,7 +49,8 @@ function divide(value, divisor, rounding) {
 }
 
 function group(digits) {
-  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const { group: separator, minGroup } = numberStyle();
+  return digits.length < minGroup ? digits : digits.replace(/\B(?=(\d{3})+(?!\d))/g, separator);
 }
 
 /**
@@ -36,32 +64,35 @@ export function formatUnits(units, decimals, { digits = decimals, rounding = "ro
   const scaled = divide(negative ? -value : value, 10n ** BigInt(decimals - digits), rounding);
   const base = 10n ** BigInt(digits);
   const whole = group((scaled / base).toString());
-  const fraction = digits > 0 ? `.${(scaled % base).toString().padStart(digits, "0")}` : "";
+  const fraction = digits > 0 ? `${numberStyle().decimal}${(scaled % base).toString().padStart(digits, "0")}` : "";
   return `${negative ? "-" : ""}${whole}${fraction}`;
 }
 
 /** A token amount for display: two decimals, grouped. */
 export const formatAmount = (units, decimals = 7, rounding = "round") => formatUnits(units, decimals, { digits: 2, rounding });
 
-/** Units back to a plain input string ("1250.5"), no grouping, no trailing zeros. */
+/** Units back to a plain input string ("1250.5", "1250,5" in French), no grouping, no trailing zeros. */
 export function unitsToInput(units, decimals) {
-  const text = formatUnits(units, decimals).replace(/,/g, "");
-  return text.includes(".") ? text.replace(/\.?0+$/, "") : text;
+  const value = BigInt(units);
+  const base = 10n ** BigInt(decimals);
+  const whole = (value / base).toString();
+  const fraction = decimals > 0 ? (value % base).toString().padStart(decimals, "0").replace(/0+$/, "") : "";
+  return fraction ? `${whole}${numberStyle().decimal}${fraction}` : whole;
 }
 
-/** An annual rate in basis points: 250 -> "2.50 %". */
+/** An annual rate in basis points: 250 -> "2.50 %" ("2,50 %" in French). */
 export const formatRate = (bps) => `${formatUnits(BigInt(bps), 2)} %`;
 
 /** A duration in seconds, coarse: "45 s", "12 min", "3 h 05 min", "2 d 4 h". */
 export function formatDuration(seconds) {
   const s = Math.max(0, Math.floor(Number(seconds)));
-  if (s < 60) return `${s} s`;
+  if (s < 60) return t("{s} s", { s });
   const minutes = Math.floor(s / 60);
-  if (minutes < 60) return `${minutes} min`;
+  if (minutes < 60) return t("{m} min", { m: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours} h ${String(minutes % 60).padStart(2, "0")} min`;
+  if (hours < 48) return t("{h} h {mm} min", { h: hours, mm: String(minutes % 60).padStart(2, "0") });
   const days = Math.floor(hours / 24);
-  return hours % 24 ? `${days} d ${hours % 24} h` : `${days} d`;
+  return hours % 24 ? t("{d} d {h} h", { d: days, h: hours % 24 }) : t("{d} d", { d: days });
 }
 
 /** A countdown in seconds, precise: "1 h 04 min 09 s". */
@@ -79,20 +110,20 @@ export function formatCountdown(seconds) {
 /** How long ago a Unix timestamp was, against `now` (Unix seconds). */
 export function formatAge(timestamp, now) {
   const age = Number(now) - Number(timestamp);
-  if (age < 0) return "just now";
-  return `${formatDuration(age)} ago`;
+  if (age < 0) return t("just now");
+  return t("{duration} ago", { duration: formatDuration(age) });
 }
 
 /** A term in seconds as hours: 3600 -> "1 hour", 604800 -> "168 hours (7 days)". */
 export function formatTerm(seconds) {
   const hours = Math.floor(Number(seconds) / 3600);
-  const label = `${hours} hour${hours === 1 ? "" : "s"}`;
-  return hours >= 48 && hours % 24 === 0 ? `${label} (${hours / 24} days)` : label;
+  const label = tn("{n} hour", "{n} hours", hours);
+  return hours >= 48 && hours % 24 === 0 ? t("{hours} ({days} days)", { hours: label, days: hours / 24 }) : label;
 }
 
-/** A Unix timestamp as a local date and time. */
+/** A Unix timestamp as a local date and time, in the interface language. */
 export function formatDateTime(timestamp) {
-  return new Date(Number(timestamp) * 1000).toLocaleString("en-GB", {
+  return new Date(Number(timestamp) * 1000).toLocaleString(locale(), {
     weekday: "short",
     day: "numeric",
     month: "short",

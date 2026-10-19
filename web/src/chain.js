@@ -27,6 +27,8 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { TransactionError, WalletError, contractKinds, decodeSimulationError } from "./errors.js";
+import { formatUnits } from "./format.js";
+import { locale, t } from "./i18n.js";
 
 /** The SDK's impossible account, used as the source of read-only simulations. */
 export const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -119,7 +121,7 @@ export function plain(value) {
 
 /** One `getEvents` entry in the shape of the indexer's export: the event name is topic 0. */
 function decodeEvent(raw) {
-  const topics = (raw.topic ?? []).map((t) => plain(scValToNative(t)));
+  const topics = (raw.topic ?? []).map((topic) => plain(scValToNative(topic)));
   let data = null;
   try {
     data = plain(scValToNative(raw.value));
@@ -199,7 +201,7 @@ export class Chain {
   async ledgerTime() {
     const latest = await this.net(() => this.server.getLatestLedger());
     const closed = Number(latest.closeTime);
-    if (!Number.isFinite(closed) || closed <= 0) throw new Error("RPC returned no ledger close time");
+    if (!Number.isFinite(closed) || closed <= 0) throw new Error(t("RPC returned no ledger close time"));
     return closed;
   }
 
@@ -416,16 +418,16 @@ export class Chain {
     if (response.ok) return;
     const body = await response.text();
     if (response.status === 400 && /already funded|createAccountAlreadyExist|op_already_exists/i.test(body)) return;
-    throw new Error(`Friendbot refused (${response.status}).`);
+    throw new Error(t("Friendbot refused ({status}).", { status: response.status }));
   }
 
   async signWith(signer, tx, onStatus) {
-    onStatus({ stage: "signing", text: "Waiting for your signature in the wallet." });
+    onStatus({ stage: "signing", text: t("Waiting for your signature in the wallet.") });
     let signedXdr;
     try {
       signedXdr = await signer.sign(tx.toXDR(), this.passphrase);
     } catch (error) {
-      throw error instanceof WalletError ? error : new WalletError(error?.message || "The wallet did not sign.");
+      throw error instanceof WalletError ? error : new WalletError(error?.message || t("The wallet did not sign."));
     }
     return TransactionBuilder.fromXDR(signedXdr, this.passphrase);
   }
@@ -435,7 +437,7 @@ export class Chain {
    * `onStatus({ stage, text, hash })` follows each step for the interface.
    */
   async invoke(signer, fn, args, onStatus = () => {}) {
-    onStatus({ stage: "preparing", text: "Checking the transaction with the network." });
+    onStatus({ stage: "preparing", text: t("Checking the transaction with the network.") });
     const source = await this.account(signer.address);
     const tx = new TransactionBuilder(source, { fee: INCLUSION_FEE, networkPassphrase: this.passphrase })
       .addOperation(Operation.invokeContractFunction({ contract: this.contracts.openWindow, function: fn, args }))
@@ -451,7 +453,7 @@ export class Chain {
 
   /** Submits one classic operation (a trustline) from `signer`. */
   async classic(signer, operation, onStatus = () => {}) {
-    onStatus({ stage: "preparing", text: "Preparing the transaction." });
+    onStatus({ stage: "preparing", text: t("Preparing the transaction.") });
     const source = await this.account(signer.address);
     const tx = new TransactionBuilder(source, { fee: "1000", networkPassphrase: this.passphrase })
       .addOperation(operation)
@@ -480,16 +482,16 @@ export class Chain {
     const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
     const done = (result) => {
       const seconds = (Date.now() - started) / 1000;
-      onStatus({ stage: "confirmed", text: `Confirmed in ${seconds.toFixed(1)} s.`, hash });
+      onStatus({ stage: "confirmed", text: t("Confirmed in {seconds} s.", { seconds: formatUnits(BigInt(Math.round(seconds * 10)), 1) }), hash });
       return { result, hash, seconds, fee: feeCharged(result) };
     };
-    const failed = (result) => new TransactionError("TxFailed", `Result: ${resultCode(result.resultXdr)}.`, hash);
-    const until = maxTime ? new Date(maxTime * 1000).toLocaleTimeString("en-GB") : null;
+    const failed = (result) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
+    const until = maxTime ? new Date(maxTime * 1000).toLocaleTimeString(locale()) : null;
 
     // 1. Into the queue, or learn that it already applied.
     let delay = 1000;
     for (;;) {
-      onStatus({ stage: "submitting", text: "Sending to the network.", hash });
+      onStatus({ stage: "submitting", text: t("Sending to the network."), hash });
       let sent = null;
       try {
         sent = await this.server.sendTransaction(tx);
@@ -501,16 +503,16 @@ export class Chain {
       if (known?.status === "SUCCESS") return done(known);
       if (known?.status === "FAILED") throw failed(known);
       if (sent?.status === "ERROR") {
-        throw new TransactionError("TxRefused", `Code: ${resultCode(sent.errorResult)}.`, hash);
+        throw new TransactionError("TxRefused", t("Code: {code}.", { code: resultCode(sent.errorResult) }), hash);
       }
       if (maxTime && Date.now() / 1000 > maxTime + 10) break; // past the window: step 2 settles it
-      onStatus({ stage: "retrying", text: `No receipt from the network yet. Sending again. It can still land until ${until}.`, hash });
+      onStatus({ stage: "retrying", text: t("No receipt from the network yet. Sending again. It can still land until {until}.", { until }), hash });
       await sleep(delay);
       delay = Math.min(delay * 2, 8000);
     }
 
     // 2. Wait for the outcome until the ledger closes past the validity window.
-    onStatus({ stage: "pending", text: "Submitted. Waiting for the next ledger.", hash });
+    onStatus({ stage: "pending", text: t("Submitted. Waiting for the next ledger."), hash });
     for (let polls = 0; ; polls += 1) {
       const result = await this.lookup(hash);
       if (result?.status === "SUCCESS") return done(result);
@@ -528,7 +530,7 @@ export class Chain {
         if (last) throw new TransactionError("TxExpired", "Expired before landing.", hash);
       }
       if (polls === 10) {
-        onStatus({ stage: "pending", text: `Still waiting. It can land until ${until}; it is not failed before then.`, hash });
+        onStatus({ stage: "pending", text: t("Still waiting. It can land until {until}; it is not failed before then.", { until }), hash });
       }
       await sleep(1000);
     }

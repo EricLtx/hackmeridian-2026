@@ -1,0 +1,50 @@
+// French translations of src/history.js, keyed by the English source text.
+export default {
+  "Open": "Ouvert",
+  "Repurchased": "Racheté",
+  "Seized": "Saisi",
+  "Release pending": "Libération en attente",
+  "export of {time} UTC": "export du {time} UTC",
+  "Events journaled": "Événements journalisés",
+  "First event": "Premier événement",
+  "ledger {ledger}": "ledger {ledger}",
+  "Last event": "Dernier événement",
+  "Gaps declared": "Lacunes déclarées",
+  "ledgers the RPC no longer served when indexing resumed": "ledgers que le RPC ne servait plus à la reprise de l'indexation",
+  "none": "aucune",
+  "Last hash of the chain: <code>{hash}</code>. Recompute it with <code>npm run verify</code> in <code>indexer/</code>; a different value means the journal changed.":
+    "Dernier hachage de la chaîne : <code>{hash}</code>. Recalculez-le avec <code>npm run verify</code> dans <code>indexer/</code> ; une valeur différente signifie que le journal a changé.",
+  "{n} repo: {open} open, {repurchased} repurchased, {seized} seized, {pending} release pending":
+    "{n} repo : ouverts {open}, rachetés {repurchased}, saisis {seized}, libération en attente {pending}",
+  "{n} repos: {open} open, {repurchased} repurchased, {seized} seized, {pending} release pending":
+    "{n} repos : ouverts {open}, rachetés {repurchased}, saisis {seized}, libération en attente {pending}",
+  "No repo in the journal.": "Aucun repo dans le journal.",
+  "Repo": "Repo",
+  "Status": "Statut",
+  "Lender": "Prêteur",
+  "Borrower": "Emprunteur",
+  "Shares": "Parts",
+  "Principal": "Principal",
+  "Rate": "Taux",
+  "Opened": "Ouvert le",
+  "Maturity": "Échéance",
+  "Closed": "Clos le",
+  "Last tx": "Dernière tx",
+  "unknown": "inconnu",
+  "{shares} shares held back": "{shares} parts retenues",
+  "interest {amount} {currency}": "intérêts {amount} {currency}",
+  "Repos rebuilt from the journal": "Repos reconstitués à partir du journal",
+  "Amounts in token units; the currency comes from the <code>stablecoin_set</code> event of the repo's stablecoin. A blank cell is a fact the chain does not carry or an event outside the journal.":
+    "Montants en unités de jeton ; la devise vient de l'événement <code>stablecoin_set</code> du stablecoin du repo. Une cellule vide est une donnée que la chaîne ne porte pas ou un événement hors du journal.",
+  "{n} most recent, newest first": "Derniers événements : {n}, du plus récent au plus ancien",
+  "No event in the journal.": "Aucun événement dans le journal.",
+  "Time": "Heure",
+  "Event": "Événement",
+  "Topics": "Topics",
+  "Data": "Données",
+  "Latest events of the contract": "Derniers événements du contrat",
+  "Contract {contract} on Stellar {network}. Journal and exports: <code>indexer/</code> in the repository.":
+    "Contrat {contract} sur Stellar {network}. Journal et exports : <code>indexer/</code> dans le dépôt.",
+  "No history export found ({error}). Produce it from the repository with <code>cd indexer &amp;&amp; npm run index &amp;&amp; npm run export -- --json --web</code>, which writes <code>web/public/history.json</code>.":
+    "Aucun export d'historique trouvé ({error}). Produisez-le depuis le dépôt avec <code>cd indexer &amp;&amp; npm run index &amp;&amp; npm run export -- --json --web</code>, qui écrit <code>web/public/history.json</code>.",
+};

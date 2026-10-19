@@ -5,6 +5,8 @@
 // The error tables, `ContractError` and `decodeSimulationError` are adapted
 // from demo/lib.mjs (same repository, Apache-2.0).
 
+import { t } from "./i18n.js";
+
 /** Open Window error codes. */
 export const ERRORS = {
   1: "NotImplemented", 2: "FundNotAccepted", 3: "InvalidHaircut", 4: "InvalidAmount",
@@ -112,66 +114,71 @@ export function decodeSimulationError(text, kinds = new Map()) {
 // Each sentence may use the context the caller passes: `max` (what the
 // shares secure), `available` (what the offer holds), `term` (allowed range),
 // `code` (stablecoin code), `command` (onboarding command for this wallet).
+// Sentences are translated when they are told (i18n.js); an optional tail is
+// a sentence of its own, appended after a space.
+const join = (...parts) => parts.filter(Boolean).join(" ");
+
 const SENTENCES = {
   "open-window": {
-    NotImplemented: () => "This function is not available in this contract version.",
-    FundNotAccepted: () => "These fund shares are not accepted as collateral.",
-    InvalidHaircut: () => "The haircut setting of this fund is invalid.",
-    InvalidAmount: () => "Amounts must be greater than zero.",
-    InvalidTerm: (c) => `The term is outside what is allowed.${c.term ? ` Choose ${c.term}.` : " The minimum is 1 hour."}`,
-    NoPrice: () => "The price feed has no price for this fund right now.",
-    NotInitialized: () => "The contract is not configured.",
-    Paused: () => "New loans and new offers are paused. Repurchases and withdrawals still work.",
-    StablecoinNotAccepted: () => "This stablecoin is not accepted by the contract.",
-    CurrencyMismatch: () => "The fund and the stablecoin are in different currencies.",
-    StalePrice: () => "The fund price or the exchange rate is too old to lend against. It works again after the next publication.",
-    PriceOutOfBand: () => "The latest price is outside its plausible range, so the contract refuses to lend against it.",
-    LoanTooLarge: (c) => `This is more than the shares can secure.${c.max ? ` The maximum is ${c.max}.` : ""}`,
-    OfferNotFound: () => "This offer does not exist.",
-    InsufficientOffer: (c) => `The offer does not hold enough for this amount.${c.available ? ` It holds ${c.available}.` : ""}`,
-    RepoNotFound: () => "This position does not exist.",
-    RepoNotOpen: () => "This position is already closed.",
-    NotMatured: (c) => `This position has not reached its term yet.${c.when ? ` You can take the shares from ${c.when}.` : ""}`,
-    CapExceeded: () => "This loan would go over a limit: per loan, per fund or for the whole currency. Try a smaller amount.",
-    TooManyFunds: () => "An offer must list between one and eight different funds.",
+    NotImplemented: () => t("This function is not available in this contract version."),
+    FundNotAccepted: () => t("These fund shares are not accepted as collateral."),
+    InvalidHaircut: () => t("The haircut setting of this fund is invalid."),
+    InvalidAmount: () => t("Amounts must be greater than zero."),
+    InvalidTerm: (c) => join(t("The term is outside what is allowed."), c.term ? t("Choose {term}.", { term: c.term }) : t("The minimum is 1 hour.")),
+    NoPrice: () => t("The price feed has no price for this fund right now."),
+    NotInitialized: () => t("The contract is not configured."),
+    Paused: () => t("New loans and new offers are paused. Repurchases and withdrawals still work."),
+    StablecoinNotAccepted: () => t("This stablecoin is not accepted by the contract."),
+    CurrencyMismatch: () => t("The fund and the stablecoin are in different currencies."),
+    StalePrice: () => t("The fund price or the exchange rate is too old to lend against. It works again after the next publication."),
+    PriceOutOfBand: () => t("The latest price is outside its plausible range, so the contract refuses to lend against it."),
+    LoanTooLarge: (c) => join(t("This is more than the shares can secure."), c.max && t("The maximum is {max}.", { max: c.max })),
+    OfferNotFound: () => t("This offer does not exist."),
+    InsufficientOffer: (c) => join(t("The offer does not hold enough for this amount."), c.available && t("It holds {available}.", { available: c.available })),
+    RepoNotFound: () => t("This position does not exist."),
+    RepoNotOpen: () => t("This position is already closed."),
+    NotMatured: (c) => join(t("This position has not reached its term yet."), c.when && t("You can take the shares from {when}.", { when: c.when })),
+    CapExceeded: () => t("This loan would go over a limit: per loan, per fund or for the whole currency. Try a smaller amount."),
+    TooManyFunds: () => t("An offer must list between one and eight different funds."),
     LenderNotApproved: (c) =>
       c.action === "seize"
-        ? "Seized shares can only go to a lender the fund issuer approves, and your address is not approved for this fund any more. Ask the issuer to approve it again, then retry."
+        ? t("Seized shares can only go to a lender the fund issuer approves, and your address is not approved for this fund any more. Ask the issuer to approve it again, then retry.")
         : c.action === "create_offer"
-          ? "Your address is not an approved lender for this fund. The fund issuer approves lenders."
-          : "The lender of this offer is no longer approved by the fund issuer. Pick another offer.",
-    TransferMismatch: () => "A token transfer did not move the exact amount expected.",
-    FundNotInOffer: () => "This offer does not accept these fund shares.",
-    InvalidRate: () => "The rate must be between 0 % and 100 % a year.",
-    ArithmeticOverflow: () => "These amounts are too large to compute.",
-    OutsideEnvelope: () => "A setting lies outside the protocol risk limits.",
-    FundFrozen: () => "The fund issuer has suspended new loans on this fund.",
-    InvalidPrice: () => "The price feed returned an invalid price.",
-    DuplicateFund: () => "The fund is listed twice in the offer.",
-    Unauthorized: () => "This wallet does not hold the role this action needs.",
-    PriceDivergence: () => "The fund's two price feeds disagree, so no loan is priced until they agree again.",
-    ReleaseBlocked: () => "The fund issuer still refuses the transfer of these shares. They stay reserved for you; retry once the issuer lifts its block.",
-    NothingToRelease: () => "No shares are waiting for release on this repo.",
-    TimelockPending: () => "This change is waiting for its time delay to pass.",
-    NotSoleLender: () => "This instance is run by a single lender: only that lender can make offers here.",
-    StewardCannotLend: () => "The fund's issuer cannot lend against its own fund.",
-    AttestationMissing: () => "The issuer must record this lender's declaration before approving it.",
-    FxBandExceedsHaircut: () => "The exchange-rate band of this fund would be wider than its exchange-rate haircut, which the contract refuses.",
-    SentinelNotIndependent: () => "The sentinel must be a key that holds no other role.",
-    NothingToMigrate: () => "The contract's stored records are already at the current version.",
+          ? t("Your address is not an approved lender for this fund. The fund issuer approves lenders.")
+          : t("The lender of this offer is no longer approved by the fund issuer. Pick another offer."),
+    TransferMismatch: () => t("A token transfer did not move the exact amount expected."),
+    FundNotInOffer: () => t("This offer does not accept these fund shares."),
+    InvalidRate: () => t("The rate must be between 0 % and 100 % a year."),
+    ArithmeticOverflow: () => t("These amounts are too large to compute."),
+    OutsideEnvelope: () => t("A setting lies outside the protocol risk limits."),
+    FundFrozen: () => t("The fund issuer has suspended new loans on this fund."),
+    InvalidPrice: () => t("The price feed returned an invalid price."),
+    DuplicateFund: () => t("The fund is listed twice in the offer."),
+    Unauthorized: () => t("This wallet does not hold the role this action needs."),
+    PriceDivergence: () => t("The fund's two price feeds disagree, so no loan is priced until they agree again."),
+    ReleaseBlocked: () => t("The fund issuer still refuses the transfer of these shares. They stay reserved for you; retry once the issuer lifts its block."),
+    NothingToRelease: () => t("No shares are waiting for release on this repo."),
+    TimelockPending: () => t("This change is waiting for its time delay to pass."),
+    NotSoleLender: () => t("This instance is run by a single lender: only that lender can make offers here."),
+    StewardCannotLend: () => t("The fund's issuer cannot lend against its own fund."),
+    AttestationMissing: () => t("The issuer must record this lender's declaration before approving it."),
+    FxBandExceedsHaircut: () => t("The exchange-rate band of this fund would be wider than its exchange-rate haircut, which the contract refuses."),
+    SentinelNotIndependent: () => t("The sentinel must be a key that holds no other role."),
+    NothingToMigrate: () => t("The contract's stored records are already at the current version."),
     SchemaOutdated: () =>
-      "The contract was just upgraded and its stored records are not migrated yet: new loans and offers resume once the governor migrates them. Repurchases, withdrawals and deliveries still work.",
+      t("The contract was just upgraded and its stored records are not migrated yet: new loans and offers resume once the governor migrates them. Repurchases, withdrawals and deliveries still work."),
   },
   "fund-token": {
-    NotWhitelisted: (c) => `This wallet is not on the fund's allowlist.${c.command ? ` Ask the operator to run: ${c.command}` : " Ask the operator to onboard it."}`,
-    Frozen: () => "The fund issuer has frozen the shares of this wallet.",
-    InsufficientBalance: () => "You hold fewer fund shares than this.",
+    NotWhitelisted: (c) =>
+      join(t("This wallet is not on the fund's allowlist."), c.command ? t("Ask the operator to run: {command}", { command: c.command }) : t("Ask the operator to onboard it.")),
+    Frozen: () => t("The fund issuer has frozen the shares of this wallet."),
+    InsufficientBalance: () => t("You hold fewer fund shares than this."),
   },
   "stellar-asset": {
-    AccountMissing: () => "This account does not exist on testnet yet. Fund it with test XLM first.",
-    Balance: (c) => `Your ${c.code ?? "stablecoin"} balance is too low for this.`,
-    BalanceDeauthorized: (c) => `Your ${c.code ?? "stablecoin"} trustline is not authorized by the issuer.`,
-    TrustlineMissing: (c) => `This wallet has no ${c.code ?? "stablecoin"} trustline. Use "Add ${c.code ?? "stablecoin"}" first.`,
+    AccountMissing: () => t("This account does not exist on testnet yet. Fund it with test XLM first."),
+    Balance: (c) => t("Your {code} balance is too low for this.", { code: c.code ?? "stablecoin" }),
+    BalanceDeauthorized: (c) => t("Your {code} trustline is not authorized by the issuer.", { code: c.code ?? "stablecoin" }),
+    TrustlineMissing: (c) => t("This wallet has no {code} trustline. Use \"Add {code}\" first.", { code: c.code ?? "stablecoin" }),
   },
 };
 
@@ -183,19 +190,24 @@ export function describeError(error, context = {}) {
   if (error instanceof ContractError) {
     const sentence = SENTENCES[error.contract]?.[error.bare];
     if (sentence) return { text: sentence(context), name: error.name };
-    const who = error.contract === "nav-oracle" ? "The price feed" : error.contract === "unknown" ? "A contract" : "A token contract";
-    return { text: `${who} refused the operation.`, name: error.message };
+    const text =
+      error.contract === "nav-oracle"
+        ? t("The price feed refused the operation.")
+        : error.contract === "unknown"
+          ? t("A contract refused the operation.")
+          : t("A token contract refused the operation.");
+    return { text, name: error.message };
   }
   if (error instanceof WalletError) return { text: error.message, name: "Wallet" };
   if (error instanceof TransactionError) {
-    if (error.name === "AccountMissing") return { text: "This account does not exist on testnet yet. Fund it with test XLM first.", name: "AccountMissing" };
-    if (error.name === "TxExpired") return { text: "The transaction expired before it landed. Nothing changed on chain. You can try again.", name: "TxExpired" };
-    if (error.name === "TxRefused") return { text: `The network refused the transaction. Nothing changed on chain. ${error.message}`, name: "TxRefused" };
-    return { text: `The transaction failed on chain. Nothing changed. ${error.message}`, name: "TxFailed" };
+    if (error.name === "AccountMissing") return { text: t("This account does not exist on testnet yet. Fund it with test XLM first."), name: "AccountMissing" };
+    if (error.name === "TxExpired") return { text: t("The transaction expired before it landed. Nothing changed on chain. You can try again."), name: "TxExpired" };
+    if (error.name === "TxRefused") return { text: join(t("The network refused the transaction. Nothing changed on chain."), error.message), name: "TxRefused" };
+    return { text: join(t("The transaction failed on chain. Nothing changed."), error.message), name: "TxFailed" };
   }
   const message = String(error?.message ?? error ?? "");
   if (/fetch|network|timeout|ECONN|Failed to fetch/i.test(message)) {
-    return { text: "The network did not answer. Check your connection and try again.", name: "Network" };
+    return { text: t("The network did not answer. Check your connection and try again."), name: "Network" };
   }
-  return { text: message || "Something went wrong.", name: "Error" };
+  return { text: message || t("Something went wrong."), name: "Error" };
 }

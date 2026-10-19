@@ -1,9 +1,11 @@
 // The history page: reads the indexer's export (`history.json`, written next
 // to this page by `npm run export -- --json --web` in indexer/) and shows the
 // repo registry and the latest events. No wallet, no network call to the
-// chain: everything comes from the journal.
+// chain: everything comes from the journal. A language switch re-renders
+// from the export already loaded.
 
 import { formatAmount, formatRate, shortAddress } from "./format.js";
+import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) =>
@@ -13,11 +15,14 @@ const esc = (value) =>
 const decimals = { shares: 7, stablecoin: 7, code: "" };
 
 const STATUS_LABEL = {
-  open: ["Open", "pill-ok"],
-  repurchased: ["Repurchased", "pill-muted"],
-  seized: ["Seized", "pill-danger"],
-  release_pending: ["Release pending", "pill-warn"],
+  open: [tk("Open"), "pill-ok"],
+  repurchased: [tk("Repurchased"), "pill-muted"],
+  seized: [tk("Seized"), "pill-danger"],
+  release_pending: [tk("Release pending"), "pill-warn"],
 };
+
+/** What the page shows: the export once loaded, or the reason it could not be loaded. */
+const view = { history: null, error: null };
 
 const when = (iso) => (iso ? esc(iso.replace("T", " ").replace(/(:\d\d)Z$/, "$1 UTC")) : "—");
 const txLink = (explorer, hash) =>
@@ -31,73 +36,146 @@ function tile(label, value, sub = "") {
 
 function renderJournal(h) {
   const j = h.journal;
-  $("journal-meta").textContent = `export of ${h.generatedAt.replace("T", " ").slice(0, 19)} UTC`;
+  $("journal-meta").textContent = t("export of {time} UTC", { time: h.generatedAt.replace("T", " ").slice(0, 19) });
   $("journal-tiles").innerHTML = [
-    tile("Events journaled", esc(j.lines)),
-    tile("First event", when(j.firstClosedAt), j.firstLedger ? `ledger ${esc(j.firstLedger)}` : ""),
-    tile("Last event", when(j.lastClosedAt), j.lastLedger ? `ledger ${esc(j.lastLedger)}` : ""),
-    tile("Gaps declared", esc(j.gaps?.length ?? 0), j.gaps?.length ? "ledgers the RPC no longer served when indexing resumed" : "none"),
+    tile(t("Events journaled"), esc(j.lines)),
+    tile(t("First event"), when(j.firstClosedAt), j.firstLedger ? esc(t("ledger {ledger}", { ledger: j.firstLedger })) : ""),
+    tile(t("Last event"), when(j.lastClosedAt), j.lastLedger ? esc(t("ledger {ledger}", { ledger: j.lastLedger })) : ""),
+    tile(t("Gaps declared"), esc(j.gaps?.length ?? 0), esc(j.gaps?.length ? t("ledgers the RPC no longer served when indexing resumed") : t("none"))),
   ].join("");
-  $("journal-hash").innerHTML = `Last hash of the chain: <code>${esc(j.lastHash)}</code>. Recompute it with <code>npm run verify</code> in <code>indexer/</code>; a different value means the journal changed.`;
+  $("journal-hash").innerHTML = t(
+    "Last hash of the chain: <code>{hash}</code>. Recompute it with <code>npm run verify</code> in <code>indexer/</code>; a different value means the journal changed.",
+    { hash: esc(j.lastHash) },
+  );
 }
 
 function renderRegistry(h) {
   const rows = h.registry ?? [];
   const count = (s) => rows.filter((r) => r.status === s).length;
-  $("registry-meta").textContent = `${rows.length} repo${rows.length === 1 ? "" : "s"}: ${count("open")} open, ${count("repurchased")} repurchased, ${count("seized")} seized, ${count("release_pending")} release pending`;
+  $("registry-meta").textContent = tn(
+    "{n} repo: {open} open, {repurchased} repurchased, {seized} seized, {pending} release pending",
+    "{n} repos: {open} open, {repurchased} repurchased, {seized} seized, {pending} release pending",
+    rows.length,
+    { open: count("open"), repurchased: count("repurchased"), seized: count("seized"), pending: count("release_pending") },
+  );
   if (!rows.length) {
-    $("registry-body").innerHTML = `<p class="muted">No repo in the journal.</p>`;
+    $("registry-body").innerHTML = `<p class="muted">${esc(t("No repo in the journal."))}</p>`;
     return;
   }
+  // Column names, also shown before each cell at phone width (data-label).
+  const col = {
+    repo: esc(t("Repo")),
+    status: esc(t("Status")),
+    lender: esc(t("Lender")),
+    borrower: esc(t("Borrower")),
+    shares: esc(t("Shares")),
+    principal: esc(t("Principal")),
+    rate: esc(t("Rate")),
+    opened: esc(t("Opened")),
+    maturity: esc(t("Maturity")),
+    closed: esc(t("Closed")),
+    lastTx: esc(t("Last tx")),
+  };
   const body = rows
     .map((r) => {
-      const [label, cls] = STATUS_LABEL[r.status] ?? [r.status || "unknown", "pill-muted"];
+      const known = STATUS_LABEL[r.status];
+      const label = known ? t(known[0]) : r.status || t("unknown");
+      const cls = known ? known[1] : "pill-muted";
       const cur = r.currency || decimals.code || "";
       return `<tr>
-        <td data-label="Repo">#${esc(r.repo_id)}</td>
-        <td data-label="Status"><span class="pill ${cls}">${esc(label)}</span>${r.release_shares ? `<div class="small muted">${units(r.release_shares, decimals.shares)} shares held back</div>` : ""}</td>
-        <td data-label="Lender">${addr(r.lender)}</td>
-        <td data-label="Borrower">${addr(r.borrower)}</td>
-        <td data-label="Shares" class="num">${units(r.shares, decimals.shares)}</td>
-        <td data-label="Principal" class="num">${units(r.principal, decimals.stablecoin)} ${esc(cur)}</td>
-        <td data-label="Rate" class="num">${r.rate_bps === "" ? "—" : esc(formatRate(Number(r.rate_bps)))}</td>
-        <td data-label="Opened">${when(r.opened_at)}</td>
-        <td data-label="Maturity">${when(r.maturity)}</td>
-        <td data-label="Closed">${when(r.closed_at)}${r.interest ? `<div class="small muted">interest ${units(r.interest, decimals.stablecoin)} ${esc(cur)}</div>` : ""}</td>
-        <td data-label="Last tx">${txLink(h.explorer, r.last_tx)}</td>
+        <td data-label="${col.repo}">#${esc(r.repo_id)}</td>
+        <td data-label="${col.status}"><span class="pill ${cls}">${esc(label)}</span>${r.release_shares ? `<div class="small muted">${esc(t("{shares} shares held back", { shares: units(r.release_shares, decimals.shares) }))}</div>` : ""}</td>
+        <td data-label="${col.lender}">${addr(r.lender)}</td>
+        <td data-label="${col.borrower}">${addr(r.borrower)}</td>
+        <td data-label="${col.shares}" class="num">${units(r.shares, decimals.shares)}</td>
+        <td data-label="${col.principal}" class="num">${units(r.principal, decimals.stablecoin)} ${esc(cur)}</td>
+        <td data-label="${col.rate}" class="num">${r.rate_bps === "" ? "—" : esc(formatRate(Number(r.rate_bps)))}</td>
+        <td data-label="${col.opened}">${when(r.opened_at)}</td>
+        <td data-label="${col.maturity}">${when(r.maturity)}</td>
+        <td data-label="${col.closed}">${when(r.closed_at)}${r.interest ? `<div class="small muted">${esc(t("interest {amount} {currency}", { amount: units(r.interest, decimals.stablecoin), currency: cur }))}</div>` : ""}</td>
+        <td data-label="${col.lastTx}">${txLink(h.explorer, r.last_tx)}</td>
       </tr>`;
     })
     .join("");
   $("registry-body").innerHTML = `<table class="table">
-    <caption class="sr-only">Repos rebuilt from the journal</caption>
-    <thead><tr><th>Repo</th><th>Status</th><th>Lender</th><th>Borrower</th><th class="num">Shares</th><th class="num">Principal</th><th class="num">Rate</th><th>Opened</th><th>Maturity</th><th>Closed</th><th>Last tx</th></tr></thead>
+    <caption class="sr-only">${esc(t("Repos rebuilt from the journal"))}</caption>
+    <thead><tr><th>${col.repo}</th><th>${col.status}</th><th>${col.lender}</th><th>${col.borrower}</th><th class="num">${col.shares}</th><th class="num">${col.principal}</th><th class="num">${col.rate}</th><th>${col.opened}</th><th>${col.maturity}</th><th>${col.closed}</th><th>${col.lastTx}</th></tr></thead>
     <tbody>${body}</tbody></table>
-    <p class="muted small">Amounts in token units; the currency comes from the <code>stablecoin_set</code> event of the repo's stablecoin. A blank cell is a fact the chain does not carry or an event outside the journal.</p>`;
+    <p class="muted small">${t(
+      "Amounts in token units; the currency comes from the <code>stablecoin_set</code> event of the repo's stablecoin. A blank cell is a fact the chain does not carry or an event outside the journal.",
+    )}</p>`;
 }
 
 function renderEvents(h) {
   const events = h.events ?? [];
-  $("events-meta").textContent = `${events.length} most recent, newest first`;
+  $("events-meta").textContent = t("{n} most recent, newest first", { n: events.length });
   if (!events.length) {
-    $("events-body").innerHTML = `<p class="muted">No event in the journal.</p>`;
+    $("events-body").innerHTML = `<p class="muted">${esc(t("No event in the journal."))}</p>`;
     return;
   }
+  const col = { time: esc(t("Time")), event: esc(t("Event")), topics: esc(t("Topics")), data: esc(t("Data")) };
   const body = events
     .map(
       (e) => `<tr>
         <td data-label="#" class="num">${esc(e.seq)}</td>
-        <td data-label="Time">${when(e.closedAt)}</td>
-        <td data-label="Event"><code>${esc(e.event)}</code></td>
-        <td data-label="Topics">${esc((e.topics ?? []).map((t) => (typeof t === "string" && /^[GC][A-Z2-7]{55}$/.test(t) ? shortAddress(t) : t)).join(", ")) || "—"}</td>
-        <td data-label="Data"><code class="small">${esc(JSON.stringify(e.data))}</code></td>
+        <td data-label="${col.time}">${when(e.closedAt)}</td>
+        <td data-label="${col.event}"><code>${esc(e.event)}</code></td>
+        <td data-label="${col.topics}">${esc((e.topics ?? []).map((topic) => (typeof topic === "string" && /^[GC][A-Z2-7]{55}$/.test(topic) ? shortAddress(topic) : topic)).join(", ")) || "—"}</td>
+        <td data-label="${col.data}"><code class="small">${esc(JSON.stringify(e.data))}</code></td>
         <td data-label="Tx">${txLink(h.explorer, e.txHash)}</td>
       </tr>`,
     )
     .join("");
   $("events-body").innerHTML = `<table class="table">
-    <caption class="sr-only">Latest events of the contract</caption>
-    <thead><tr><th class="num">#</th><th>Time</th><th>Event</th><th>Topics</th><th>Data</th><th>Tx</th></tr></thead>
+    <caption class="sr-only">${esc(t("Latest events of the contract"))}</caption>
+    <thead><tr><th class="num">#</th><th>${col.time}</th><th>${col.event}</th><th>${col.topics}</th><th>${col.data}</th><th>Tx</th></tr></thead>
     <tbody>${body}</tbody></table>`;
+}
+
+function renderFoot(h) {
+  const contract = h.contract
+    ? `<a href="${esc(h.explorer)}/contract/${esc(h.contract)}" target="_blank" rel="noopener noreferrer">${esc(shortAddress(h.contract))}</a>`
+    : "—";
+  $("foot").innerHTML = t("Contract {contract} on Stellar {network}. Journal and exports: <code>indexer/</code> in the repository.", {
+    contract,
+    network: esc(h.network),
+  });
+}
+
+function renderLoadError(error) {
+  const box = $("load-error");
+  box.hidden = false;
+  box.className = "notice notice-error";
+  box.innerHTML = t(
+    "No history export found ({error}). Produce it from the repository with <code>cd indexer &amp;&amp; npm run index &amp;&amp; npm run export -- --json --web</code>, which writes <code>web/public/history.json</code>.",
+    { error: esc(error.message) },
+  );
+}
+
+/** Renders the page in the language in use, from what is already loaded. */
+function render() {
+  if (view.error) {
+    renderLoadError(view.error);
+    return;
+  }
+  if (!view.history) return;
+  renderJournal(view.history);
+  renderRegistry(view.history);
+  renderEvents(view.history);
+  renderFoot(view.history);
+}
+
+/** The language switch of the header: no new fetch, the page renders again. */
+function wireLanguage() {
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-lang]");
+    if (!button) return;
+    setLang(button.dataset.lang);
+    persistLang();
+    applyStatic();
+    markLangButtons();
+    render();
+  });
 }
 
 async function loadJson(name) {
@@ -107,6 +185,10 @@ async function loadJson(name) {
 }
 
 async function main() {
+  bootLang();
+  applyStatic();
+  markLangButtons();
+  wireLanguage();
   try {
     const dep = await loadJson("deployment.testnet.json");
     decimals.shares = dep.fund?.decimals ?? 7;
@@ -115,20 +197,12 @@ async function main() {
   } catch {
     // The deployment file is optional here: defaults apply.
   }
-  let h;
   try {
-    h = await loadJson("history.json");
+    view.history = await loadJson("history.json");
   } catch (error) {
-    const box = $("load-error");
-    box.hidden = false;
-    box.className = "notice notice-error";
-    box.innerHTML = `No history export found (${esc(error.message)}). Produce it from the repository with <code>cd indexer &amp;&amp; npm run index &amp;&amp; npm run export -- --json --web</code>, which writes <code>web/public/history.json</code>.`;
-    return;
+    view.error = error;
   }
-  renderJournal(h);
-  renderRegistry(h);
-  renderEvents(h);
-  $("foot").innerHTML = `Contract ${h.contract ? `<a href="${esc(h.explorer)}/contract/${esc(h.contract)}" target="_blank" rel="noopener noreferrer">${esc(shortAddress(h.contract))}</a>` : "—"} on Stellar ${esc(h.network)}. Journal and exports: <code>indexer/</code> in the repository.`;
+  render();
 }
 
 main();

@@ -27,6 +27,7 @@ import {
 } from "./blotter.js";
 import { describeError } from "./errors.js";
 import { formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
+import { LANG_NAMES, lang, numberStyle, setLang, t, tc, tk, tn } from "./i18n.js";
 import { HOUR, nextInterestStep } from "./terms.js";
 
 const SLOW_EVERY = 4; // pending changes and layout version: one refresh in four, about a minute
@@ -37,7 +38,9 @@ const HISTORY_KEY = "openwindow.terminal.history";
 
 /**
  * `ctx` comes from main.js: `{ S, $, esc, now, setHTML, runTx, connect,
- * refreshAll, setFace, fundLimits, onboardCommand }`.
+ * refreshAll, setFace, setLanguage, fundLimits, onboardCommand }`. Every
+ * text is translated when it is rendered (i18n.js); main.js calls `render`
+ * again after a language switch.
  */
 export function createTerminal(ctx) {
   const { S, $, esc, now, setHTML } = ctx;
@@ -83,7 +86,7 @@ export function createTerminal(ctx) {
   const codeOf = (address) => (S.dep.stablecoins ?? []).find((c) => c.contract === address)?.code ?? code();
   const money = (units, rounding) => `${formatAmount(units, sd(), rounding)} ${code()}`;
   const shareText = (units, symbol = sym()) => `${formatAmount(units, fd())} ${symbol}`;
-  const tone = (t) => (t ? ` t-${t}` : "");
+  const tone = (name) => (name ? ` t-${name}` : "");
   const sentence = (text) => (/[.!?]$/.test(String(text).trim()) ? String(text).trim() : `${String(text).trim()}.`);
   const offerCoin = (id) => (S.offers ?? []).find((o) => o.id === id)?.stablecoin ?? null;
   // The book is known once the board has returned offers at least once;
@@ -92,12 +95,26 @@ export function createTerminal(ctx) {
     if (S.board?.offers?.value) T.bookSeen = true;
     return Boolean(T.bookSeen);
   };
-  const BOOK_UNREAD = "The offer book is still being read from the chain. Try again in a moment, or REF to read it now.";
+  const BOOK_UNREAD = tk("The offer book is still being read from the chain. Try again in a moment, or REF to read it now.");
   const coinSuffix = (address) => (address && codeOf(address) !== code() ? ` <span class="t-dim">${esc(codeOf(address))}</span>` : "");
   const txLink = (hash) =>
     hash
-      ? `<a class="t-tx" href="${esc(S.chain.explorerTx(hash))}" target="_blank" rel="noopener" title="Transaction ${esc(hash)}">${esc(hash.slice(0, 6))}</a>`
+      ? `<a class="t-tx" href="${esc(S.chain.explorerTx(hash))}" target="_blank" rel="noopener" title="${esc(t("Transaction {hash}", { hash }))}">${esc(hash.slice(0, 6))}</a>`
       : "";
+  // State and side codes of the blotter, shown in the interface language.
+  const STATE_LABELS = {
+    OPEN: tk("OPEN"),
+    LATE: tk("LATE"),
+    REPAID: tk("REPAID"),
+    SEIZED: tk("SEIZED"),
+    HELD: tk("HELD"),
+    FROZEN: tk("FROZEN"),
+    STALE: tk("STALE"),
+    "FX STALE": tk("FX STALE"),
+  };
+  const stateLabel = (state) => (STATE_LABELS[state] ? t(STATE_LABELS[state]) : state);
+  const SIDE_LABELS = { BOR: tk("BOR"), LND: tk("LND") };
+  const sideLabel = (side) => (SIDE_LABELS[side] ? t(SIDE_LABELS[side]) : side);
 
   // -------------------------------------------------------------------------
   // Console and command history
@@ -244,13 +261,13 @@ export function createTerminal(ctx) {
     const add = (label, r) => {
       if (r?.value) items.push({ label, eta: r.value.eta !== undefined ? Number(r.value.eta) : null });
     };
-    add("UPGRADE", p.upgrade);
-    add("GOVERNOR", p.admin);
-    add("GUARDIAN", p.guardian);
-    add("ENVELOPE", p.envelope);
-    add("TERM", p.maxTerm);
-    add(`CAP ${S.dep.stablecoin.currency}`, p.cap);
-    for (const f of p.funds ?? []) add(`FUND ${f.symbol}`, f.change);
+    add(t("UPGRADE"), p.upgrade);
+    add(t("GOVERNOR"), p.admin);
+    add(t("GUARDIAN"), p.guardian);
+    add(t("ENVELOPE"), p.envelope);
+    add(t("TERM"), p.maxTerm);
+    add(t("CAP {currency}", { currency: S.dep.stablecoin.currency }), p.cap);
+    for (const f of p.funds ?? []) add(t("FUND {symbol}", { symbol: f.symbol }), f.change);
     return items;
   }
 
@@ -270,9 +287,9 @@ export function createTerminal(ctx) {
 
   function scopeLabel() {
     const scope = scopeOf();
-    if (scope === "all") return "ALL MARKET";
-    if (scope === "me") return `MINE ${shortAddress(wallet())}`;
-    return `WATCH ${shortAddress(scope)}`;
+    if (scope === "all") return t("ALL MARKET");
+    if (scope === "me") return t("MINE {address}", { address: shortAddress(wallet()) });
+    return t("WATCH {address}", { address: shortAddress(scope) });
   }
 
   // -------------------------------------------------------------------------
@@ -321,13 +338,16 @@ export function createTerminal(ctx) {
     box.classList.toggle("is-help", T.helpMode);
     const lines = T.helpMode ? T.log : T.log.slice(-CONSOLE_LINES);
     if (!lines.length) {
-      if (!box.querySelector('[data-seq="hint"]')) {
-        const hint = document.createElement("p");
+      let hint = box.querySelector('[data-seq="hint"]');
+      if (!hint) {
+        hint = document.createElement("p");
         hint.className = "tc tc-out";
         hint.dataset.seq = "hint";
-        hint.textContent = "Type a command and press Enter, the GO key. HELP lists every command. Q 1000 values 1,000 shares.";
         box.replaceChildren(hint);
       }
+      // Rewritten only when the language changed, so a screen reader does not hear it again.
+      const text = t("Type a command and press Enter, the GO key. HELP lists every command. Q 1000 values 1,000 shares.");
+      if (hint.textContent !== text) hint.textContent = text;
       return;
     }
     const keep = new Set(lines.map((l) => String(l.seq)));
@@ -348,15 +368,19 @@ export function createTerminal(ctx) {
     const rows = bookRows(S.offers, { funds: funds(), fund: iface(), wallet: wallet(), maxTerm: S.maxTerm });
     const best = rows.find((r) => r.takesFund && !r.mine)?.id ?? null;
     const known = bookKnown();
-    $("t-book-meta").textContent = known ? `${rows.length} offer${rows.length === 1 ? "" : "s"} with funds · best rate first` : "reading the chain";
+    $("t-book-meta").textContent = known ? tn("{n} offer with funds · best rate first", "{n} offers with funds · best rate first", rows.length) : t("reading the chain");
     if (!rows.length) {
-      setHTML($("t-book"), `<p class="t-empty">${known ? "No offer has money available." : "Reading the offer book…"}</p>`);
+      setHTML($("t-book"), `<p class="t-empty">${esc(known ? t("No offer has money available.") : t("Reading the offer book…"))}</p>`);
       return;
     }
     const body = rows
       .map((r) => {
         const fill = r.mine ? `W ${r.id} ` : r.takesFund ? `O ${r.id} 1K 64` : null;
-        const flags = [r.id === best ? `<span class="t-flag t-ok">BEST</span>` : "", r.designated ? `<span class="t-flag t-amber">DSG</span>` : "", r.mine ? `<span class="t-flag t-id">YOU</span>` : ""].join("");
+        const flags = [
+          r.id === best ? `<span class="t-flag t-ok">${esc(t("BEST"))}</span>` : "",
+          r.designated ? `<span class="t-flag t-amber">${esc(t("DSG"))}</span>` : "",
+          r.mine ? `<span class="t-flag t-id">${esc(t("YOU"))}</span>` : "",
+        ].join("");
         const coin = codeOf(offerCoin(r.id));
         return `<tr>
           <td>${fill ? `<button type="button" class="t-pick" data-fill="${esc(fill)}" title="${esc(fill.trim())}">#${r.id}</button>` : `#${r.id}`}</td>
@@ -371,8 +395,8 @@ export function createTerminal(ctx) {
       .join("");
     setHTML(
       $("t-book"),
-      `<table class="tt"><caption class="sr-only">Offer book, best rate first</caption>
-        <thead><tr><th scope="col">OFFER</th><th scope="col" class="n">RATE</th><th scope="col" class="n">AVAILABLE</th><th scope="col" class="n">TERM</th><th scope="col">FUNDS</th><th scope="col">FLAGS</th><th scope="col">LENDER</th></tr></thead>
+      `<table class="tt"><caption class="sr-only">${esc(t("Offer book, best rate first"))}</caption>
+        <thead><tr><th scope="col">${esc(t("OFFER"))}</th><th scope="col" class="n">${esc(t("RATE"))}</th><th scope="col" class="n">${esc(t("AVAILABLE"))}</th><th scope="col" class="n">${esc(t("TERM"))}</th><th scope="col">${esc(t("FUNDS"))}</th><th scope="col">${esc(t("FLAGS"))}</th><th scope="col">${esc(t("LENDER"))}</th></tr></thead>
         <tbody>${body}</tbody></table>`,
     );
   }
@@ -380,16 +404,16 @@ export function createTerminal(ctx) {
   function renderTicket() {
     const box = $("t-ticket");
     const view = T.ticket?.view ?? T.quote;
-    $("t-ticket-title").textContent = view ? view.title : "TICKET";
+    $("t-ticket-title").textContent = view ? view.title : t("TICKET");
     if (!view) {
       setHTML(
         box,
         `<div class="t-start">
-          <p>Start here:</p>
-          <p><kbd>Q 1000</kbd> values 1,000 ${esc(sym())} shares.</p>
-          <p><kbd>O &lt;offer&gt; &lt;shares&gt; &lt;term&gt;</kbd> prepares a loan: <kbd>O 1 1K 64</kbd>.</p>
-          <p><kbd>R &lt;repo&gt;</kbd> repurchases, <kbd>L 10K 3.25 168</kbd> lends.</p>
-          <p class="t-dim">A ticket shows every number and check before anything is signed. Enter (GO) signs, Esc cancels.</p>
+          <p>${esc(t("Start here:"))}</p>
+          <p>${t("<kbd>Q 1000</kbd> values 1,000 {sym} shares.", { sym: esc(sym()) })}</p>
+          <p>${t("<kbd>O &lt;offer&gt; &lt;shares&gt; &lt;term&gt;</kbd> prepares a loan: <kbd>O 1 1K 64</kbd>.")}</p>
+          <p>${t("<kbd>R &lt;repo&gt;</kbd> repurchases, <kbd>L 10K 3.25 168</kbd> lends.")}</p>
+          <p class="t-dim">${esc(t("A ticket shows every number and check before anything is signed. Enter (GO) signs, Esc cancels."))}</p>
         </div>`,
       );
       return;
@@ -402,10 +426,10 @@ export function createTerminal(ctx) {
       .join("");
     let action = "";
     if (T.ticket) {
-      if (T.ticket.state === "sending") action = `<p class="t-act t-warn">Signing and sending…</p>`;
-      else if (view.blocking) action = `<p class="t-act t-bad">Blocked: fix the line marked ✗, or CANCEL.</p>`;
-      else if (!wallet()) action = `<p class="t-act t-warn">CONN, then GO to sign.</p>`;
-      else action = `<p class="t-act"><span class="t-key t-key-go">GO</span> Enter to sign in Freighter · <span class="t-key t-key-cancel">CANCEL</span> Esc</p>`;
+      if (T.ticket.state === "sending") action = `<p class="t-act t-warn">${esc(t("Signing and sending…"))}</p>`;
+      else if (view.blocking) action = `<p class="t-act t-bad">${esc(t("Blocked: fix the line marked ✗, or CANCEL."))}</p>`;
+      else if (!wallet()) action = `<p class="t-act t-warn">${esc(t("CONN, then GO to sign."))}</p>`;
+      else action = `<p class="t-act"><span class="t-key t-key-go">GO</span> ${esc(t("Enter to sign in Freighter"))} · <span class="t-key t-key-cancel">CANCEL</span> ${esc(t("Esc"))}</p>`;
     }
     setHTML(
       box,
@@ -426,67 +450,90 @@ export function createTerminal(ctx) {
     const open = rows.filter((r) => r.state === "OPEN" || r.state === "LATE");
     const closed = rows.filter((r) => !(r.state === "OPEN" || r.state === "LATE")).slice(0, CLOSED_ROWS);
     const totals = positionTotals(rows);
-    $("t-pos-meta").textContent = `${scopeLabel()} · ${totals.open} open${totals.late ? `, ${totals.late} past term` : ""}`;
+    $("t-pos-meta").textContent = `${scopeLabel()} · ${t("{n} open", { n: totals.open })}${totals.late ? `, ${t("{n} past term", { n: totals.late })}` : ""}`;
     if (!T.market.loaded) {
-      setHTML($("t-pos"), `<p class="t-empty">Reading the repos…</p>`);
+      setHTML($("t-pos"), `<p class="t-empty">${esc(t("Reading the repos…"))}</p>`);
       return;
     }
     if (!rows.length) {
       setHTML(
         $("t-pos"),
-        `<p class="t-empty">${scopeOf() === "all" ? "No repo on this instance yet." : "No repo for this address."}${wallet() ? "" : " POS ALL shows the whole market; CONN connects a wallet."}</p>`,
+        `<p class="t-empty">${esc(scopeOf() === "all" ? t("No repo on this instance yet.") : t("No repo for this address."))}${
+          wallet() ? "" : ` ${esc(t("POS ALL shows the whole market; CONN connects a wallet."))}`
+        }</p>`,
       );
       return;
     }
     const stateTone = { OPEN: "ok", LATE: "bad", REPAID: "dim", SEIZED: "warn", HELD: "warn" };
     const line = (r) => `<tr>
         <td>${r.action ? `<button type="button" class="t-pick" data-fill="${esc(r.action)}" title="${esc(r.action)}">#${r.id}</button>` : `#${r.id}`}</td>
-        <td class="t-id">${esc(r.side || "—")}</td>
+        <td class="t-id">${esc(sideLabel(r.side) || "—")}</td>
         <td>${esc(r.fund)}</td>
         <td class="n">${esc(formatAmount(r.principal, sd()))}${coinSuffix(r.stablecoin)}</td>
         <td class="n">${esc(formatRate(r.rateBps))}</td>
         <td class="n">${r.due === null ? (r.held ? esc(shareText(BigInt(r.held.shares), r.fund)) : "—") : esc(formatAmount(r.due, sd(), "ceil"))}</td>
         <td class="n">${r.hours === null ? "—" : r.hours}</td>
-        <td class="n">${r.state === "OPEN" ? `<span data-cd="${r.maturity}" data-cd-after="PAST">${esc(compactDuration(r.until))}</span>` : r.state === "LATE" ? "PAST" : "—"}</td>
-        <td class="t-${stateTone[r.state] ?? "dim"}">${r.state}</td>
+        <td class="n">${
+          r.state === "OPEN"
+            ? `<span data-cd="${r.maturity}" data-cd-after="${esc(t("PAST"))}">${esc(compactDuration(r.until))}</span>`
+            : r.state === "LATE"
+              ? esc(t("PAST"))
+              : "—"
+        }</td>
+        <td class="t-${stateTone[r.state] ?? "dim"}">${esc(stateLabel(r.state))}</td>
         <td class="t-dim">${esc(shortAddress(r.borrower))}</td>
       </tr>`;
-    const total = `<tr class="t-total"><td colspan="3">OPEN ${totals.open}</td><td class="n">${esc(formatAmount(totals.principal, sd()))}</td><td></td><td class="n">${
+    const total = `<tr class="t-total"><td colspan="3">${esc(t("OPEN {n}", { n: totals.open }))}</td><td class="n">${esc(formatAmount(totals.principal, sd()))}</td><td></td><td class="n">${
       totals.due === null ? "—" : esc(formatAmount(totals.due, sd(), "ceil"))
     }</td><td colspan="4"></td></tr>`;
     setHTML(
       $("t-pos"),
-      `<table class="tt"><caption class="sr-only">Positions: ${esc(scopeLabel())}</caption>
-        <thead><tr><th scope="col">REPO</th><th scope="col">SIDE</th><th scope="col">FUND</th><th scope="col" class="n">PRINCIPAL</th><th scope="col" class="n">RATE</th><th scope="col" class="n">DUE NOW</th><th scope="col" class="n">HRS</th><th scope="col" class="n">TERM IN</th><th scope="col">STATE</th><th scope="col">BORROWER</th></tr></thead>
+      `<table class="tt"><caption class="sr-only">${esc(t("Positions: {scope}", { scope: scopeLabel() }))}</caption>
+        <thead><tr><th scope="col">${esc(t("REPO"))}</th><th scope="col">${esc(t("SIDE"))}</th><th scope="col">${esc(t("FUND"))}</th><th scope="col" class="n">${esc(t("PRINCIPAL"))}</th><th scope="col" class="n">${esc(t("RATE"))}</th><th scope="col" class="n">${esc(t("DUE NOW"))}</th><th scope="col" class="n">${esc(t("HRS"))}</th><th scope="col" class="n">${esc(t("TERM IN"))}</th><th scope="col">${esc(t("STATE"))}</th><th scope="col">${esc(t("BORROWER"))}</th></tr></thead>
         <tbody>${open.map(line).join("")}${open.length ? total : ""}${closed.map(line).join("")}</tbody></table>`,
     );
   }
 
   function renderFunds() {
     const rows = fundRows(S.board?.funds ?? [], { feeds: feedsWithBoard(), now: now(), iface: iface() });
-    $("t-funds-meta").textContent = `${rows.length} admitted · ◆ this screen's fund`;
+    $("t-funds-meta").textContent = t("{n} admitted · ◆ this screen's fund", { n: rows.length });
     if (!rows.length) {
-      setHTML($("t-funds"), `<p class="t-empty">Reading the funds…</p>`);
+      setHTML($("t-funds"), `<p class="t-empty">${esc(t("Reading the funds…"))}</p>`);
       return;
     }
     const stateTone = { OPEN: "ok", FROZEN: "warn", STALE: "bad", "FX STALE": "bad" };
     const body = rows
       .map(
         (f) => `<tr>
-          <td><button type="button" class="t-pick" data-fill="${esc(`Q 1K ${f.symbol}`)}" title="${esc(`${f.name}: Q 1K ${f.symbol}`)}">${esc(f.symbol)}</button>${f.iface ? `<span class="t-amber" title="The fund this screen borrows against">◆</span>` : ""} <span class="t-dim" title="${f.token === "SAC" ? "Classic Stellar asset held through the Stellar Asset Contract" : "SEP-41 share token"}">${f.token === "SAC" ? "SAC" : "41"}</span></td>
-          <td class="n" title="NAV in ${esc(f.navCurrency)}">${f.nav === null ? "—" : esc(formatUnits(f.nav, f.navDecimals, { digits: 4 }))} <span class="t-dim">${esc(f.navCurrency)}</span></td>
-          <td class="n${tone(f.navTone)}" title="Age of the NAV; the contract refuses it beyond ${f.navMaxAge === null ? "its bound" : esc(compactDuration(f.navMaxAge))}">${f.navAge === null ? "—" : esc(compactDuration(f.navAge))}</td>
-          <td class="n${tone(f.fxTone)}" title="${f.source === "CROSS" ? `Exchange rate, ${f.fxAge === null ? "unread" : `${esc(compactDuration(f.fxAge))} old`}, bound ${f.fxMaxAge === null ? "?" : esc(compactDuration(f.fxMaxAge))}` : "NAV in the loan currency: no exchange-rate leg"}">${f.source === "CROSS" ? (f.fx === null ? "—" : esc(formatUnits(f.fx, f.fxDecimals, { digits: 4 }))) : "—"}</td>
-          <td class="n" title="${f.fxHaircutBps ? `NAV haircut plus exchange-rate haircut ${esc(formatRate(f.fxHaircutBps))}` : "NAV haircut"}">${f.haircutBps === null ? "—" : esc(formatRate(f.haircutBps + (f.fxHaircutBps ?? 0)))}</td>
-          <td class="n" title="${f.outstanding === null ? "" : `${esc(formatAmount(f.outstanding, sd(), "round"))} of ${f.cap === null ? "?" : esc(formatAmount(f.cap, sd()))} lent`}">${f.usedPct === null ? "—" : `${f.usedPct.toFixed(1)} %`}</td>
-          <td class="t-${stateTone[f.state] ?? "dim"}">${esc(f.state)}</td>
+          <td><button type="button" class="t-pick" data-fill="${esc(`Q 1K ${f.symbol}`)}" title="${esc(`${f.name}: Q 1K ${f.symbol}`)}">${esc(f.symbol)}</button>${f.iface ? `<span class="t-amber" title="${esc(t("The fund this screen borrows against"))}">◆</span>` : ""} <span class="t-dim" title="${esc(f.token === "SAC" ? t("Classic Stellar asset held through the Stellar Asset Contract") : t("SEP-41 share token"))}">${f.token === "SAC" ? "SAC" : "41"}</span></td>
+          <td class="n" title="${esc(t("NAV in {currency}", { currency: f.navCurrency }))}">${f.nav === null ? "—" : esc(formatUnits(f.nav, f.navDecimals, { digits: 4 }))} <span class="t-dim">${esc(f.navCurrency)}</span></td>
+          <td class="n${tone(f.navTone)}" title="${esc(
+            f.navMaxAge === null
+              ? t("Age of the NAV; the contract refuses it beyond its bound")
+              : t("Age of the NAV; the contract refuses it beyond {bound}", { bound: compactDuration(f.navMaxAge) }),
+          )}">${f.navAge === null ? "—" : esc(compactDuration(f.navAge))}</td>
+          <td class="n${tone(f.fxTone)}" title="${esc(
+            f.source === "CROSS"
+              ? t("Exchange rate, {age}, bound {bound}", {
+                  age: f.fxAge === null ? t("unread") : t("{age} old", { age: compactDuration(f.fxAge) }),
+                  bound: f.fxMaxAge === null ? "?" : compactDuration(f.fxMaxAge),
+                })
+              : t("NAV in the loan currency: no exchange-rate leg"),
+          )}">${f.source === "CROSS" ? (f.fx === null ? "—" : esc(formatUnits(f.fx, f.fxDecimals, { digits: 4 }))) : "—"}</td>
+          <td class="n" title="${esc(f.fxHaircutBps ? t("NAV haircut plus exchange-rate haircut {rate}", { rate: formatRate(f.fxHaircutBps) }) : t("NAV haircut"))}">${f.haircutBps === null ? "—" : esc(formatRate(f.haircutBps + (f.fxHaircutBps ?? 0)))}</td>
+          <td class="n" title="${
+            f.outstanding === null
+              ? ""
+              : esc(t("{outstanding} of {cap} lent", { outstanding: formatAmount(f.outstanding, sd(), "round"), cap: f.cap === null ? "?" : formatAmount(f.cap, sd()) }))
+          }">${f.usedPct === null ? "—" : `${f.usedPct.toFixed(1).replace(".", numberStyle().decimal)} %`}</td>
+          <td class="t-${stateTone[f.state] ?? "dim"}">${esc(stateLabel(f.state))}</td>
         </tr>`,
       )
       .join("");
     setHTML(
       $("t-funds"),
-      `<table class="tt"><caption class="sr-only">Admitted funds</caption>
-        <thead><tr><th scope="col">FUND</th><th scope="col" class="n">NAV</th><th scope="col" class="n">AGE</th><th scope="col" class="n">FX</th><th scope="col" class="n">HCUT</th><th scope="col" class="n">USED</th><th scope="col">STATE</th></tr></thead>
+      `<table class="tt"><caption class="sr-only">${esc(t("Admitted funds"))}</caption>
+        <thead><tr><th scope="col">${esc(t("FUND"))}</th><th scope="col" class="n">${esc(t("NAV"))}</th><th scope="col" class="n">${esc(t("AGE"))}</th><th scope="col" class="n">${esc(t("FX"))}</th><th scope="col" class="n">${esc(t("HCUT"))}</th><th scope="col" class="n">${esc(t("USED"))}</th><th scope="col">${esc(t("STATE"))}</th></tr></thead>
         <tbody>${body}</tbody></table>`,
     );
   }
@@ -503,10 +550,10 @@ export function createTerminal(ctx) {
       codeOfRepo: (id) => (T.market.repos.get(id) ? codeOf(T.market.repos.get(id).stablecoin) : null),
     };
     const events = T.tape.events.slice(-TAPE_LINES).reverse();
-    $("t-tape-meta").textContent = `${T.tape.events.length} event${T.tape.events.length === 1 ? "" : "s"} · newest first`;
-    const warn = T.tape.error ? `<p class="t-empty t-warn">Live events unavailable: ${esc(T.tape.error)}</p>` : "";
+    $("t-tape-meta").textContent = tn("{n} event · newest first", "{n} events · newest first", T.tape.events.length);
+    const warn = T.tape.error ? `<p class="t-empty t-warn">${esc(t("Live events unavailable: {error}", { error: T.tape.error }))}</p>` : "";
     if (!events.length) {
-      setHTML($("t-tape"), `${warn}<p class="t-empty">No event yet in the window the RPC keeps.</p>`);
+      setHTML($("t-tape"), `${warn}<p class="t-empty">${esc(t("No event yet in the window the RPC keeps."))}</p>`);
       return;
     }
     const body = events
@@ -515,43 +562,62 @@ export function createTerminal(ctx) {
         return `<tr><td class="t-dim">${esc(l.time)}</td><td class="t-code${tone(l.tone)}">${esc(l.code)}</td><td class="t-wrap">${esc(l.text)}</td><td>${txLink(l.txHash)}</td></tr>`;
       })
       .join("");
-    setHTML($("t-tape"), `${warn}<table class="tt tt-tape"><caption class="sr-only">Contract events, newest first</caption><tbody>${body}</tbody></table>`);
+    setHTML($("t-tape"), `${warn}<table class="tt tt-tape"><caption class="sr-only">${esc(t("Contract events, newest first"))}</caption><tbody>${body}</tbody></table>`);
   }
 
   function renderStatus() {
     const parts = [];
     const w = wallet();
     if (!w) {
-      parts.push(`<span class="tb-item"><span class="tb-k">WALLET</span> <span class="tb-v t-warn">none</span> <span class="t-dim">CONN to connect Freighter</span></span>`);
+      parts.push(
+        `<span class="tb-item"><span class="tb-k">${esc(t("WALLET"))}</span> <span class="tb-v t-warn">${esc(tc("wallet", "none"))}</span> <span class="t-dim">${esc(t("CONN to connect Freighter"))}</span></span>`,
+      );
     } else {
       const b = S.balances;
-      parts.push(`<span class="tb-item"><span class="tb-k">WALLET</span> <span class="tb-v t-id">${esc(shortAddress(w))}</span></span>`);
+      parts.push(`<span class="tb-item"><span class="tb-k">${esc(t("WALLET"))}</span> <span class="tb-v t-id">${esc(shortAddress(w))}</span></span>`);
       if (b) {
         parts.push(`<span class="tb-item"><span class="tb-k">XLM</span> <span class="tb-v">${b.xlm === null ? "—" : esc(formatAmount(b.xlm, 7))}</span></span>`);
-        parts.push(`<span class="tb-item"><span class="tb-k">${esc(code())}</span> <span class="tb-v">${b.stablecoin === null ? "no trustline" : esc(formatAmount(b.stablecoin, sd()))}</span></span>`);
+        parts.push(`<span class="tb-item"><span class="tb-k">${esc(code())}</span> <span class="tb-v">${b.stablecoin === null ? esc(t("no trustline")) : esc(formatAmount(b.stablecoin, sd()))}</span></span>`);
         parts.push(`<span class="tb-item"><span class="tb-k">${esc(sym())}</span> <span class="tb-v">${esc(formatAmount(b.shares, fd()))}</span></span>`);
-        parts.push(`<span class="tb-item"><span class="tb-k">LENDER</span> <span class="tb-v ${S.approved ? "t-ok" : "t-dim"}">${S.approved ? "approved" : "no"}</span></span>`);
+        parts.push(
+          `<span class="tb-item"><span class="tb-k">${esc(t("LENDER"))}</span> <span class="tb-v ${S.approved ? "t-ok" : "t-dim"}">${esc(S.approved ? t("approved") : t("no"))}</span></span>`,
+        );
       }
       const mineOpen = [...T.market.repos.values()].filter((r) => r.status === "Open" && r.borrower === w);
       if (mineOpen.length) {
         const next = mineOpen.map((r) => ({ id: r.id, at: nextInterestStep(r.opened_at, now()) })).sort((a, b) => a.at - b.at)[0];
-        parts.push(`<span class="tb-item" title="Interest is charged per started hour"><span class="tb-k">NEXT HOUR</span> <span class="tb-v">#${next.id} in <span data-cd="${next.at}" data-cd-after="now">${esc(compactDuration(next.at - now()))}</span></span></span>`);
+        const countdown = `<span data-cd="${next.at}" data-cd-after="${esc(t("now"))}">${esc(compactDuration(next.at - now()))}</span>`;
+        parts.push(
+          `<span class="tb-item" title="${esc(t("Interest is charged per started hour"))}"><span class="tb-k">${esc(t("NEXT HOUR"))}</span> <span class="tb-v">${t("#{id} in {countdown}", { id: next.id, countdown })}</span></span>`,
+        );
       }
     }
     const pend = pendingItems();
     if (pend?.length) {
       for (const p of pend.slice(0, 3)) {
-        parts.push(`<span class="tb-item"><span class="tb-k t-warn">${esc(p.label)}</span> <span class="tb-v t-warn">${p.eta === null ? "pending" : `applicable in <span data-cd="${p.eta}" data-cd-after="now">${esc(compactDuration(p.eta - now()))}</span>`}</span></span>`);
+        const when =
+          p.eta === null
+            ? esc(t("pending"))
+            : t("applicable in {countdown}", { countdown: `<span data-cd="${p.eta}" data-cd-after="${esc(t("now"))}">${esc(compactDuration(p.eta - now()))}</span>` });
+        parts.push(`<span class="tb-item"><span class="tb-k t-warn">${esc(p.label)}</span> <span class="tb-v t-warn">${when}</span></span>`);
       }
     }
-    if (T.updatedAt) parts.push(`<span class="tb-item t-dim">updated <span data-since="${T.updatedAt}">just now</span></span>`);
-    else parts.push(`<span class="tb-item t-warn">reading the chain…</span>`);
-    parts.push(`<span class="tb-item tb-help t-dim">/ command · ↑↓ history · Tab completes · Esc cancels</span>`);
+    if (T.updatedAt) parts.push(`<span class="tb-item t-dim">${t("updated {when}", { when: `<span data-since="${T.updatedAt}">${esc(t("just now"))}</span>` })}</span>`);
+    else parts.push(`<span class="tb-item t-warn">${esc(t("reading the chain…"))}</span>`);
+    parts.push(`<span class="tb-item tb-help t-dim">${esc(t("/ command · ↑↓ history · Tab completes · Esc cancels"))}</span>`);
     setHTML($("t-status"), parts.join(""));
   }
 
   function render() {
     if (!T.active || !S.dep) return;
+    // A language switch re-labels the ticket and the quote on screen.
+    if (T.viewsLang !== lang()) {
+      if (T.ticket?.rebuild) T.ticket.view = T.ticket.rebuild();
+      if (T.quote && T.quoteRebuild) T.quote = T.quoteRebuild();
+      T.viewsLang = lang();
+    }
+    const input = $("t-input");
+    if (input && input.placeholder !== t("HELP")) input.placeholder = t("HELP");
     renderBand();
     renderConsole();
     renderBook();
@@ -567,10 +633,10 @@ export function createTerminal(ctx) {
 
   function clockTick() {
     if (!T.active) return;
-    const t = now();
+    const nowSecs = now();
     for (const el of document.querySelectorAll("#terminal [data-clock]")) el.textContent = clockText();
     for (const el of document.querySelectorAll("#terminal [data-cd]")) {
-      const left = Number(el.dataset.cd) - t;
+      const left = Number(el.dataset.cd) - nowSecs;
       el.textContent = left > 0 ? compactDuration(left) : (el.dataset.cdAfter ?? "0s");
     }
   }
@@ -586,22 +652,27 @@ export function createTerminal(ctx) {
     if (text) say("out", text);
   }
 
-  function setTicket(view, run) {
-    T.ticket = { view, run, state: "ready" };
+  /**
+   * Shows a ticket. `rebuild` makes the same view again from the same inputs,
+   * so a language switch re-labels a ticket already on screen; the amounts
+   * the GO key signs are those of the first view.
+   */
+  function setTicket(view, run, rebuild = null) {
+    T.ticket = { view, run, rebuild, state: "ready" };
     T.focused = "t-ticket-panel";
     render();
     const blocked = view.checks.find((c) => c.block);
-    if (blocked) say("err", `${view.title}: ${sentence(blocked.text)}`);
-    else if (!wallet()) say("warn", `${view.title} ready. CONN to connect a wallet, then GO.`);
-    else say("out", `${view.title} ready. Enter (GO) signs, Esc cancels.`);
+    if (blocked) say("err", t("{title}: {reason}", { title: view.title, reason: sentence(blocked.text) }));
+    else if (!wallet()) say("warn", t("{title} ready. CONN to connect a wallet, then GO.", { title: view.title }));
+    else say("out", t("{title} ready. Enter (GO) signs, Esc cancels.", { title: view.title }));
   }
 
   function cancel() {
-    if (!T.ticket) return say("out", "No ticket to cancel.");
+    if (!T.ticket) return say("out", t("No ticket to cancel."));
     const title = T.ticket.view.title;
     T.ticket = null;
     render();
-    say("out", `${title} cancelled. Nothing was signed.`);
+    say("out", t("{title} cancelled. Nothing was signed.", { title }));
   }
 
   /** Runs a write through main.js's runTx and reports the outcome in the console. */
@@ -621,24 +692,24 @@ export function createTerminal(ctx) {
   }
 
   async function go(implicit) {
-    const t = T.ticket;
-    if (!t) {
-      if (!implicit) say("warn", "No ticket to confirm. Prepare one with Q, O, R, L, W, S or REL.");
+    const ticket = T.ticket;
+    if (!ticket) {
+      if (!implicit) say("warn", t("No ticket to confirm. Prepare one with Q, O, R, L, W, S or REL."));
       return;
     }
-    if (t.state === "sending") return say("warn", "This ticket is already being signed.");
-    if (t.view.blocking) return say("err", `Blocked: ${sentence(t.view.checks.find((c) => c.block).text)} Fix it or CANCEL.`);
-    if (!wallet()) return say("warn", "No wallet connected. Type CONN, then GO.");
-    if (S.busy) return say("warn", "Another transaction is running. Wait for it.");
-    t.state = "sending";
+    if (ticket.state === "sending") return say("warn", t("This ticket is already being signed."));
+    if (ticket.view.blocking) return say("err", t("Blocked: {reason} Fix it or CANCEL.", { reason: sentence(ticket.view.checks.find((c) => c.block).text) }));
+    if (!wallet()) return say("warn", t("No wallet connected. Type CONN, then GO."));
+    if (S.busy) return say("warn", t("Another transaction is running. Wait for it."));
+    ticket.state = "sending";
     render();
-    say("out", `${t.view.title}: asking Freighter to sign…`);
-    const outcome = await t.run();
+    say("out", t("{title}: asking Freighter to sign…", { title: ticket.view.title }));
+    const outcome = await ticket.run();
     if (outcome?.ok) {
       say("ok", outcome.text);
       T.ticket = null;
     } else {
-      say("err", `${outcome?.text ?? "Not sent."} The ticket stays: GO to retry, CANCEL to drop it.`);
+      say("err", t("{reason} The ticket stays: GO to retry, CANCEL to drop it.", { reason: outcome?.text ?? t("Not sent.") }));
       if (T.ticket) T.ticket.state = "ready";
     }
     render();
@@ -648,14 +719,16 @@ export function createTerminal(ctx) {
     const f = fund ? funds().find((x) => x.symbol === fund) : (funds().find((x) => x.shares === iface()) ?? null);
     const address = f?.shares ?? iface();
     const symbol = f?.symbol ?? sym();
-    say("out", `Valuing ${shareText(shares, symbol)} with the contract…`);
+    say("out", t("Valuing {shares} with the contract…", { shares: shareText(shares, symbol) }));
     try {
       const q = await S.chain.quote(shares, address);
       const best = bookRows(S.offers, { funds: funds(), fund: address, maxTerm: S.maxTerm }).find((r) => r.takesFund && !r.mine);
-      T.quote = quoteView({ shares, quote: q, fundSymbol: symbol, bestRateBps: best ? best.rateBps : null, sd: sd(), fd: fd(), code: code() });
+      const quoteArgs = { shares, quote: q, fundSymbol: symbol, bestRateBps: best ? best.rateBps : null, sd: sd(), fd: fd(), code: code() };
+      T.quote = quoteView(quoteArgs);
+      T.quoteRebuild = () => quoteView(quoteArgs);
       if (!T.ticket) T.focused = "t-ticket-panel";
       render();
-      say("ok", `${shareText(shares, symbol)} secure up to ${money(BigInt(q.max_principal), "floor")} (haircut ${formatRate(q.haircut_bps)}).`);
+      say("ok", t("{shares} secure up to {amount} (haircut {rate}).", { shares: shareText(shares, symbol), amount: money(BigInt(q.max_principal), "floor"), rate: formatRate(q.haircut_bps) }));
     } catch (error) {
       say("err", describeError(error).text);
     }
@@ -667,8 +740,8 @@ export function createTerminal(ctx) {
 
   async function prepareOpen({ offerId, shares, termSecs, amount }) {
     const offer = (S.offers ?? []).find((o) => o.id === offerId);
-    if (!offer) return say("err", bookKnown() ? `Offer #${offerId} does not exist. OFF shows the book.` : BOOK_UNREAD);
-    say("out", `Valuing ${shareText(shares)} for offer #${offerId}…`);
+    if (!offer) return say("err", bookKnown() ? t("Offer #{id} does not exist. OFF shows the book.", { id: offerId }) : t(BOOK_UNREAD));
+    say("out", t("Valuing {shares} for offer #{id}…", { shares: shareText(shares), id: offerId }));
     let q = null;
     let quoteError = null;
     try {
@@ -697,24 +770,28 @@ export function createTerminal(ctx) {
       ownOffer: Boolean(wallet() && offer.lender === wallet()),
       now: now(),
     };
-    let view = openTicket(base);
     const context = errorContext({
       max: q ? money(BigInt(q.max_principal), "floor") : null,
       available: money(BigInt(offer.available), "floor"),
-      term: `1 to ${Math.floor(Math.min(Number(offer.max_term), S.maxTerm) / HOUR)} hours`,
+      term: t("1 to {hours} hours", { hours: Math.floor(Math.min(Number(offer.max_term), S.maxTerm) / HOUR) }),
     });
+    let refusal = null;
+    const build = () =>
+      openTicket(refusal ? { ...base, preflight: t("The contract would refuse: {reason}", { reason: describeError(refusal, context).text }) } : base);
+    let view = build();
     // With a wallet, simulate the call: a refusal lands on the ticket before anything is signed.
     if (wallet() && !view.blocking) {
       const args = [sv.address(wallet()), sv.u64(offerId), sv.address(iface()), sv.i128(shares), sv.i128(view.principal), sv.u64(termSecs)];
-      const refusal = await S.chain.probe("open_repo", args);
-      if (refusal) view = openTicket({ ...base, preflight: `The contract would refuse: ${describeError(refusal, context).text}` });
+      refusal = await S.chain.probe("open_repo", args);
+      if (refusal) view = build();
     }
     setTicket(view, () =>
       send(
         context,
         (onStatus) => S.chain.openRepo(S.wallet, view.args, onStatus),
-        (result) => `Repo #${result.repoId} opened: ${money(view.principal)} sent to your wallet.`,
+        (result) => t("Repo #{id} opened: {amount} sent to your wallet.", { id: result.repoId, amount: money(view.principal) }),
       ),
+      build,
     );
   }
 
@@ -729,12 +806,13 @@ export function createTerminal(ctx) {
     }
   }
 
-  const unreadRepo = (repoId, error) => `Repo #${repoId} could not be read: ${sentence(describeError(error).text)} REF reads the chain again.`;
+  const unreadRepo = (repoId, error) =>
+    t("Repo #{id} could not be read: {reason} REF reads the chain again.", { id: repoId, reason: sentence(describeError(error).text) });
 
   async function prepareRepurchase({ repoId }) {
     const { repo, error } = await findRepo(repoId);
     if (error) return say("err", unreadRepo(repoId, error));
-    if (!repo) return say("err", `Repo #${repoId} does not exist. POS ALL lists the repos.`);
+    if (!repo) return say("err", t("Repo #{id} does not exist. POS ALL lists the repos.", { id: repoId }));
     let due = null;
     if (repo.status === "Open") {
       try {
@@ -744,73 +822,83 @@ export function createTerminal(ctx) {
       }
     }
     const sameCoin = repo.stablecoin === S.dep.contracts.stablecoin;
-    const view = repurchaseTicket({
-      repo,
-      interestDue: due,
-      stableHeld: wallet() && S.balances && sameCoin ? S.balances.stablecoin : null,
-      wallet: wallet(),
-      now: now(),
-      sd: sd(),
-      fd: fd(),
-      code: codeOf(repo.stablecoin),
-      sym: symbolOf(repo.fund),
-    });
+    const build = () =>
+      repurchaseTicket({
+        repo,
+        interestDue: due,
+        stableHeld: wallet() && S.balances && sameCoin ? S.balances.stablecoin : null,
+        wallet: wallet(),
+        now: now(),
+        sd: sd(),
+        fd: fd(),
+        code: codeOf(repo.stablecoin),
+        sym: symbolOf(repo.fund),
+      });
+    const view = build();
     setTicket(view, () =>
       send(
         errorContext(),
         (onStatus) => S.chain.repurchase(S.wallet, repoId, onStatus),
-        () => `Repo #${repoId} repurchased: ${shareText(BigInt(repo.shares), symbolOf(repo.fund))} back in your wallet.`,
+        () => t("Repo #{id} repurchased: {shares} back in your wallet.", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)) }),
       ),
+      build,
     );
   }
 
   function prepareLend({ amount, rateBps, termSecs }) {
-    const view = lendTicket({
-      amount,
-      rateBps,
-      termSecs,
-      contractMaxTerm: S.maxTerm,
-      stableHeld: wallet() && S.balances ? S.balances.stablecoin : null,
-      approved: S.approved,
-      wallet: wallet(),
-      paused: S.board?.paused?.value === true,
-      sd: sd(),
-      code: code(),
-      fundSymbol: sym(),
-    });
+    const build = () =>
+      lendTicket({
+        amount,
+        rateBps,
+        termSecs,
+        contractMaxTerm: S.maxTerm,
+        stableHeld: wallet() && S.balances ? S.balances.stablecoin : null,
+        approved: S.approved,
+        wallet: wallet(),
+        paused: S.board?.paused?.value === true,
+        sd: sd(),
+        code: code(),
+        fundSymbol: sym(),
+      });
+    const view = build();
     setTicket(view, () =>
       send(
-        errorContext({ action: "create_offer", term: `1 to ${Math.floor(S.maxTerm / HOUR)} hours` }),
+        errorContext({ action: "create_offer", term: t("1 to {hours} hours", { hours: Math.floor(S.maxTerm / HOUR) }) }),
         (onStatus) => S.chain.createOffer(S.wallet, { amount, rateBps, maxTerm: termSecs }, onStatus),
-        (result) => `Offer #${result.offerId} created: ${money(amount)} at ${formatRate(rateBps)}.`,
+        (result) => t("Offer #{id} created: {amount} at {rate}.", { id: result.offerId, amount: money(amount), rate: formatRate(rateBps) }),
       ),
+      build,
     );
   }
 
   function prepareWithdraw({ offerId, amount }) {
     const offer = (S.offers ?? []).find((o) => o.id === offerId);
-    if (!offer) return say("err", bookKnown() ? `Offer #${offerId} does not exist. OFF shows the book.` : BOOK_UNREAD);
-    const view = withdrawTicket({ offer, amount, wallet: wallet(), sd: sd(), code: codeOf(offer.stablecoin) });
+    if (!offer) return say("err", bookKnown() ? t("Offer #{id} does not exist. OFF shows the book.", { id: offerId }) : t(BOOK_UNREAD));
+    const build = () => withdrawTicket({ offer, amount, wallet: wallet(), sd: sd(), code: codeOf(offer.stablecoin) });
+    const view = build();
     setTicket(view, () =>
       send(
         errorContext({ available: money(BigInt(offer.available)) }),
         (onStatus) => S.chain.withdrawOffer(S.wallet, offerId, view.amount, onStatus),
-        () => `${money(view.amount)} withdrawn from offer #${offerId}.`,
+        () => t("{amount} withdrawn from offer #{id}.", { amount: money(view.amount), id: offerId }),
       ),
+      build,
     );
   }
 
   async function prepareSeize({ repoId }) {
     const { repo, error } = await findRepo(repoId);
     if (error) return say("err", unreadRepo(repoId, error));
-    if (!repo) return say("err", `Repo #${repoId} does not exist. POS ALL lists the repos.`);
-    const view = seizeTicket({ repo, wallet: wallet(), now: now(), sd: sd(), fd: fd(), code: codeOf(repo.stablecoin), sym: symbolOf(repo.fund) });
+    if (!repo) return say("err", t("Repo #{id} does not exist. POS ALL lists the repos.", { id: repoId }));
+    const build = () => seizeTicket({ repo, wallet: wallet(), now: now(), sd: sd(), fd: fd(), code: codeOf(repo.stablecoin), sym: symbolOf(repo.fund) });
+    const view = build();
     setTicket(view, () =>
       send(
         errorContext({ action: "seize" }),
         (onStatus) => S.chain.seize(S.wallet, repoId, onStatus),
-        () => `Repo #${repoId} closed: ${shareText(BigInt(repo.shares), symbolOf(repo.fund))} sent to your wallet.`,
+        () => t("Repo #{id} closed: {shares} sent to your wallet.", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)) }),
       ),
+      build,
     );
   }
 
@@ -818,21 +906,39 @@ export function createTerminal(ctx) {
     let pending = T.market.releases.get(repoId) ?? null;
     if (!pending) pending = await S.chain.pendingRelease(repoId).catch(() => null);
     const repo = T.market.repos.get(repoId);
-    const view = releaseTicket({ repoId, pending, wallet: wallet(), fd: fd(), sym: repo ? symbolOf(repo.fund) : sym() });
+    const build = () => releaseTicket({ repoId, pending, wallet: wallet(), fd: fd(), sym: repo ? symbolOf(repo.fund) : sym() });
+    const view = build();
     setTicket(view, () =>
       send(
         errorContext({ action: "release" }),
         (onStatus) => S.chain.release(S.wallet, repoId, onStatus),
-        (result) => (result.value ? `Repo #${repoId}: shares delivered.` : `Repo #${repoId}: the issuer still blocks the transfer; the shares stay recorded.`),
+        (result) =>
+          result.value
+            ? t("Repo #{id}: shares delivered.", { id: repoId })
+            : t("Repo #{id}: the issuer still blocks the transfer; the shares stay recorded.", { id: repoId }),
       ),
+      build,
     );
+  }
+
+  /** LANG: shows the language in use, or switches the whole interface (main.js re-renders both views). */
+  function switchLanguage(code) {
+    if (!code) return say("out", t("Language: {name}. LANG FR, LANG EN or LANG ES switches.", { name: LANG_NAMES[lang()] }));
+    if (ctx.setLanguage) ctx.setLanguage(code);
+    else {
+      setLang(code);
+      render();
+    }
+    return say("ok", t("Language: {name}.", { name: LANG_NAMES[lang()] }));
   }
 
   function help() {
     const next = () => (T.seq += 1);
+    // The usage column fits the longest usage of the language in use.
+    const width = Math.max(36, ...COMMANDS.map((c) => t(c.usage).length + 1));
     T.log = [
-      ...COMMANDS.map((c) => ({ seq: next(), kind: "help", text: `${c.usage.padEnd(36)} ${c.help}` })),
-      ...NOTATION.map((n) => ({ seq: next(), kind: "help", text: n })),
+      ...COMMANDS.map((c) => ({ seq: next(), kind: "help", text: `${t(c.usage).padEnd(width)} ${t(c.help)}` })),
+      ...NOTATION.map((n) => ({ seq: next(), kind: "help", text: t(n) })),
     ];
     T.helpMode = true;
     renderConsole();
@@ -849,7 +955,7 @@ export function createTerminal(ctx) {
       say("in", text.toUpperCase());
     }
     const parsed = parseCommand(text, { shareDecimals: fd(), stableDecimals: sd(), funds: funds().map((f) => f.symbol) });
-    if (!parsed.ok) return say("err", parsed.usage ? `${parsed.error} Usage: ${parsed.usage}` : parsed.error);
+    if (!parsed.ok) return say("err", parsed.usage ? t("{error} Usage: {usage}", { error: parsed.error, usage: parsed.usage }) : parsed.error);
     switch (parsed.cmd) {
       case "help":
         return help();
@@ -858,28 +964,30 @@ export function createTerminal(ctx) {
       case "cancel":
         return cancel();
       case "offers":
-        return focusPanel("t-book-panel", "Offer book: best rate first. Click an offer number to load a ticket.");
+        return focusPanel("t-book-panel", t("Offer book: best rate first. Click an offer number to load a ticket."));
       case "funds":
-        return focusPanel("t-funds-panel", "Funds: NAV age against each fund's bound; amber past three quarters, red when the contract would refuse it.");
+        return focusPanel("t-funds-panel", t("Funds: NAV age against each fund's bound; amber past three quarters, red when the contract would refuse it."));
       case "tape":
-        return focusPanel("t-tape-panel", "Tape: every contract event, newest first, with its transaction.");
+        return focusPanel("t-tape-panel", t("Tape: every contract event, newest first, with its transaction."));
       case "positions":
         T.scope = parsed.scope;
-        return focusPanel("t-pos-panel", `Positions: ${scopeLabel()}.`);
+        return focusPanel("t-pos-panel", t("Positions: {scope}.", { scope: scopeLabel() }));
       case "connect":
-        say("out", "Asking Freighter…");
+        say("out", t("Asking Freighter…"));
         await ctx.connect();
-        return wallet() ? say("ok", `Connected ${shortAddress(wallet())}.`) : say("err", S.walletProblem ?? "Freighter did not connect.");
+        return wallet() ? say("ok", t("Connected {address}.", { address: shortAddress(wallet()) })) : say("err", S.walletProblem ?? t("Freighter did not connect."));
       case "refresh":
-        say("out", "Reading the chain…");
+        say("out", t("Reading the chain…"));
         await ctx.refreshAll();
         await refresh({ force: true });
-        return say("ok", "Up to date.");
+        return say("ok", t("Up to date."));
       case "clear":
         T.log = [];
         return renderConsole();
       case "guide":
         return ctx.setFace("guide");
+      case "lang":
+        return switchLanguage(parsed.code);
       case "quote":
         return quote(parsed);
       case "open":
@@ -895,7 +1003,7 @@ export function createTerminal(ctx) {
       case "release":
         return prepareRelease(parsed);
       default:
-        return say("err", "Not available.");
+        return say("err", t("Not available."));
     }
   }
 
@@ -952,7 +1060,7 @@ export function createTerminal(ctx) {
           input.value = `${found[0]} `;
         } else if (found.length > 1) {
           event.preventDefault();
-          say("out", `Matches: ${found.join(", ")}`);
+          say("out", t("Matches: {list}", { list: found.join(", ") }));
         }
       }
     });

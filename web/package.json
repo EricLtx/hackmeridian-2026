@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test"
+    "test": "node --test",
+    "check:i18n": "node scripts/i18n-check.mjs"
   },
   "engines": {
     "node": ">=20"

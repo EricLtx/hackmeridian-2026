@@ -37,6 +37,14 @@ What each panel reads:
 
 The view uses no animation, keeps numbers in a monospaced font aligned right, and stays usable at phone width, where the panels stack and the GO and CANCEL keys replace Enter and Esc.
 
+## Languages
+
+Both views and the History page are available in English, French and Spanish. The EN, FR and ES keys in the header switch the language at once, without reading the chain again; in the terminal, `LANG FR` does the same. The page opens in the language of the link (`?lang=fr`), else the one chosen last on the device, else the browser's, else English. A link shared for a demo can therefore fix the language: `?view=terminal&lang=en`.
+
+Numbers follow the language: `1,250.50` in English, `1 250,50` in French, `1250,50` and `12.345,50` in Spanish; dates and durations too. Inputs accept each language's own form, in the forms and on the command line (`O 1 1000,5 64` in French). A form that could be read two ways, such as `1,000.5` in French, is refused rather than guessed, and every ticket shows the parsed amounts before anything is signed. Command words stay the same in every language, like the keys of a market terminal; `AIDE` and `AYUDA` also open the help, and terms accept `2J` (jours) and `1S` (semaine, semana) next to `2D` and `1W`.
+
+The English text is the source: each visible string is written in English in the code, marked with `t()`, and looked up in `src/locales/fr/` and `src/locales/es/` (one file per source module). `npm run check:i18n` lists any marked text that lacks a French or Spanish entry or changes its `{placeholders}`; the unit tests run the same check, so a new string without its translations fails the tests and the CI.
+
 ## Run
 
 ```sh
@@ -71,7 +79,8 @@ npm run preview    # serves dist/
 ## Test
 
 ```sh
-npm test                                   # formatting, interest, error mapping, guide, timelines, terminal commands and tickets
+npm test                                   # formatting, interest, error mapping, guide, timelines, terminal commands and tickets, languages
+npm run check:i18n                         # every marked text translated in French and Spanish
 OW_TESTNET=1 npm test                      # plus the full cycle on testnet
 OW_TESTNET=1 OW_DEMO_DIR=/path/to/demo npm test
 ```

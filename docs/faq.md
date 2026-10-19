@@ -88,6 +88,10 @@ The fund shares held for that repo, at maturity, sent to your address or to anot
 - **Admission.** Your fund can only be admitted with your signature and the governor's, on the same transaction.
 - **Custody.** The contract must be on your allowlist like any other holder, so nothing moves without your consent.
 
+### In which languages is the interface available?
+
+English, French and Spanish, for both views and the History page. The EN, FR and ES keys in the header switch at once; in the terminal, `LANG FR` does the same, and a link can fix the language with `?lang=fr`. Numbers, dates and durations follow the language (`1,250.50`, `1 250,50`, `1250,50`), and amounts are typed in that same form. Command words stay identical in every language. Details in [web/README.md](../web/README.md#languages).
+
 ### Is there a view for trading and treasury desks?
 
 Yes. The web interface has a terminal view (`?view=terminal`): a command line where Enter is the GO key, the offer book best rate first, tickets that show every number and every check before anything is signed, a positions blotter with the amount due now and a countdown to the term, every fund's NAV and its age against the fund's own bound, and the tape of contract events. `Q 1000` values 1,000 shares; `O 1 1K 64` prepares a 64-hour loan on offer 1; `HELP` lists the rest. It signs through the same wallet and the same functions as the guided page, described in [web/README.md](../web/README.md#terminal-view).

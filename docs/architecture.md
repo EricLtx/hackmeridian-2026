@@ -65,7 +65,7 @@ Three facts shape everything else. The issuer never lends against its own fund (
 | Stellar Asset Contract | Stellar's own token contract for classic assets | the third demo fund's share: a token this repository did not write, with the issuer's native flags | testnet |
 | `demo/` | Node 20, `@stellar/stellar-sdk` 17 | `setup` (deployment, roles, admissions, offers), `run` (scenes), `upgrade` (governed upgrade and migration), `inventory`, `monitor`, `keys` (ceremonies), `measure`, `fxlog`, `onboard` | the operator's host |
 | `indexer/` | Node 20 | event journal beyond the RPC's retention, SHA-256 hash chain, on-chain anchor, CSV, register and SFTR exports, `history.json` for the web | the operator's host |
-| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page | static files |
+| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page; English, French and Spanish | static files |
 | CI | GitHub Actions | `cargo fmt --check`, `stellar contract build`, size budget, `clippy -D warnings`, `cargo test`, web tests and build, `cargo deny`, RustSec audit, link check | GitHub |
 
 ## 3. The contract's components

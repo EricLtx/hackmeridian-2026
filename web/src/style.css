@@ -1248,6 +1248,12 @@ code.err {
   outline-offset: -2px;
 }
 
+/* Language switch: same keys as the view switch, narrower. */
+.lang-btn {
+  padding: 4px 9px;
+  letter-spacing: 0.04em;
+}
+
 /* Terminal face: the page takes the terminal palette, whatever the system theme. */
 
 body.face-terminal {

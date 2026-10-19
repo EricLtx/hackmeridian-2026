@@ -1,0 +1,50 @@
+// Spanish translations of src/history.js, keyed by the English source text.
+export default {
+  "Open": "Abierto",
+  "Repurchased": "Recomprado",
+  "Seized": "Ejecutado",
+  "Release pending": "Liberación pendiente",
+  "export of {time} UTC": "exportación del {time} UTC",
+  "Events journaled": "Eventos registrados",
+  "First event": "Primer evento",
+  "ledger {ledger}": "ledger {ledger}",
+  "Last event": "Último evento",
+  "Gaps declared": "Huecos declarados",
+  "ledgers the RPC no longer served when indexing resumed": "ledgers que el RPC ya no servía cuando se reanudó la indexación",
+  "none": "ninguno",
+  "Last hash of the chain: <code>{hash}</code>. Recompute it with <code>npm run verify</code> in <code>indexer/</code>; a different value means the journal changed.":
+    "Último hash de la cadena: <code>{hash}</code>. Vuelva a calcularlo con <code>npm run verify</code> en <code>indexer/</code>; un valor distinto significa que el diario cambió.",
+  "{n} repo: {open} open, {repurchased} repurchased, {seized} seized, {pending} release pending":
+    "{n} repo: abiertos {open}, recomprados {repurchased}, ejecutados {seized}, liberación pendiente {pending}",
+  "{n} repos: {open} open, {repurchased} repurchased, {seized} seized, {pending} release pending":
+    "{n} repos: abiertos {open}, recomprados {repurchased}, ejecutados {seized}, liberación pendiente {pending}",
+  "No repo in the journal.": "Ningún repo en el diario.",
+  "Repo": "Repo",
+  "Status": "Estado",
+  "Lender": "Prestamista",
+  "Borrower": "Prestatario",
+  "Shares": "Participaciones",
+  "Principal": "Principal",
+  "Rate": "Tasa",
+  "Opened": "Apertura",
+  "Maturity": "Vencimiento",
+  "Closed": "Cierre",
+  "Last tx": "Última tx",
+  "unknown": "desconocido",
+  "{shares} shares held back": "{shares} participaciones retenidas",
+  "interest {amount} {currency}": "intereses {amount} {currency}",
+  "Repos rebuilt from the journal": "Repos reconstruidos a partir del diario",
+  "Amounts in token units; the currency comes from the <code>stablecoin_set</code> event of the repo's stablecoin. A blank cell is a fact the chain does not carry or an event outside the journal.":
+    "Importes en unidades de token; la moneda procede del evento <code>stablecoin_set</code> del stablecoin del repo. Una celda vacía es un dato que la cadena no contiene o un evento fuera del diario.",
+  "{n} most recent, newest first": "Últimos eventos: {n}, del más reciente al más antiguo",
+  "No event in the journal.": "Ningún evento en el diario.",
+  "Time": "Hora",
+  "Event": "Evento",
+  "Topics": "Topics",
+  "Data": "Datos",
+  "Latest events of the contract": "Últimos eventos del contrato",
+  "Contract {contract} on Stellar {network}. Journal and exports: <code>indexer/</code> in the repository.":
+    "Contrato {contract} en Stellar {network}. Diario y exportaciones: <code>indexer/</code> en el repositorio.",
+  "No history export found ({error}). Produce it from the repository with <code>cd indexer &amp;&amp; npm run index &amp;&amp; npm run export -- --json --web</code>, which writes <code>web/public/history.json</code>.":
+    "No se encontró ninguna exportación del historial ({error}). Genérela desde el repositorio con <code>cd indexer &amp;&amp; npm run index &amp;&amp; npm run export -- --json --web</code>, que escribe <code>web/public/history.json</code>.",
+};

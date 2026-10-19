@@ -2,6 +2,8 @@
 // charges to the unit. Source: contracts/night-window/src/math.rs and
 // `interest_due` in lib.rs.
 
+import { t } from "./i18n.js";
+
 export const HOUR = 3600;
 export const YEAR_SECS = 31_536_000n;
 export const BPS = 10_000n;
@@ -67,12 +69,13 @@ export function seizeState(repo, now) {
 
 /**
  * Checks a withdrawal amount against what the offer holds. Returns the
- * amount in units, or a sentence explaining what is wrong.
+ * amount in units, or a sentence explaining what is wrong, in the
+ * interface language.
  */
 export function withdrawalAmount(units, available) {
-  if (units === null || units === undefined) return { error: "Enter an amount." };
-  if (units <= 0n) return { error: "The amount must be greater than zero." };
-  if (units > BigInt(available)) return { error: "The offer does not hold that much." };
+  if (units === null || units === undefined) return { error: t("Enter an amount.") };
+  if (units <= 0n) return { error: t("The amount must be greater than zero.") };
+  if (units > BigInt(available)) return { error: t("The offer does not hold that much.") };
   return { amount: units };
 }
 

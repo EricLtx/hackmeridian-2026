@@ -32,6 +32,7 @@ import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
 import { eventsOfRepo, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
+import { applyStatic, bootLang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
 
 const REFRESH_MS = 15_000;
 const REMEMBER_KEY = "openwindow.connect";
@@ -73,6 +74,7 @@ const S = {
   offerEdited: false,
   termEdited: false,
   borrowSharesSet: false,
+  updatedAt: null, // ledger time of the last complete refresh
 };
 
 const now = () => Math.floor(Date.now() / 1000 + S.offset);
@@ -84,6 +86,8 @@ const money = (units, rounding) => `${formatAmount(units, SD(), rounding)} ${cod
 const exact = (units) => `${formatUnits(units, SD())} ${code()}`;
 const shareAmount = (units) => `${formatAmount(units, FD())} ${sym()}`;
 const onboardCommand = (address, lender = false) => `cd demo && npm run onboard -- ${address}${lender ? " --role=lender" : ""}`;
+/** A number written with a dot ("1.5"), with the decimal separator of the interface language. */
+const decimalText = (text) => String(text).replace(".", numberStyle().decimal);
 
 /** The terminal face: same state, same reads, same signing; its own screen. */
 const terminal = createTerminal({
@@ -98,6 +102,7 @@ const terminal = createTerminal({
   setFace: (face) => setFace(face),
   fundLimits: () => fundLimits(),
   onboardCommand,
+  setLanguage: (choice) => setLanguage(choice),
 });
 
 /** Replaces an element's markup only when it changed, so focus and selection survive refreshes. */
@@ -109,7 +114,7 @@ function setHTML(el, html) {
 
 const link = (href, text) => `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>`;
 
-function copyButton(text, label = "Copy") {
+function copyButton(text, label = t("Copy")) {
   return `<button type="button" class="btn btn-ghost btn-small" data-copy="${esc(text)}">${esc(label)}</button>`;
 }
 
@@ -122,7 +127,7 @@ function commandBox(command) {
 // ---------------------------------------------------------------------------
 
 function tracker(el) {
-  const hashLink = (hash) => (hash ? ` ${link(S.chain.explorerTx(hash), `Transaction ${hash.slice(0, 8)}…`)}` : "");
+  const hashLink = (hash) => (hash ? ` ${link(S.chain.explorerTx(hash), t("Transaction {hash}…", { hash: hash.slice(0, 8) }))}` : "");
   return {
     update({ stage, text, hash }) {
       el.className = `tx tx-active tx-${stage}`;
@@ -130,8 +135,8 @@ function tracker(el) {
     },
     success(message, { hash, seconds }) {
       el.className = "tx tx-ok";
-      el.innerHTML = `<span class="icon" aria-hidden="true">✓</span><span>${esc(message)} Confirmed in ${seconds.toFixed(1)} s.</span>${
-        hash ? ` ${link(S.chain.explorerTx(hash), "View on Stellar Expert")}` : ""
+      el.innerHTML = `<span class="icon" aria-hidden="true">✓</span><span>${esc(message)} ${esc(t("Confirmed in {seconds} s.", { seconds: decimalText(seconds.toFixed(1)) }))}</span>${
+        hash ? ` ${link(S.chain.explorerTx(hash), t("View on Stellar Expert"))}` : ""
       }`;
     },
     fail(error, context) {
@@ -160,14 +165,14 @@ async function runTx(el, context, action, message) {
   if (S.busy) return;
   S.busy = true;
   syncWriteButtons();
-  const t = tracker(el);
+  const track = tracker(el);
   try {
-    const result = await action((status) => t.update(status));
-    if (result?.hash) t.success(message(result), result);
-    else t.note(message(result));
+    const result = await action((status) => track.update(status));
+    if (result?.hash) track.success(message(result), result);
+    else track.note(message(result));
   } catch (error) {
     console.error(error);
-    t.fail(error, typeof context === "function" ? context() : context);
+    track.fail(error, typeof context === "function" ? context() : context);
   } finally {
     S.busy = false;
     syncWriteButtons();
@@ -207,24 +212,24 @@ function renderGuide() {
     tabs,
     ROLES.map(
       (r) =>
-        `<button type="button" role="tab" class="tab" id="tab-${r}" aria-selected="${r === S.guideRole}" aria-controls="guide-body" data-role="${r}">${esc(ROLE_TITLES[r])}</button>`,
+        `<button type="button" role="tab" class="tab" id="tab-${r}" aria-selected="${r === S.guideRole}" aria-controls="guide-body" data-role="${r}">${esc(t(ROLE_TITLES[r]))}</button>`,
     ).join(""),
   );
   const g = roleGuide(S.guideRole, ctx);
-  const list = (items) => `<ul class="guide-list">${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`;
+  const list = (items) => `<ul class="guide-list">${items.map((i) => `<li>${esc(t(i))}</li>`).join("")}</ul>`;
   setHTML(
     body,
-    `<p class="guide-intro">${esc(g.intro)}</p>
+    `<p class="guide-intro">${esc(t(g.intro))}</p>
      <div class="guide-grid">
-       <div><h3 class="sub">What you need</h3>${list(g.need)}</div>
-       <div><h3 class="sub">What you do</h3><ol class="guide-list guide-steps">${g.steps.map((i) => `<li>${esc(i)}</li>`).join("")}</ol></div>
-       <div><h3 class="sub">What you commit to, and what protects you</h3>${list(g.terms)}</div>
+       <div><h3 class="sub">${esc(t("What you need"))}</h3>${list(g.need)}</div>
+       <div><h3 class="sub">${esc(t("What you do"))}</h3><ol class="guide-list guide-steps">${g.steps.map((i) => `<li>${esc(t(i))}</li>`).join("")}</ol></div>
+       <div><h3 class="sub">${esc(t("What you commit to, and what protects you"))}</h3>${list(g.terms)}</div>
      </div>`,
   );
   if (b) {
     const rows = guideTerms({ dep: S.dep, board: b, maxTermSecs: ctx.maxTermSecs, delaySecs: ctx.delaySecs, version: S.version, paused: b.paused.value });
-    setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(note)}</span>` : ""}</dd></div>`).join(""));
-    $("guide-meta").textContent = `terms read from the chain ${S.dep.network === "testnet" ? "on testnet" : ""}`.trim();
+    setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(t(label))}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(t(note))}</span>` : ""}</dd></div>`).join(""));
+    $("guide-meta").textContent = S.dep.network === "testnet" ? t("terms read from the chain on testnet") : t("terms read from the chain");
   }
 }
 
@@ -232,68 +237,70 @@ function renderBoard() {
   const b = S.board;
   const config = b.config.value;
   const state = b.state.value;
-  const t = now();
+  const ts = now();
 
   const status = $("board-status");
   if (b.paused.value === true) {
     status.className = "pill pill-warn";
-    status.textContent = "Paused";
-    status.title = "New loans and offers are suspended. Repurchases still work.";
+    status.textContent = t("Paused");
+    status.title = t("New loans and offers are suspended. Repurchases still work.");
   } else if (state?.frozen) {
     status.className = "pill pill-warn";
-    status.textContent = "Fund frozen";
-    status.title = "The fund issuer suspended new loans on this fund.";
+    status.textContent = t("Fund frozen");
+    status.title = t("The fund issuer suspended new loans on this fund.");
   } else if (b.paused.value === false && config) {
     status.className = "pill pill-ok";
-    status.textContent = "Open for loans";
+    status.textContent = t("Open for loans");
     status.title = "";
   } else {
     status.className = "pill";
-    status.textContent = "Unknown";
+    status.textContent = t("Unknown");
   }
 
   const tiles = [];
   const navCurrency = S.dep.fund.navCurrency;
+  const tooOld = `${esc(t("Too old to lend against."))} `;
+  const since = (timestamp) => `<span data-since="${timestamp}">${esc(formatAge(timestamp, ts))}</span>`;
   if (b.nav.value && state) {
-    const old = config && t - Number(b.nav.value.timestamp) > Number(config.nav_max_age_secs);
+    const old = config && ts - Number(b.nav.value.timestamp) > Number(config.nav_max_age_secs);
     tiles.push(
       tile(
-        "Fund share NAV",
+        esc(t("Fund share NAV")),
         `${formatUnits(b.nav.value.price, state.nav_decimals, { digits: 4 })} <span class="unit-inline">${navCurrency}</span>`,
-        `${old ? "Too old to lend against. " : ""}Published <span data-since="${b.nav.value.timestamp}">${formatAge(b.nav.value.timestamp, t)}</span>`,
+        `${old ? tooOld : ""}${t("Published {age}", { age: since(b.nav.value.timestamp) })}`,
         old ? "tile-warn" : "",
       ),
     );
   } else {
-    tiles.push(tile("Fund share NAV", "—", b.nav.error ? errorLine(b.nav) : ""));
+    tiles.push(tile(esc(t("Fund share NAV")), "—", b.nav.error ? errorLine(b.nav) : ""));
   }
 
   const leg = Array.isArray(config?.source) && config.source[0] === "Cross" ? config.source[1] : null;
   if (leg && b.fx.value && state) {
-    const old = t - Number(b.fx.value.timestamp) > Number(leg.max_age_secs);
+    const old = ts - Number(b.fx.value.timestamp) > Number(leg.max_age_secs);
     tiles.push(
       tile(
         `${S.dep.stablecoin.currency}/${navCurrency}`,
         formatUnits(b.fx.value.price, state.fx_decimals, { digits: 4 }),
-        `${old ? "Too old to lend against. " : ""}Exchange rate, <span data-since="${b.fx.value.timestamp}">${formatAge(b.fx.value.timestamp, t)}</span>`,
+        `${old ? tooOld : ""}${t("Exchange rate, {age}", { age: since(b.fx.value.timestamp) })}`,
         old ? "tile-warn" : "",
       ),
     );
   } else if (leg) {
-    tiles.push(tile(`${S.dep.stablecoin.currency}/${navCurrency}`, "—", b.fx.error ? errorLine(b.fx) : "No rate"));
+    tiles.push(tile(`${S.dep.stablecoin.currency}/${navCurrency}`, "—", b.fx.error ? errorLine(b.fx) : esc(t("No rate"))));
   }
 
   if (b.quote.value) {
     const q = b.quote.value;
     tiles.push(
       tile(
-        `Share value in ${code()}`,
+        esc(t("Share value in {code}", { code: code() })),
         formatUnits(q.price, q.price_decimals, { digits: 4 }),
-        `Lent against with a ${formatRate(q.haircut_bps)} haircut`,
+        esc(t("Lent against with a {haircut} haircut", { haircut: formatRate(q.haircut_bps) })),
       ),
     );
   } else if (b.quote.error) {
-    tiles.push(tile(`Share value in ${code()}`, "—", errorLine(b.quote), "tile-warn"));
+    tiles.push(tile(esc(t("Share value in {code}", { code: code() })), "—", errorLine(b.quote), "tile-warn"));
   }
 
   if (config && state) {
@@ -302,9 +309,11 @@ function renderBoard() {
     const pct = cap > 0n ? Number((used * 1000n) / cap) / 10 : 0;
     tiles.push(
       tile(
-        "Lent against this fund",
-        `${formatAmount(used, SD(), "round")} <span class="unit-inline">of ${formatAmount(cap, SD())} ${code()}</span>`,
-        `<span class="bar" role="img" aria-label="${pct.toFixed(1)} percent of the fund cap used"><span style="width:${Math.min(pct, 100)}%"></span></span>Up to ${money(config.max_principal_per_repo)} per loan`,
+        esc(t("Lent against this fund")),
+        `${formatAmount(used, SD(), "round")} <span class="unit-inline">${esc(t("of {cap}", { cap: `${formatAmount(cap, SD())} ${code()}` }))}</span>`,
+        `<span class="bar" role="img" aria-label="${esc(t("{pct} percent of the fund cap used", { pct: decimalText(pct.toFixed(1)) }))}"><span style="width:${Math.min(pct, 100)}%"></span></span>${esc(
+          t("Up to {amount} per loan", { amount: money(config.max_principal_per_repo) }),
+        )}`,
       ),
     );
   }
@@ -324,27 +333,33 @@ function renderFunds(funds) {
     setHTML(out, "");
     return;
   }
+  const heads = [t("Fund share"), t("NAV in"), t("FX leg"), t("Haircut"), t("Max NAV age"), t("Lent")].map((h) => esc(h));
   const rows = funds.map((f) => {
     const cfg = f.config.value;
     const st = f.state.value;
     const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
-    const lent = cfg && st ? `${formatAmount(BigInt(st.outstanding), SD(), "round")} of ${formatAmount(BigInt(cfg.max_outstanding), SD())} ${esc(code())}` : "—";
-    return `<tr><td data-label="Fund share">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="NAV in">${esc(f.navCurrency)}</td><td data-label="FX leg">${source === "Cross" ? "exchange-rate leg" : source === "Direct" ? "none" : "—"}</td><td data-label="Haircut">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="Max NAV age">${cfg ? `${Number(cfg.nav_max_age_secs) / 3600} h` : "—"}</td><td data-label="Lent">${lent}</td></tr>`;
+    const lent =
+      cfg && st
+        ? esc(t("{used} of {cap}", { used: formatAmount(BigInt(st.outstanding), SD(), "round"), cap: `${formatAmount(BigInt(cfg.max_outstanding), SD())} ${code()}` }))
+        : "—";
+    const leg = source === "Cross" ? esc(t("exchange-rate leg")) : source === "Direct" ? esc(t("none")) : "—";
+    const maxAge = cfg ? `${decimalText(Number(cfg.nav_max_age_secs) / 3600)} h` : "—";
+    return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
   });
   setHTML(
     out,
-    `<h3 class="sub">Funds admitted</h3>
-     <p class="muted small">Each fund is admitted by the governor and its own issuer, with its own NAV feed and settings. The contract is the same for all of them.</p>
-     <table class="table"><thead><tr><th>Fund share</th><th>NAV in</th><th>FX leg</th><th>Haircut</th><th>Max NAV age</th><th>Lent</th></tr></thead><tbody>${rows.join("")}</tbody></table>`,
+    `<h3 class="sub">${esc(t("Funds admitted"))}</h3>
+     <p class="muted small">${esc(t("Each fund is admitted by the governor and its own issuer, with its own NAV feed and settings. The contract is the same for all of them."))}</p>
+     <table class="table"><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`,
   );
 }
 
 function renderQuote(result, shares) {
   const out = $("quote-out");
   if (!shares || shares <= 0n) {
-    setHTML(out, `<span class="muted">Enter a number of shares.</span>`);
+    setHTML(out, `<span class="muted">${esc(t("Enter a number of shares."))}</span>`);
   } else if (result?.value) {
-    setHTML(out, `${esc(shareAmount(shares))} can secure up to <strong>${esc(money(result.value.max_principal, "floor"))}</strong>`);
+    setHTML(out, t("{shares} can secure up to <strong>{amount}</strong>", { shares: esc(shareAmount(shares)), amount: esc(money(result.value.max_principal, "floor")) }));
   } else if (result?.error) {
     setHTML(out, errorLine(result));
   }
@@ -358,24 +373,25 @@ function renderOffers() {
     return;
   }
   if (!offers.length) {
-    setHTML($("offers"), `<p class="muted">No offer has ${esc(code())} available right now.</p>`);
+    setHTML($("offers"), `<p class="muted">${esc(t("No offer has {code} available right now.", { code: code() }))}</p>`);
     return;
   }
+  const label = { offer: esc(t("Offer")), available: esc(t("Available")), rate: esc(t("Rate")), term: esc(t("Longest term")) };
   const rows = offers
     .map(
       (o) => `<tr>
-        <td data-label="Offer"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge" title="An independent lender the fund issuer designates">Designated</span>` : ""}
-          <span class="muted small mono">${esc(shortAddress(o.lender))}</span>${S.wallet && o.lender === S.wallet.address ? ` <span class="badge badge-muted">You</span>` : ""}</td>
-        <td data-label="Available" class="num">${esc(money(o.available, "floor"))}</td>
-        <td data-label="Rate" class="num">${esc(formatRate(o.rate_bps))} <span class="muted small">a year</span></td>
-        <td data-label="Longest term" class="num">${esc(formatTerm(maxTermFor(o, S.maxTerm || o.max_term)))}</td>
+        <td data-label="${label.offer}"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge" title="${esc(t("An independent lender the fund issuer designates"))}">${esc(t("Designated"))}</span>` : ""}
+          <span class="muted small mono">${esc(shortAddress(o.lender))}</span>${S.wallet && o.lender === S.wallet.address ? ` <span class="badge badge-muted">${esc(t("You"))}</span>` : ""}</td>
+        <td data-label="${label.available}" class="num">${esc(money(o.available, "floor"))}</td>
+        <td data-label="${label.rate}" class="num">${esc(formatRate(o.rate_bps))} <span class="muted small">${esc(t("a year"))}</span></td>
+        <td data-label="${label.term}" class="num">${esc(formatTerm(maxTermFor(o, S.maxTerm || o.max_term)))}</td>
       </tr>`,
     )
     .join("");
   setHTML(
     $("offers"),
-    `<table class="table"><caption class="sr-only">Offers open to these fund shares, issuer first, then cheapest</caption>
-      <thead><tr><th scope="col">Offer</th><th scope="col" class="num">Available</th><th scope="col" class="num">Rate</th><th scope="col" class="num">Longest term</th></tr></thead>
+    `<table class="table"><caption class="sr-only">${esc(t("Offers open to these fund shares, issuer first, then cheapest"))}</caption>
+      <thead><tr><th scope="col">${label.offer}</th><th scope="col" class="num">${label.available}</th><th scope="col" class="num">${label.rate}</th><th scope="col" class="num">${label.term}</th></tr></thead>
       <tbody>${rows}</tbody></table>`,
   );
 }
@@ -388,12 +404,12 @@ function onQuoteInput() {
     const field = $("quote-shares");
     field.setAttribute("aria-invalid", shares === null ? "true" : "false");
     if (shares === null) {
-      setHTML($("quote-out"), `<span class="text-error">Enter a number, up to ${FD()} decimals.</span>`);
+      setHTML($("quote-out"), `<span class="text-error">${esc(t("Enter a number, up to {decimals} decimals.", { decimals: FD() }))}</span>`);
       return;
     }
     S.quoteShares = shares;
     if (shares === 0n) return renderQuote(null, 0n);
-    setHTML($("quote-out"), `<span class="muted">Asking the contract…</span>`);
+    setHTML($("quote-out"), `<span class="muted">${esc(t("Asking the contract…"))}</span>`);
     let result;
     try {
       result = { value: await S.chain.quote(shares) };
@@ -411,19 +427,19 @@ function onQuoteInput() {
 function renderWalletChip() {
   const chip = $("wallet-chip");
   if (!S.wallet) {
-    setHTML(chip, `<button type="button" class="btn btn-primary" id="connect">Connect Freighter</button>`);
+    setHTML(chip, `<button type="button" class="btn btn-primary" id="connect">${esc(t("Connect Freighter"))}</button>`);
     return;
   }
   setHTML(
     chip,
     `<span class="addr mono" title="${esc(S.wallet.address)}"><span class="dot" aria-hidden="true"></span>${esc(shortAddress(S.wallet.address))}</span>
-     <button type="button" class="btn btn-ghost btn-small" id="disconnect">Disconnect</button>`,
+     <button type="button" class="btn btn-ghost btn-small" id="disconnect">${esc(t("Disconnect"))}</button>`,
   );
 }
 
 function step(done, title, body) {
   return `<li class="${done ? "done" : "todo"}"><span class="step-mark" aria-hidden="true">${done ? "✓" : ""}</span>
-    <div><p class="step-title">${title}${done ? ` <span class="sr-only">(done)</span>` : ""}</p>${done ? "" : body}</div></li>`;
+    <div><p class="step-title">${title}${done ? ` <span class="sr-only">${esc(t("(done)"))}</span>` : ""}</p>${done ? "" : body}</div></li>`;
 }
 
 function renderWallet() {
@@ -432,16 +448,16 @@ function renderWallet() {
   if (!S.wallet) {
     setHTML(
       body,
-      `<p>Connect Freighter to borrow, repurchase or lend. The market above needs no wallet.</p>
+      `<p>${esc(t("Connect Freighter to borrow, repurchase or lend. The market above needs no wallet."))}</p>
        ${S.walletProblem ? `<p class="notice notice-error" role="alert">${esc(S.walletProblem)}</p>` : ""}
-       <p class="muted small">Freighter must be set to Testnet. Your keys stay in Freighter: this page only asks it to sign.</p>`,
+       <p class="muted small">${esc(t("Freighter must be set to Testnet. Your keys stay in Freighter: this page only asks it to sign."))}</p>`,
     );
     return;
   }
   const a = S.wallet.address;
   const b = S.balances;
   if (!b) {
-    setHTML(body, `<p class="muted">Reading balances…</p>`);
+    setHTML(body, `<p class="muted">${esc(t("Reading balances…"))}</p>`);
     return;
   }
   const funded = b.xlm !== null;
@@ -450,34 +466,38 @@ function renderWallet() {
   const steps = [
     step(
       funded,
-      "Test XLM for network fees",
-      `<p>This account does not exist on testnet yet.</p><button type="button" class="btn btn-secondary btn-small" data-write data-friendbot>Get test XLM</button>`,
+      esc(t("Test XLM for network fees")),
+      `<p>${esc(t("This account does not exist on testnet yet."))}</p><button type="button" class="btn btn-secondary btn-small" data-write data-friendbot>${esc(t("Get test XLM"))}</button>`,
     ),
     step(
       trust,
-      `Accept ${esc(code())}`,
-      `<p>Add a trustline so this account can hold ${esc(code())}. Freighter asks you to sign.</p><button type="button" class="btn btn-secondary btn-small" data-write data-trust ${
+      esc(t("Accept {code}", { code: code() })),
+      `<p>${esc(t("Add a trustline so this account can hold {code}. Freighter asks you to sign.", { code: code() }))}</p><button type="button" class="btn btn-secondary btn-small" data-write data-trust ${
         funded ? "" : `data-blocked="1"`
-      }>Add ${esc(code())}</button>`,
+      }>${esc(t("Add {code}", { code: code() }))}</button>`,
     ),
     step(
       ready || S.approved,
-      "Test shares and tokens from the operator",
-      `<p>Only the operator keys can allowlist this wallet and mint test fund shares. Send them your address, or run this from a checkout that holds the demo keys:</p>
+      esc(t("Test shares and tokens from the operator")),
+      `<p>${esc(t("Only the operator keys can allowlist this wallet and mint test fund shares. Send them your address, or run this from a checkout that holds the demo keys:"))}</p>
        ${commandBox(onboardCommand(a))}
-       <p class="muted small">To lend instead of borrow:</p>${commandBox(onboardCommand(a, true))}`,
+       <p class="muted small">${esc(t("To lend instead of borrow:"))}</p>${commandBox(onboardCommand(a, true))}`,
     ),
   ];
   const allDone = funded && trust && (ready || S.approved);
   setHTML(
     body,
     `<dl class="facts facts-wallet">
-       <div><dt>Address</dt><dd class="mono">${link(S.chain.explorerAccount(a), shortAddress(a))} ${copyButton(a, "Copy address")}</dd></div>
+       <div><dt>${esc(t("Address"))}</dt><dd class="mono">${link(S.chain.explorerAccount(a), shortAddress(a))} ${copyButton(a, t("Copy address"))}</dd></div>
        <div><dt>XLM</dt><dd class="num">${b.xlm === null ? "—" : esc(formatAmount(b.xlm, 7))}</dd></div>
-       <div><dt>${esc(code())}</dt><dd class="num">${trust ? esc(formatAmount(b.stablecoin, SD())) : `<span class="muted">No trustline</span>`}</dd></div>
+       <div><dt>${esc(code())}</dt><dd class="num">${trust ? esc(formatAmount(b.stablecoin, SD())) : `<span class="muted">${esc(t("No trustline"))}</span>`}</dd></div>
        <div><dt>${esc(sym())}</dt><dd class="num">${esc(formatAmount(b.shares, FD()))}</dd></div>
      </dl>
-     ${allDone ? `<p class="muted small">Ready.${S.approved ? " This address is an approved lender." : ""}</p>` : `<h3 class="sub">Get started</h3><ol class="steps">${steps.join("")}</ol>`}`,
+     ${
+       allDone
+         ? `<p class="muted small">${esc(t("Ready."))}${S.approved ? ` ${esc(t("This address is an approved lender."))}` : ""}</p>`
+         : `<h3 class="sub">${esc(t("Get started"))}</h3><ol class="steps">${steps.join("")}</ol>`
+     }`,
   );
   syncWriteButtons();
 }
@@ -514,9 +534,13 @@ function adoptWallet(wallet) {
   S.stopWatch = watchFreighter((change) => {
     if (!S.wallet) return;
     if (change.networkPassphrase && change.networkPassphrase !== S.dep.networkPassphrase) {
-      disconnect(`Freighter switched to ${change.network || "another network"}. This interface runs on Testnet only. Switch back, then connect again.`);
+      disconnect(
+        t("Freighter switched to {network}. This interface runs on Testnet only. Switch back, then connect again.", {
+          network: change.network || t("another network"),
+        }),
+      );
     } else if (change.address && change.address !== S.wallet.address) {
-      disconnect("Freighter switched to another account. Connect again to use it.");
+      disconnect(t("Freighter switched to another account. Connect again to use it."));
     }
   });
   renderAllWalletViews();
@@ -574,14 +598,17 @@ function renderBorrowOffers() {
   const offers = S.offers.filter((o) => o.funds.includes(fund) && o.available > 0n && (!S.wallet || o.lender !== S.wallet.address));
   const previous = select.value;
   const html = offers
-    .map(
-      (o) =>
-        `<option value="${o.id}">#${o.id}${o.sponsor ? " · Designated" : ""} · ${formatRate(o.rate_bps)} · ${money(o.available, "floor")} available · up to ${Math.floor(
-          maxTermFor(o, S.maxTerm) / HOUR,
-        )} h</option>`,
-    )
+    .map((o) => {
+      const parts = [
+        `#${o.id}${o.sponsor ? ` · ${t("Designated")}` : ""}`,
+        formatRate(o.rate_bps),
+        t("{amount} available", { amount: money(o.available, "floor") }),
+        t("up to {hours} h", { hours: Math.floor(maxTermFor(o, S.maxTerm) / HOUR) }),
+      ];
+      return `<option value="${o.id}">${esc(parts.join(" · "))}</option>`;
+    })
     .join("");
-  setHTML(select, html || `<option value="">No offer available</option>`);
+  setHTML(select, html || `<option value="">${esc(t("No offer available"))}</option>`);
   if (offers.some((o) => String(o.id) === previous)) select.value = previous;
   if (!S.offerEdited) {
     const want = S.borrowQuote ? defaultPrincipal(S.borrowQuote.max, ...fundLimits()) : 0n;
@@ -594,10 +621,10 @@ function renderBorrow() {
   const gate = $("borrow-gate");
   const form = $("borrow-form");
   let message = "";
-  if (!S.wallet) message = "Connect a wallet to borrow. The market above shows what your shares can secure.";
-  else if (!S.balances) message = "Reading your balances…";
-  else if (S.balances.stablecoin === null) message = `Add ${code()} to your wallet first, under Your wallet.`;
-  else if (S.balances.shares === 0n) message = `This wallet holds no ${sym()} shares yet. Ask the operator to onboard it, under Your wallet.`;
+  if (!S.wallet) message = t("Connect a wallet to borrow. The market above shows what your shares can secure.");
+  else if (!S.balances) message = t("Reading your balances…");
+  else if (S.balances.stablecoin === null) message = t("Add {code} to your wallet first, under Your wallet.", { code: code() });
+  else if (S.balances.shares === 0n) message = t("This wallet holds no {sym} shares yet. Ask the operator to onboard it, under Your wallet.", { sym: sym() });
   gate.textContent = message;
   gate.hidden = !message;
   form.hidden = Boolean(message);
@@ -651,13 +678,13 @@ function updateBorrowForm() {
   let valid = true;
 
   if (shares === null || shares === 0n) {
-    setHelp("b-shares-help", "Enter how many shares to lock.", true);
+    setHelp("b-shares-help", t("Enter how many shares to lock."), true);
     valid = false;
   } else if (shares > S.balances.shares) {
-    setHelp("b-shares-help", `You hold ${shareAmount(S.balances.shares)}.`, true);
+    setHelp("b-shares-help", t("You hold {amount}.", { amount: shareAmount(S.balances.shares) }), true);
     valid = false;
   } else {
-    setHelp("b-shares-help", `You hold ${shareAmount(S.balances.shares)}.`);
+    setHelp("b-shares-help", t("You hold {amount}.", { amount: shareAmount(S.balances.shares) }));
   }
 
   if (q && !q.error && !S.principalEdited) {
@@ -671,16 +698,16 @@ function updateBorrowForm() {
     setHelp("b-principal-help", describeError(q.error).text, true);
     valid = false;
   } else if (principal === null || principal === 0n) {
-    setHelp("b-principal-help", "Enter an amount.", true);
+    setHelp("b-principal-help", t("Enter an amount."), true);
     valid = false;
   } else if (q && principal > q.max) {
-    setHelp("b-principal-help", `This is more than the shares can secure. The maximum is ${money(q.max, "floor")}.`, true);
+    setHelp("b-principal-help", t("This is more than the shares can secure. The maximum is {max}.", { max: money(q.max, "floor") }), true);
     valid = false;
   } else if (offer && principal > offer.available) {
-    setHelp("b-principal-help", `This offer holds ${money(offer.available, "floor")}. Pick another offer or borrow less.`, true);
+    setHelp("b-principal-help", t("This offer holds {amount}. Pick another offer or borrow less.", { amount: money(offer.available, "floor") }), true);
     valid = false;
   } else {
-    setHelp("b-principal-help", q ? `These shares secure up to ${money(q.max, "floor")}. The suggestion is 90 % of that.` : "Valuing the shares…");
+    setHelp("b-principal-help", q ? t("These shares secure up to {max}. The suggestion is 90 % of that.", { max: money(q.max, "floor") }) : t("Valuing the shares…"));
   }
 
   const maxHours = offer ? Math.floor(maxTermFor(offer, S.maxTerm) / HOUR) : 0;
@@ -688,10 +715,10 @@ function updateBorrowForm() {
   if (maxHours && !S.termEdited && Number($("b-term").value) > maxHours) $("b-term").value = String(maxHours);
   const hours = Number($("b-term").value);
   if (!Number.isInteger(hours) || hours < 1 || (maxHours && hours > maxHours)) {
-    setHelp("b-term-help", `Choose 1 to ${maxHours} hours.`, true);
+    setHelp("b-term-help", t("Choose 1 to {max} hours.", { max: maxHours }), true);
     valid = false;
   } else {
-    setHelp("b-term-help", `1 to ${maxHours} hours on this offer. The term is your deadline, not what you pay.`);
+    setHelp("b-term-help", t("1 to {max} hours on this offer. The term is your deadline, not what you pay.", { max: maxHours }));
   }
   if (!offer) valid = false;
 
@@ -702,20 +729,20 @@ function updateBorrowForm() {
     const row = (label, value, strong = false) =>
       `<div><dt>${esc(label)}</dt><dd class="num">${strong ? `<strong>${esc(value)}</strong>` : esc(value)}</dd></div>`;
     preview.push(
-      row("Rate", `${formatRate(offer.rate_bps)} a year, offer #${offer.id}`),
-      row("Interest for the first hour", exact(interest(principal, offer.rate_bps, HOUR))),
-      row(`Interest if repaid at term (${hours} h)`, exact(atTerm)),
-      row("Interest for a 64-hour weekend", exact(interest(principal, offer.rate_bps, WEEKEND_SECS))),
-      row("To repay at term", money(principal + atTerm, "ceil"), true),
-      row("Term ends", formatDateTime(now() + term)),
+      row(t("Rate"), t("{rate} a year, offer #{id}", { rate: formatRate(offer.rate_bps), id: offer.id })),
+      row(t("Interest for the first hour"), exact(interest(principal, offer.rate_bps, HOUR))),
+      row(t("Interest if repaid at term ({hours} h)", { hours }), exact(atTerm)),
+      row(t("Interest for a 64-hour weekend"), exact(interest(principal, offer.rate_bps, WEEKEND_SECS))),
+      row(t("To repay at term"), money(principal + atTerm, "ceil"), true),
+      row(t("Term ends"), formatDateTime(now() + term)),
     );
   }
-  setHTML($("b-preview"), preview.join("") || `<p class="muted">Fill in the form to see the cost.</p>`);
+  setHTML($("b-preview"), preview.join("") || `<p class="muted">${esc(t("Fill in the form to see the cost."))}</p>`);
 
   const paused = S.board?.paused.value === true;
   const submit = $("b-submit");
   submit.dataset.blocked = valid && !paused ? "0" : "1";
-  submit.textContent = paused ? "New loans are paused" : valid ? `Borrow ${money(principal)}` : "Borrow";
+  submit.textContent = paused ? t("New loans are paused") : valid ? t("Borrow {amount}", { amount: money(principal) }) : t("Borrow");
   syncWriteButtons();
   return valid && !paused ? { offer, shares, principal, term: hours * HOUR, maxHours, max: q?.max } : null;
 }
@@ -727,7 +754,7 @@ function submitBorrow(event) {
   const context = {
     max: order.max !== undefined ? money(order.max, "floor") : null,
     available: money(order.offer.available, "floor"),
-    term: `1 to ${order.maxHours} hours`,
+    term: t("1 to {max} hours", { max: order.maxHours }),
     code: code(),
     command: onboardCommand(S.wallet.address),
   };
@@ -738,7 +765,7 @@ function submitBorrow(event) {
       S.chain.openRepo(S.wallet, { offerId: order.offer.id, shares: order.shares, principal: order.principal, term: order.term }, onStatus),
     (result) => {
       S.principalEdited = false;
-      return `Repo #${result.repoId} opened: ${money(order.principal)} sent to your wallet.`;
+      return t("Repo #{id} opened: {amount} sent to your wallet.", { id: result.repoId, amount: money(order.principal) });
     },
   );
 }
@@ -809,44 +836,45 @@ function renderPositions() {
   const meta = $("positions-meta");
   if (!S.wallet) {
     meta.textContent = "";
-    setHTML(body, `<p class="muted">Connect a wallet to see your positions.</p>`);
+    setHTML(body, `<p class="muted">${esc(t("Connect a wallet to see your positions."))}</p>`);
     return;
   }
   const repos = [...S.mine.values()].sort((a, b) => b.id - a.id);
   const open = repos.filter((r) => r.status === "Open");
   const closed = repos.filter((r) => r.status !== "Open");
-  meta.textContent = repos.length ? `${open.length} open, ${closed.length} closed` : "";
+  meta.textContent = repos.length ? t("{open} open, {closed} closed", { open: open.length, closed: closed.length }) : "";
   if (!repos.length) {
-    setHTML(body, `<p class="muted">No positions yet. Borrow above to open one.</p>`);
+    setHTML(body, `<p class="muted">${esc(t("No positions yet. Borrow above to open one."))}</p>`);
     return;
   }
-  const t = now();
+  const ts = now();
   const balance = S.balances?.stablecoin ?? 0n;
-  const openingLink = (id) => (S.openings.get(id) ? link(S.chain.explorerTx(S.openings.get(id).txHash), "Opening transaction") : "");
+  const nowLabel = esc(t("now"));
+  const openingLink = (id) => (S.openings.get(id) ? link(S.chain.explorerTx(S.openings.get(id).txHash), t("Opening transaction")) : "");
   const cards = open.map((r) => {
     const due = S.dues.get(r.id);
     const total = due === undefined ? null : BigInt(r.principal) + due;
-    const step = nextInterestStep(r.opened_at, t);
-    const matured = t >= Number(r.maturity);
+    const step = nextInterestStep(r.opened_at, ts);
+    const matured = ts >= Number(r.maturity);
     const short = total !== null && balance < total ? total - balance : 0n;
     return `<article class="position${matured ? " position-late" : ""}" aria-labelledby="repo-${r.id}">
-      <header><h3 id="repo-${r.id}">Repo #${r.id}</h3><span class="pill ${matured ? "pill-danger" : "pill-ok"}">${matured ? "Past term" : "Open"}</span></header>
+      <header><h3 id="repo-${r.id}">Repo #${r.id}</h3><span class="pill ${matured ? "pill-danger" : "pill-ok"}">${esc(matured ? t("Past term") : t("Open"))}</span></header>
       <dl class="facts">
-        <div><dt>Borrowed</dt><dd class="num">${esc(money(r.principal))}</dd></div>
-        <div><dt>Shares locked</dt><dd class="num">${esc(shareAmount(r.shares))}</dd></div>
-        <div><dt>Rate</dt><dd class="num">${esc(formatRate(r.rate_bps))} a year, offer #${r.offer_id}</dd></div>
-        <div><dt>Due now</dt><dd class="num"><strong>${total === null ? "—" : esc(money(total, "ceil"))}</strong>${
-          due === undefined ? "" : `<span class="muted small"> including ${esc(exact(due))} interest</span>`
+        <div><dt>${esc(t("Borrowed"))}</dt><dd class="num">${esc(money(r.principal))}</dd></div>
+        <div><dt>${esc(t("Shares locked"))}</dt><dd class="num">${esc(shareAmount(r.shares))}</dd></div>
+        <div><dt>${esc(t("Rate"))}</dt><dd class="num">${esc(t("{rate} a year, offer #{id}", { rate: formatRate(r.rate_bps), id: r.offer_id }))}</dd></div>
+        <div><dt>${esc(t("Due now"))}</dt><dd class="num"><strong>${total === null ? "—" : esc(money(total, "ceil"))}</strong>${
+          due === undefined ? "" : `<span class="muted small"> ${esc(t("including {amount} interest", { amount: exact(due) }))}</span>`
         }</dd></div>
-        <div><dt>Next hour of interest</dt><dd class="num">starts <span data-until="${step}" data-after="now"></span></dd></div>
-        <div><dt>Term ends</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="passed: the lender may now keep the shares"></span></dd></div>
+        <div><dt>${esc(t("Next hour of interest"))}</dt><dd class="num">${t("starts {when}", { when: `<span data-until="${step}" data-after="${nowLabel}"></span>` })}</dd></div>
+        <div><dt>${esc(t("Term ends"))}</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="${esc(t("passed: the lender may now keep the shares"))}"></span></dd></div>
       </dl>
       ${timelineMarkup(r)}
-      ${short > 0n ? `<p class="text-error small">You hold ${esc(money(balance))}. You need ${esc(money(short, "ceil"))} more to repurchase.</p>` : ""}
+      ${short > 0n ? `<p class="text-error small">${esc(t("You hold {balance}. You need {short} more to repurchase.", { balance: money(balance), short: money(short, "ceil") }))}</p>` : ""}
       <div class="actions">
-        <button type="button" class="btn btn-primary" data-write data-repurchase="${r.id}" ${short > 0n ? `data-blocked="1"` : ""}>Repurchase${
-          total === null ? "" : ` for ${esc(money(total, "ceil"))}`
-        }</button>
+        <button type="button" class="btn btn-primary" data-write data-repurchase="${r.id}" ${short > 0n ? `data-blocked="1"` : ""}>${esc(
+          total === null ? t("Repurchase") : t("Repurchase for {amount}", { amount: money(total, "ceil") }),
+        )}</button>
         ${openingLink(r.id)}
       </div>
     </article>`;
@@ -855,14 +883,14 @@ function renderPositions() {
     .slice(0, 10)
     .map(
       (r) =>
-        `<li><details class="tl-closed"><summary><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
-          r.status === "Repurchased" ? "Repurchased" : "Shares kept by lender"
-        }</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
+        `<li><details class="tl-closed"><summary><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${esc(
+          r.status === "Repurchased" ? t("Repurchased") : t("Shares kept by lender"),
+        )}</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
     );
   setHTML(
     body,
-    `${cards.join("") || `<p class="muted">No open position.</p>`}
-     ${history.length ? `<h3 class="sub">Closed</h3><ul class="history">${history.join("")}</ul>` : ""}`,
+    `${cards.join("") || `<p class="muted">${esc(t("No open position."))}</p>`}
+     ${history.length ? `<h3 class="sub">${esc(t("Closed positions"))}</h3><ul class="history">${history.join("")}</ul>` : ""}`,
   );
   syncWriteButtons();
   renderLent();
@@ -875,7 +903,7 @@ function onRepurchase(id) {
     $("positions-tx"),
     { code: code() },
     (onStatus) => S.chain.repurchase(S.wallet, id, onStatus),
-    () => `Repo #${id} repurchased: ${shareAmount(repo.shares)} back in your wallet.`,
+    () => t("Repo #{id} repurchased: {shares} back in your wallet.", { id, shares: shareAmount(repo.shares) }),
   );
 }
 
@@ -887,7 +915,7 @@ function renderLend() {
   const gate = $("lend-gate");
   const form = $("lend-form");
   if (!S.wallet || !S.balances) {
-    setHTML(gate, `<p class="muted">${S.wallet ? "Reading your balances…" : "Connect a wallet to lend."}</p>`);
+    setHTML(gate, `<p class="muted">${esc(S.wallet ? t("Reading your balances…") : t("Connect a wallet to lend."))}</p>`);
     form.hidden = true;
     setHTML($("my-offers"), "");
     renderLent();
@@ -896,18 +924,18 @@ function renderLend() {
   if (!S.approved) {
     setHTML(
       gate,
-      `<p>This address is not an approved lender for the fund. The fund issuer approves lenders, so a seized position always goes to a known holder.</p>
-       <p class="muted small">On testnet, the operator approves it and sends test ${esc(code())} with:</p>${commandBox(onboardCommand(S.wallet.address, true))}`,
+      `<p>${esc(t("This address is not an approved lender for the fund. The fund issuer approves lenders, so a seized position always goes to a known holder."))}</p>
+       <p class="muted small">${esc(t("On testnet, the operator approves it and sends test {code} with:", { code: code() }))}</p>${commandBox(onboardCommand(S.wallet.address, true))}`,
     );
     form.hidden = true;
   } else {
-    setHTML(gate, `<p class="muted">You are an approved lender. Repaid principal and interest flow back into your offer, where you withdraw them.</p>`);
+    setHTML(gate, `<p class="muted">${esc(t("You are an approved lender. Repaid principal and interest flow back into your offer, where you withdraw them."))}</p>`);
     form.hidden = false;
     const hold = S.balances.stablecoin;
-    setHelp("l-amount-help", hold === null ? `Add ${code()} first.` : `You hold ${money(hold)}.`);
+    setHelp("l-amount-help", hold === null ? t("Add {code} first.", { code: code() }) : t("You hold {amount}.", { amount: money(hold) }));
     const maxHours = Math.floor(S.maxTerm / HOUR);
     $("l-term").max = String(maxHours || 1);
-    setHelp("l-term-help", maxHours ? `1 to ${maxHours} hours, the contract's limit.` : "");
+    setHelp("l-term-help", maxHours ? t("1 to {max} hours, the contract's limit.", { max: maxHours }) : "");
   }
   renderMyOffers();
   renderLent();
@@ -917,32 +945,39 @@ function renderMyOffers() {
   if (!S.wallet) return setHTML($("my-offers"), "");
   const mine = S.offers.filter((o) => o.lender === S.wallet.address).sort((a, b) => b.id - a.id);
   if (!mine.length) {
-    setHTML($("my-offers"), S.approved ? `<p class="muted">You have no offer yet.</p>` : "");
+    setHTML($("my-offers"), S.approved ? `<p class="muted">${esc(t("You have no offer yet."))}</p>` : "");
     return;
   }
+  const label = {
+    offer: esc(t("Offer")),
+    available: esc(t("Available")),
+    rate: esc(t("Rate")),
+    term: esc(t("Longest term")),
+    withdraw: esc(t("Withdraw")),
+  };
   const rows = mine
     .map(
       (o) => `<tr>
-        <td data-label="Offer"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge">Designated</span>` : ""}</td>
-        <td data-label="Available" class="num">${esc(money(o.available))}</td>
-        <td data-label="Rate" class="num">${esc(formatRate(o.rate_bps))}</td>
-        <td data-label="Longest term" class="num">${esc(formatTerm(o.max_term))}</td>
-        <td data-label="Withdraw" class="num">${
+        <td data-label="${label.offer}"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge">${esc(t("Designated"))}</span>` : ""}</td>
+        <td data-label="${label.available}" class="num">${esc(money(o.available))}</td>
+        <td data-label="${label.rate}" class="num">${esc(formatRate(o.rate_bps))}</td>
+        <td data-label="${label.term}" class="num">${esc(formatTerm(o.max_term))}</td>
+        <td data-label="${label.withdraw}" class="num">${
           o.available > 0n
-            ? `<div class="withdraw"><label class="sr-only" for="w-amount-${o.id}">Amount to withdraw from offer #${o.id}</label>
+            ? `<div class="withdraw"><label class="sr-only" for="w-amount-${o.id}">${esc(t("Amount to withdraw from offer #{id}", { id: o.id }))}</label>
                 <div class="input-unit input-small"><input id="w-amount-${o.id}" inputmode="decimal" autocomplete="off" value="${esc(
                   unitsToInput(o.available, SD()),
                 )}" /><span class="unit">${esc(code())}</span></div>
-                <button type="button" class="btn btn-secondary btn-small" data-write data-withdraw="${o.id}">Withdraw</button></div>`
-            : `<span class="muted small">Nothing to withdraw</span>`
+                <button type="button" class="btn btn-secondary btn-small" data-write data-withdraw="${o.id}">${label.withdraw}</button></div>`
+            : `<span class="muted small">${esc(t("Nothing to withdraw"))}</span>`
         }</td>
       </tr>`,
     )
     .join("");
   setHTML(
     $("my-offers"),
-    `<h3 class="sub">Your offers</h3><table class="table"><caption class="sr-only">Your offers</caption>
-      <thead><tr><th scope="col">Offer</th><th scope="col" class="num">Available</th><th scope="col" class="num">Rate</th><th scope="col" class="num">Longest term</th><th scope="col" class="num">Withdraw</th></tr></thead>
+    `<h3 class="sub">${esc(t("Your offers"))}</h3><table class="table"><caption class="sr-only">${esc(t("Your offers"))}</caption>
+      <thead><tr><th scope="col">${label.offer}</th><th scope="col" class="num">${label.available}</th><th scope="col" class="num">${label.rate}</th><th scope="col" class="num">${label.term}</th><th scope="col" class="num">${label.withdraw}</th></tr></thead>
       <tbody>${rows}</tbody></table>`,
   );
   syncWriteButtons();
@@ -956,28 +991,28 @@ function submitLend(event) {
   const maxHours = Math.floor(S.maxTerm / HOUR);
   let valid = true;
   if (!amount) {
-    setHelp("l-amount-help", "Enter an amount.", true);
+    setHelp("l-amount-help", t("Enter an amount."), true);
     valid = false;
   } else if (S.balances?.stablecoin !== null && amount > S.balances.stablecoin) {
-    setHelp("l-amount-help", `You hold ${money(S.balances.stablecoin)}.`, true);
+    setHelp("l-amount-help", t("You hold {amount}.", { amount: money(S.balances.stablecoin) }), true);
     valid = false;
   }
   if (rate === null || rate > 10_000n) {
-    setHelp("l-rate-help", "Enter a rate from 0 to 100 %, up to two decimals.", true);
+    setHelp("l-rate-help", t("Enter a rate from 0 to 100 %, up to two decimals."), true);
     valid = false;
   } else {
-    setHelp("l-rate-help", "Up to two decimals. Charged per started hour.");
+    setHelp("l-rate-help", t("Up to two decimals. Charged per started hour."));
   }
   if (!Number.isInteger(hours) || hours < 1 || (maxHours && hours > maxHours)) {
-    setHelp("l-term-help", `Choose 1 to ${maxHours} hours.`, true);
+    setHelp("l-term-help", t("Choose 1 to {max} hours.", { max: maxHours }), true);
     valid = false;
   }
   if (!valid) return;
   runTx(
     $("lend-tx"),
-    { code: code(), term: `1 to ${maxHours} hours`, action: "create_offer" },
+    { code: code(), term: t("1 to {max} hours", { max: maxHours }), action: "create_offer" },
     (onStatus) => S.chain.createOffer(S.wallet, { amount, rateBps: Number(rate), maxTerm: hours * HOUR }, onStatus),
-    (result) => `Offer #${result.offerId} created with ${money(amount)} at ${formatRate(Number(rate))}.`,
+    (result) => t("Offer #{id} created with {amount} at {rate}.", { id: result.offerId, amount: money(amount), rate: formatRate(Number(rate)) }),
   );
 }
 
@@ -993,14 +1028,14 @@ function onWithdraw(id) {
   const checked = withdrawalAmount(toUnits(input?.value ?? "", SD()), offer.available);
   input?.setAttribute("aria-invalid", checked.error ? "true" : "false");
   if (checked.error) {
-    return showProblem($("lend-tx"), `Offer #${id}: ${checked.error} It holds ${money(offer.available)}.`);
+    return showProblem($("lend-tx"), t("Offer #{id}: {error} It holds {amount}.", { id, error: t(checked.error), amount: money(offer.available) }));
   }
   const amount = checked.amount;
   runTx(
     $("lend-tx"),
     { code: code(), available: money(amount) },
     (onStatus) => S.chain.withdrawOffer(S.wallet, id, amount, onStatus),
-    () => `${money(amount)} withdrawn from offer #${id}.`,
+    () => t("{amount} withdrawn from offer #{id}.", { amount: money(amount), id }),
   );
 }
 
@@ -1008,47 +1043,52 @@ function onWithdraw(id) {
 function renderLent() {
   const box = $("lent");
   if (!S.wallet || !S.lent.size) return setHTML(box, "");
-  const t = now();
+  const ts = now();
+  const nowLabel = esc(t("now"));
   const repos = [...S.lent.values()].sort((a, b) => b.id - a.id);
   const open = repos.filter((r) => r.status === "Open");
   const closed = repos.filter((r) => r.status !== "Open").slice(0, 10);
   const cards = open.map((r) => {
-    const state = seizeState(r, t);
+    const state = seizeState(r, ts);
     const due = S.dues.get(r.id);
     return `<article class="position${state.allowed ? " position-late" : ""}" aria-labelledby="lent-${r.id}">
-      <header><h3 id="lent-${r.id}">Repo #${r.id}</h3><span class="pill ${state.allowed ? "pill-danger" : "pill-ok"}">${
-        state.allowed ? "Past term, unpaid" : "Open"
-      }</span></header>
+      <header><h3 id="lent-${r.id}">Repo #${r.id}</h3><span class="pill ${state.allowed ? "pill-danger" : "pill-ok"}">${esc(
+        state.allowed ? t("Past term, unpaid") : t("Open"),
+      )}</span></header>
       <dl class="facts">
-        <div><dt>Borrower</dt><dd class="mono">${link(S.chain.explorerAccount(r.borrower), shortAddress(r.borrower))}</dd></div>
-        <div><dt>Lent</dt><dd class="num">${esc(money(r.principal))} at ${esc(formatRate(r.rate_bps))}, offer #${r.offer_id}</dd></div>
-        <div><dt>Owed now</dt><dd class="num">${due === undefined ? "—" : esc(money(BigInt(r.principal) + due, "ceil"))}</dd></div>
-        <div><dt>Collateral</dt><dd class="num">${esc(shareAmount(r.shares))}</dd></div>
-        <div><dt>Term ends</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="passed"></span></dd></div>
+        <div><dt>${esc(t("Borrower"))}</dt><dd class="mono">${link(S.chain.explorerAccount(r.borrower), shortAddress(r.borrower))}</dd></div>
+        <div><dt>${esc(t("Lent"))}</dt><dd class="num">${esc(t("{amount} at {rate}, offer #{id}", { amount: money(r.principal), rate: formatRate(r.rate_bps), id: r.offer_id }))}</dd></div>
+        <div><dt>${esc(t("Owed now"))}</dt><dd class="num">${due === undefined ? "—" : esc(money(BigInt(r.principal) + due, "ceil"))}</dd></div>
+        <div><dt>${esc(t("Collateral"))}</dt><dd class="num">${esc(shareAmount(r.shares))}</dd></div>
+        <div><dt>${esc(t("Term ends"))}</dt><dd class="num">${esc(formatDateTime(r.maturity))}, <span data-until="${r.maturity}" data-after="${esc(t("passed"))}"></span></dd></div>
       </dl>
       ${timelineMarkup(r)}
-      <p class="muted small">${
+      <p class="muted small">${esc(
         state.allowed
-          ? "The borrower has not repurchased by the term. You may take the shares now; the borrower can still repurchase until you do."
-          : "If the borrower has not repurchased by the term, you may take the shares. Until then they stay locked in the contract."
-      }</p>
+          ? t("The borrower has not repurchased by the term. You may take the shares now; the borrower can still repurchase until you do.")
+          : t("If the borrower has not repurchased by the term, you may take the shares. Until then they stay locked in the contract."),
+      )}</p>
       <div class="actions">
         <button type="button" class="btn ${state.allowed ? "btn-primary" : "btn-secondary"}" data-write data-seize="${r.id}" ${
           state.allowed ? "" : `data-blocked="1" aria-describedby="lent-wait-${r.id}"`
-        }>Take the shares</button>
-        ${state.allowed ? "" : `<span class="muted small" id="lent-wait-${r.id}">Available <span data-until="${r.maturity}" data-after="now"></span></span>`}
+        }>${esc(t("Take the shares"))}</button>
+        ${
+          state.allowed
+            ? ""
+            : `<span class="muted small" id="lent-wait-${r.id}">${t("Available {when}", { when: `<span data-until="${r.maturity}" data-after="${nowLabel}"></span>` })}</span>`
+        }
       </div>
     </article>`;
   });
   const history = closed.map(
     (r) =>
-      `<li><details class="tl-closed"><summary><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${
-        r.status === "Repurchased" ? "Repaid" : "Shares taken"
-      }</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
+      `<li><details class="tl-closed"><summary><span class="strong">Repo #${r.id}</span> <span class="pill ${r.status === "Repurchased" ? "pill-muted" : "pill-danger"}">${esc(
+        r.status === "Repurchased" ? t("Repaid") : t("Shares taken"),
+      )}</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
   );
   setHTML(
     box,
-    `<h3 class="sub">Repos on your offers</h3>${cards.join("") || `<p class="muted">No open repo on your offers.</p>`}
+    `<h3 class="sub">${esc(t("Repos on your offers"))}</h3>${cards.join("") || `<p class="muted">${esc(t("No open repo on your offers."))}</p>`}
      ${history.length ? `<ul class="history">${history.join("")}</ul>` : ""}`,
   );
   syncWriteButtons();
@@ -1067,17 +1107,18 @@ function timelineMarkup(repo) {
     events: S.history ? eventsOfRepo(S.history.events, repo.id) : [],
     pendingRelease: S.releases.get(repo.id) ?? null,
   });
+  const nowLabel = esc(t("now"));
   const items = steps.map((st) => {
     const time =
       st.at === null
         ? ""
         : st.state === "next"
-          ? `${esc(formatDateTime(st.at))}, <span data-until="${st.at}" data-after="now"></span>`
+          ? `${esc(formatDateTime(st.at))}, <span data-until="${st.at}" data-after="${nowLabel}"></span>`
           : esc(formatDateTime(st.at));
-    const tx = st.tx ? link(S.chain.explorerTx(st.tx), "transaction") : "";
-    return `<li class="tl-${st.state}"><div class="tl-head"><span class="tl-label">${esc(st.label)}</span>${time ? `<span class="tl-time">${time}</span>` : ""}${tx ? `<span class="small">${tx}</span>` : ""}</div><p class="tl-detail">${esc(st.detail)}</p></li>`;
+    const tx = st.tx ? link(S.chain.explorerTx(st.tx), t("transaction")) : "";
+    return `<li class="tl-${st.state}"><div class="tl-head"><span class="tl-label">${esc(t(st.label))}</span>${time ? `<span class="tl-time">${time}</span>` : ""}${tx ? `<span class="small">${tx}</span>` : ""}</div><p class="tl-detail">${esc(t(st.detail))}</p></li>`;
   });
-  return `<ol class="timeline" aria-label="Timeline of repo ${repo.id}">${items.join("")}</ol>`;
+  return `<ol class="timeline" aria-label="${esc(t("Timeline of repo {id}", { id: repo.id }))}">${items.join("")}</ol>`;
 }
 
 /** Held-back shares on a closed repo: a note, and a Release button for the beneficiary. */
@@ -1085,8 +1126,8 @@ function releaseNote(id) {
   const pending = S.releases.get(id);
   if (!pending) return "";
   const mine = pending.to === S.wallet?.address;
-  return ` <span class="pill pill-danger">${esc(shareAmount(pending.shares))} held: the issuer blocks the transfer</span>${
-    mine ? ` <button type="button" class="btn btn-secondary" data-write data-release="${id}">Release</button>` : ""
+  return ` <span class="pill pill-danger">${esc(t("{shares} held: the issuer blocks the transfer", { shares: shareAmount(pending.shares) }))}</span>${
+    mine ? ` <button type="button" class="btn btn-secondary" data-write data-release="${id}">${esc(t("Release"))}</button>` : ""
   }`;
 }
 
@@ -1098,8 +1139,8 @@ function onRelease(id) {
     (onStatus) => S.chain.release(S.wallet, id, onStatus),
     (result) =>
       result.value
-        ? `Repo #${id}: ${shareAmount(pending?.shares ?? 0n)} delivered to your wallet.`
-        : `Repo #${id}: the issuer still blocks the transfer. The shares stay reserved for you; try again later.`,
+        ? t("Repo #{id}: {shares} delivered to your wallet.", { id, shares: shareAmount(pending?.shares ?? 0n) })
+        : t("Repo #{id}: the issuer still blocks the transfer. The shares stay reserved for you; try again later.", { id }),
   );
 }
 
@@ -1110,7 +1151,7 @@ function onSeize(id) {
     $("lend-tx"),
     { action: "seize", when: formatDateTime(repo.maturity) },
     (onStatus) => S.chain.seize(S.wallet, id, onStatus),
-    () => `Repo #${id} closed: ${shareAmount(repo.shares)} sent to your wallet.`,
+    () => t("Repo #{id} closed: {shares} sent to your wallet.", { id, shares: shareAmount(repo.shares) }),
   );
 }
 
@@ -1150,22 +1191,29 @@ async function refreshAll() {
     await loadHistory();
     await refreshWallet();
     await terminal.refresh();
-    updated.innerHTML = `Updated <span data-since="${now()}">just now</span>`;
+    S.updatedAt = now();
+    renderUpdated();
     $("load-error").hidden = true;
   } catch (error) {
     console.error(error);
-    updated.textContent = `${describeError(error).text} Trying again in ${REFRESH_MS / 1000} s.`;
+    updated.textContent = t("{error} Trying again in {seconds} s.", { error: describeError(error).text, seconds: REFRESH_MS / 1000 });
   } finally {
     S.refreshing = false;
   }
 }
 
+/** The board's "Updated … ago" line, after a complete refresh. */
+function renderUpdated() {
+  if (S.updatedAt === null) return;
+  $("board-updated").innerHTML = t("Updated {age}", { age: `<span data-since="${S.updatedAt}">${esc(t("just now"))}</span>` });
+}
+
 function tick() {
-  const t = now();
-  for (const el of document.querySelectorAll("[data-since]")) el.textContent = formatAge(el.dataset.since, t);
+  const ts = now();
+  for (const el of document.querySelectorAll("[data-since]")) el.textContent = formatAge(el.dataset.since, ts);
   for (const el of document.querySelectorAll("[data-until]")) {
-    const left = Number(el.dataset.until) - t;
-    el.textContent = left > 0 ? `in ${formatCountdown(left)}` : (el.dataset.after ?? "now");
+    const left = Number(el.dataset.until) - ts;
+    el.textContent = left > 0 ? t("in {countdown}", { countdown: formatCountdown(left) }) : (el.dataset.after ?? t("now"));
   }
 }
 
@@ -1229,14 +1277,15 @@ function wire() {
     if (target.id === "disconnect") return disconnect();
     if (target.id === "refresh") return refreshAll();
     if (target.dataset.face) return setFace(target.dataset.face);
+    if (target.dataset.lang) return setLanguage(target.dataset.lang);
     if (target.dataset.copy !== undefined) {
       try {
         await navigator.clipboard.writeText(target.dataset.copy);
         const label = target.textContent;
-        target.textContent = "Copied";
+        target.textContent = t("Copied");
         setTimeout(() => (target.textContent = label), 1500);
       } catch {
-        window.prompt("Copy this:", target.dataset.copy);
+        window.prompt(t("Copy this:"), target.dataset.copy);
       }
       return;
     }
@@ -1252,18 +1301,18 @@ function wire() {
     if (target.dataset.seize) return onSeize(Number(target.dataset.seize));
     if (target.dataset.release) return onRelease(Number(target.dataset.release));
     if (target.dataset.trust !== undefined) {
-      return runTx($("wallet-tx"), { code: code() }, (onStatus) => S.chain.addTrustline(S.wallet, onStatus), () => `${code()} added to your wallet.`);
+      return runTx($("wallet-tx"), { code: code() }, (onStatus) => S.chain.addTrustline(S.wallet, onStatus), () => t("{code} added to your wallet.", { code: code() }));
     }
     if (target.dataset.friendbot !== undefined) {
       return runTx(
         $("wallet-tx"),
         {},
         async (onStatus) => {
-          onStatus({ stage: "pending", text: "Asking the testnet faucet for XLM." });
+          onStatus({ stage: "pending", text: t("Asking the testnet faucet for XLM.") });
           await S.chain.friendbot(S.wallet.address);
           return null;
         },
-        () => "Test XLM received.",
+        () => t("Test XLM received."),
       );
     }
   });
@@ -1302,9 +1351,9 @@ function wire() {
 function checkDeployment(dep) {
   const ticker = /^[A-Za-z0-9]{1,12}$/;
   const symbols = [dep?.stablecoin?.code, dep?.stablecoin?.currency, dep?.fund?.symbol, dep?.fund?.navCurrency];
-  if (!symbols.every((s) => ticker.test(String(s)))) throw new Error("unexpected asset symbol");
-  if (![dep.rpcUrl, dep.explorer].every((u) => /^https:\/\/[^\s"'<>]+$/.test(String(u)))) throw new Error("unexpected URL");
-  if (!Number.isInteger(dep.stablecoin.decimals) || !Number.isInteger(dep.fund.decimals)) throw new Error("unexpected decimals");
+  if (!symbols.every((s) => ticker.test(String(s)))) throw new Error(t("unexpected asset symbol"));
+  if (![dep.rpcUrl, dep.explorer].every((u) => /^https:\/\/[^\s"'<>]+$/.test(String(u)))) throw new Error(t("unexpected URL"));
+  if (!Number.isInteger(dep.stablecoin.decimals) || !Number.isInteger(dep.fund.decimals)) throw new Error(t("unexpected decimals"));
   return dep;
 }
 
@@ -1320,7 +1369,46 @@ async function loadHistory() {
   }
 }
 
+/** The footer: the contracts behind the page, each linked to the explorer. */
+function renderFoot() {
+  const C = S.dep.contracts;
+  $("foot").innerHTML = t(
+    "Open Window contract {contract} on Stellar {network}. Fund shares {shares}, {code} {stablecoin}. Every figure is read from the chain; nothing here has real value. Apache-2.0.",
+    {
+      contract: link(S.chain.explorerAccount(C.openWindow), shortAddress(C.openWindow)),
+      network: esc(S.dep.network),
+      shares: link(S.chain.explorerAccount(C.fundShares), shortAddress(C.fundShares)),
+      code: esc(code()),
+      stablecoin: link(S.chain.explorerAccount(C.stablecoin), shortAddress(C.stablecoin)),
+    },
+  );
+}
+
+/**
+ * Switches the interface language and redraws every view that holds text:
+ * the static page, the footer, the guide, the board, the wallet, borrow,
+ * positions and lend cards, and the terminal. The choice is kept on the
+ * device and in the URL unless `persist` is false.
+ */
+function setLanguage(choice, { persist = true } = {}) {
+  setLang(choice);
+  if (persist) persistLang();
+  applyStatic();
+  markLangButtons();
+  if (!S.dep || !S.chain) return;
+  renderFoot();
+  if (S.board) renderBoard();
+  else renderGuide();
+  renderAllWalletViews();
+  renderUpdated();
+  tick();
+}
+
 async function start() {
+  // The language comes first: every text below, the load error included, is written in it.
+  bootLang();
+  applyStatic();
+  markLangButtons();
   try {
     const response = await fetch("./deployment.testnet.json", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1328,7 +1416,9 @@ async function start() {
   } catch (error) {
     const box = $("load-error");
     box.hidden = false;
-    box.textContent = `The deployment file could not be loaded (${error.message}). The interface needs deployment.testnet.json next to this page.`;
+    box.textContent = t("The deployment file could not be loaded ({reason}). The interface needs deployment.testnet.json next to this page.", {
+      reason: error.message,
+    });
     return;
   }
   S.chain = new Chain(S.dep);
@@ -1345,13 +1435,7 @@ async function start() {
   for (const el of document.querySelectorAll("[data-fund-symbol]")) el.textContent = sym();
   for (const el of document.querySelectorAll("[data-stable-code]")) el.textContent = code();
   $("network").textContent = S.dep.network === "testnet" ? "Testnet" : S.dep.network;
-  const C = S.dep.contracts;
-  $("foot").innerHTML = `Open Window contract ${link(S.chain.explorerAccount(C.openWindow), shortAddress(C.openWindow))} on Stellar ${esc(
-    S.dep.network,
-  )}. Fund shares ${link(S.chain.explorerAccount(C.fundShares), shortAddress(C.fundShares))}, ${esc(code())} ${link(
-    S.chain.explorerAccount(C.stablecoin),
-    shortAddress(C.stablecoin),
-  )}. Every figure is read from the chain; nothing here has real value. Apache-2.0.`;
+  renderFoot();
 
   wire();
   renderAllWalletViews();
