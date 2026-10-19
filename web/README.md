@@ -6,7 +6,9 @@ A "How it works" card opens the page: one tab per party (holder of shares, lende
 
 The interface reads the deployment from `public/deployment.testnet.json` at runtime. The demo's `npm run setup` rewrites that file; no address is hard-coded in the code.
 
-`history.html` is the History page: every repo (lender of record, borrower, fund, shares, principal, rate, dates, state) and the latest events with a link to each transaction, read from `public/history.json`. That file is written by the indexer (`cd indexer && npm run export -- --json --web`) and is git-ignored; without it the page says so.
+`history.html` is the History page: every repo (lender of record, borrower, fund, shares, principal, rate, dates, state) and the latest events with a link to each transaction, read from `public/history.json`. That file is written by the indexer (`cd indexer && npm run export -- --json --web`) and committed, so that the published site serves it; refresh and commit it when the journal moves. Without it the page says so.
+
+The interface is published on GitHub Pages at https://ericltx.github.io/hackmeridian-2026/ by `.github/workflows/pages.yml`, on every push that touches `web/`: the workflow runs the tests, builds, and deploys `dist/`. The relative base of the build lets the same files work at that path, on any static host, or from `npm run preview` locally.
 
 ## Terminal view
 
