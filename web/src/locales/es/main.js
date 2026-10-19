@@ -192,4 +192,5 @@ export default {
     "Contrato Open Window {contract} en Stellar {network}. Participaciones del fondo {shares}, {code} {stablecoin}. Cada cifra se lee en la cadena; nada aquí tiene valor real. Apache-2.0.",
   "The deployment file could not be loaded ({reason}). The interface needs deployment.testnet.json next to this page.":
     "No se pudo cargar el archivo de despliegue ({reason}). La interfaz necesita deployment.testnet.json junto a esta página.",
+  "Chain read through {host}.": "Cadena leída a través de {host}.",
 };

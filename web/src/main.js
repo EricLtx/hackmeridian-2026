@@ -1352,7 +1352,8 @@ function checkDeployment(dep) {
   const ticker = /^[A-Za-z0-9]{1,12}$/;
   const symbols = [dep?.stablecoin?.code, dep?.stablecoin?.currency, dep?.fund?.symbol, dep?.fund?.navCurrency];
   if (!symbols.every((s) => ticker.test(String(s)))) throw new Error(t("unexpected asset symbol"));
-  if (![dep.rpcUrl, dep.explorer].every((u) => /^https:\/\/[^\s"'<>]+$/.test(String(u)))) throw new Error(t("unexpected URL"));
+  if (dep.rpcFallbacks !== undefined && !Array.isArray(dep.rpcFallbacks)) throw new Error(t("unexpected URL"));
+  if (![dep.rpcUrl, dep.explorer, ...(dep.rpcFallbacks ?? [])].every((u) => /^https:\/\/[^\s"'<>]+$/.test(String(u)))) throw new Error(t("unexpected URL"));
   if (!Number.isInteger(dep.stablecoin.decimals) || !Number.isInteger(dep.fund.decimals)) throw new Error(t("unexpected decimals"));
   return dep;
 }
@@ -1381,7 +1382,7 @@ function renderFoot() {
       code: esc(code()),
       stablecoin: link(S.chain.explorerAccount(C.stablecoin), shortAddress(C.stablecoin)),
     },
-  );
+  ) + ` <span class="rpc-note">${esc(t("Chain read through {host}.", { host: S.chain.rpcInfo().host }))}</span>`;
 }
 
 /**
@@ -1422,6 +1423,11 @@ async function start() {
     return;
   }
   S.chain = new Chain(S.dep);
+  // A slow or failing RPC is left for the next endpoint; both views say where the data now comes from.
+  S.chain.onRpcChange = (change) => {
+    renderFoot();
+    terminal.rpcChanged(change);
+  };
   // The terminal shows at once and fills as its own reads land; the guided
   // page waits for the instance settings below.
   if (initialFace() === "terminal") setFace("terminal", { persist: false });

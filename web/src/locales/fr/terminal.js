@@ -158,4 +158,7 @@ export default {
   "{n} offers with funds · best rate first": "{n} offres disponibles · meilleur taux d'abord",
   "{n} event · newest first": "{n} événement · les plus récents d'abord",
   "{n} events · newest first": "{n} événements · les plus récents d'abord",
+  "RPC endpoint in use ({index} of {count}) and the time of its last answer": "Point d'accès RPC utilisé ({index} sur {count}) et durée de sa dernière réponse",
+  "RPC {from} did not answer in time: switched to {to}.": "Le RPC {from} n'a pas répondu à temps : bascule vers {to}.",
+  "RPC {from} failed: switched to {to}.": "Le RPC {from} a échoué : bascule vers {to}.",
 };

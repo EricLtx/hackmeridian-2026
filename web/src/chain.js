@@ -41,6 +41,28 @@ const INCLUSION_FEE = "100000";
 const SCAN_BATCH = 8;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** How long one RPC call may take before the next endpoint is tried; a scan of events and a submission get longer. */
+export const RPC_TIMEOUT_MS = 7000;
+const EVENTS_TIMEOUT_MS = 12000;
+const SEND_TIMEOUT_MS = 10000;
+
+/** An RPC call that did not answer within its bound. */
+export class RpcTimeout extends Error {
+  constructor(ms) {
+    super(`RPC timeout after ${Math.round(ms / 1000)} s`);
+    this.name = "RpcTimeout";
+  }
+}
+
+/** `promise`, or an RpcTimeout after `ms`. The request is not cancelled; a late answer is ignored. */
+export function withTimeout(promise, ms) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new RpcTimeout(ms)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
 const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
 /** ScVal builders. Structs are maps with sorted symbol keys; enum variants are vec [Symbol(name), ...]. */
@@ -138,7 +160,12 @@ export class Chain {
     this.passphrase = deployment.networkPassphrase;
     this.contracts = deployment.contracts;
     this.fund = deployment.contracts.fundShares;
-    this.server = new rpc.Server(deployment.rpcUrl);
+    // The RPC endpoints: the deployment's, then its fallbacks. A slow or failing one is left for the next.
+    const urls = [deployment.rpcUrl, ...(Array.isArray(deployment.rpcFallbacks) ? deployment.rpcFallbacks : [])].filter(Boolean);
+    this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: new rpc.Server(url), lastMs: null, failures: 0 }));
+    this.active = 0;
+    /** Called with `{ from, to, reason }` (reason "timeout" or "error") when calls move to another endpoint. */
+    this.onRpcChange = null;
     this.kinds = contractKinds(deployment.contracts);
     // Every admitted fund's share token and NAV feed, and every registered stablecoin, so a refusal names its contract.
     for (const f of deployment.funds ?? []) {
@@ -159,16 +186,53 @@ export class Chain {
     return `${this.deployment.explorer}/${address.startsWith("C") ? "contract" : "account"}/${address}`;
   }
 
-  /** Runs `call`, retrying transient network failures up to three times. */
-  async net(call) {
+  /** The RPC client in use. Calls written `() => this.server.x()` pick up a switch when they are retried. */
+  get server() {
+    return this.endpoints[this.active].server;
+  }
+
+  /** The endpoint in use: `{ host, url, ms, index, count }`, `ms` the time of its last answer. */
+  rpcInfo() {
+    const endpoint = this.endpoints[this.active];
+    return { host: endpoint.host, url: endpoint.url, ms: endpoint.lastMs, index: this.active, count: this.endpoints.length };
+  }
+
+  /** Moves to the next endpoint after a timeout or a network failure. False when there is no other endpoint or the error is not the network's. */
+  failover(error) {
+    if (this.endpoints.length < 2) return false;
+    if (!(error instanceof RpcTimeout) && !isTransient(error)) return false;
+    const from = this.endpoints[this.active];
+    from.failures += 1;
+    this.active = (this.active + 1) % this.endpoints.length;
+    try {
+      this.onRpcChange?.({ from: from.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
+    } catch {
+      // A failing listener never stops a call.
+    }
+    return true;
+  }
+
+  /**
+   * Runs `call` on the endpoint in use, within `timeoutMs`. A timeout or a
+   * transient network failure moves at once to the next endpoint when there
+   * is one, else waits and retries; at most `attempts` calls.
+   */
+  async net(call, { timeoutMs = RPC_TIMEOUT_MS, attempts = 4 } = {}) {
     let delay = 800;
     for (let attempt = 1; ; attempt += 1) {
+      const endpoint = this.endpoints[this.active];
+      const started = Date.now();
       try {
-        return await call();
+        const result = await withTimeout(call(), timeoutMs);
+        endpoint.lastMs = Date.now() - started;
+        endpoint.failures = 0;
+        return result;
       } catch (error) {
-        if (attempt >= 4 || !isTransient(error)) throw error;
-        await sleep(delay);
-        delay *= 2;
+        if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
+        if (!this.failover(error)) {
+          await sleep(delay);
+          delay *= 2;
+        }
       }
     }
   }
@@ -321,7 +385,7 @@ export class Chain {
     let latest = health.latestLedger;
     // Each response covers a bounded ledger range; follow the cursor to the tip.
     for (let page = 0; page < 40; page += 1) {
-      const response = await this.net(() => this.server.getEvents(request));
+      const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
       for (const event of response.events) {
         openings.set(Number(scValToNative(event.topic[1])), { txHash: event.txHash, ledger: event.ledger });
       }
@@ -385,7 +449,7 @@ export class Chain {
     let request = { startLedger: start, filters, limit: 100 };
     let latest = health.latestLedger;
     for (let page = 0; page < maxPages; page += 1) {
-      const response = await this.net(() => this.server.getEvents(request));
+      const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
       for (const raw of response.events) events.push(decodeEvent(raw));
       latest = response.latestLedger;
       if (!response.cursor || response.cursor === request.cursor) break;
@@ -465,7 +529,7 @@ export class Chain {
 
   async lookup(hash) {
     try {
-      return await this.server.getTransaction(hash);
+      return await this.net(() => this.server.getTransaction(hash), { attempts: 2 });
     } catch {
       return null; // RPC unreachable: unknown, not failed
     }
@@ -494,9 +558,11 @@ export class Chain {
       onStatus({ stage: "submitting", text: t("Sending to the network."), hash });
       let sent = null;
       try {
-        sent = await this.server.sendTransaction(tx);
-      } catch {
-        // Lost response: the transaction may be queued. The lookup settles it.
+        sent = await withTimeout(this.server.sendTransaction(tx), SEND_TIMEOUT_MS);
+      } catch (error) {
+        // Lost or late response: the transaction may be queued. The lookup settles it, and the next
+        // send goes to the other endpoint; the same signed transaction cannot apply twice.
+        this.failover(error);
       }
       if (sent?.status === "PENDING" || sent?.status === "DUPLICATE") break;
       const known = await this.lookup(hash);

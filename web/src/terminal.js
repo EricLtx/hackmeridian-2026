@@ -602,6 +602,13 @@ export function createTerminal(ctx) {
         parts.push(`<span class="tb-item"><span class="tb-k t-warn">${esc(p.label)}</span> <span class="tb-v t-warn">${when}</span></span>`);
       }
     }
+    const rpcNow = S.chain?.rpcInfo?.();
+    if (rpcNow) {
+      const slow = rpcNow.ms !== null && rpcNow.ms > 2000;
+      parts.push(
+        `<span class="tb-item" title="${esc(t("RPC endpoint in use ({index} of {count}) and the time of its last answer", { index: rpcNow.index + 1, count: rpcNow.count }))}"><span class="tb-k">RPC</span> <span class="tb-v${rpcNow.index ? " t-warn" : ""}">${esc(rpcNow.host)}</span>${rpcNow.ms === null ? "" : ` <span class="${slow ? "t-warn" : "t-dim"}">${esc(formatUnits(BigInt(rpcNow.ms), 0))} ms</span>`}</span>`,
+      );
+    }
     if (T.updatedAt) parts.push(`<span class="tb-item t-dim">${t("updated {when}", { when: `<span data-since="${T.updatedAt}">${esc(t("just now"))}</span>` })}</span>`);
     else parts.push(`<span class="tb-item t-warn">${esc(t("reading the chain…"))}</span>`);
     parts.push(`<span class="tb-item tb-help t-dim">${esc(t("/ command · ↑↓ history · Tab completes · Esc cancels"))}</span>`);
@@ -1100,5 +1107,15 @@ export function createTerminal(ctx) {
     T.clock = null;
   }
 
-  return { mount, unmount, refresh, render, isActive: () => T.active };
+  /** The chain client moved to another RPC endpoint: say so in the console. */
+  function rpcChanged({ from, to, reason }) {
+    if (!T.active) return;
+    say(
+      "warn",
+      reason === "timeout" ? t("RPC {from} did not answer in time: switched to {to}.", { from, to }) : t("RPC {from} failed: switched to {to}.", { from, to }),
+    );
+    renderStatus();
+  }
+
+  return { mount, unmount, refresh, render, rpcChanged, isActive: () => T.active };
 }

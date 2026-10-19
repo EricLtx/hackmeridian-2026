@@ -39,12 +39,13 @@ export const WASM_DIR = path.join(ROOT, "target", "wasm32v1-none", "release");
 /**
  * RPC endpoints, tried in order. `STELLAR_RPC_URLS` lists several (comma
  * separated); `STELLAR_RPC_URL` names one; the default is the public SDF
- * testnet RPC alone. With several endpoints, a call that fails with a
+ * testnet RPC, then Gateway.fm's public testnet RPC as a fallback (both
+ * keyless and open to browsers). With several endpoints, a call that fails with a
  * network error, a 429/5xx or a transient inconsistency ("Account not found"
  * for a live account) is retried on the next endpoint, which then stays
  * active. Every endpoint must serve the same network.
  */
-export const RPC_URLS = (process.env.STELLAR_RPC_URLS ?? process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org")
+export const RPC_URLS = (process.env.STELLAR_RPC_URLS ?? process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org,https://soroban-rpc.testnet.stellar.gateway.fm")
   .split(",").map((u) => u.trim()).filter(Boolean);
 export const RPC_URL = RPC_URLS[0];
 export const PASSPHRASE = Networks.TESTNET;
@@ -693,6 +694,8 @@ export function writeDeployment(state) {
   const deployment = {
     network: "testnet",
     rpcUrl: RPC_URL,
+    // The web interface moves to these when the first RPC is slow or down.
+    rpcFallbacks: RPC_URLS.slice(1).filter((url) => url.startsWith("https://")),
     networkPassphrase: PASSPHRASE,
     explorer: "https://stellar.expert/explorer/testnet",
     contracts: {
