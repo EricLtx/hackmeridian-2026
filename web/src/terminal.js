@@ -86,6 +86,13 @@ export function createTerminal(ctx) {
   const tone = (t) => (t ? ` t-${t}` : "");
   const sentence = (text) => (/[.!?]$/.test(String(text).trim()) ? String(text).trim() : `${String(text).trim()}.`);
   const offerCoin = (id) => (S.offers ?? []).find((o) => o.id === id)?.stablecoin ?? null;
+  // The book is known once the board has returned offers at least once;
+  // before that, an empty book or a missing offer means "not read yet".
+  const bookKnown = () => {
+    if (S.board?.offers?.value) T.bookSeen = true;
+    return Boolean(T.bookSeen);
+  };
+  const BOOK_UNREAD = "The offer book is still being read from the chain. Try again in a moment, or REF to read it now.";
   const coinSuffix = (address) => (address && codeOf(address) !== code() ? ` <span class="t-dim">${esc(codeOf(address))}</span>` : "");
   const txLink = (hash) =>
     hash
@@ -340,9 +347,10 @@ export function createTerminal(ctx) {
   function renderBook() {
     const rows = bookRows(S.offers, { funds: funds(), fund: iface(), wallet: wallet(), maxTerm: S.maxTerm });
     const best = rows.find((r) => r.takesFund && !r.mine)?.id ?? null;
-    $("t-book-meta").textContent = `${rows.length} offer${rows.length === 1 ? "" : "s"} with funds · best rate first`;
+    const known = bookKnown();
+    $("t-book-meta").textContent = known ? `${rows.length} offer${rows.length === 1 ? "" : "s"} with funds · best rate first` : "reading the chain";
     if (!rows.length) {
-      setHTML($("t-book"), `<p class="t-empty">No offer has money available.</p>`);
+      setHTML($("t-book"), `<p class="t-empty">${known ? "No offer has money available." : "Reading the offer book…"}</p>`);
       return;
     }
     const body = rows
@@ -537,6 +545,7 @@ export function createTerminal(ctx) {
       }
     }
     if (T.updatedAt) parts.push(`<span class="tb-item t-dim">updated <span data-since="${T.updatedAt}">just now</span></span>`);
+    else parts.push(`<span class="tb-item t-warn">reading the chain…</span>`);
     parts.push(`<span class="tb-item tb-help t-dim">/ command · ↑↓ history · Tab completes · Esc cancels</span>`);
     setHTML($("t-status"), parts.join(""));
   }
@@ -658,7 +667,7 @@ export function createTerminal(ctx) {
 
   async function prepareOpen({ offerId, shares, termSecs, amount }) {
     const offer = (S.offers ?? []).find((o) => o.id === offerId);
-    if (!offer) return say("err", `Offer #${offerId} does not exist. OFF shows the book.`);
+    if (!offer) return say("err", bookKnown() ? `Offer #${offerId} does not exist. OFF shows the book.` : BOOK_UNREAD);
     say("out", `Valuing ${shareText(shares)} for offer #${offerId}…`);
     let q = null;
     let quoteError = null;
@@ -709,12 +718,22 @@ export function createTerminal(ctx) {
     );
   }
 
+  /** The repo from the blotter, else from the chain; a read failure is not "missing". */
   async function findRepo(repoId) {
-    return T.market.repos.get(repoId) ?? (await S.chain.repo(repoId).catch(() => null));
+    const known = T.market.repos.get(repoId);
+    if (known) return { repo: known, error: null };
+    try {
+      return { repo: await S.chain.repo(repoId), error: null };
+    } catch (error) {
+      return { repo: null, error };
+    }
   }
 
+  const unreadRepo = (repoId, error) => `Repo #${repoId} could not be read: ${sentence(describeError(error).text)} REF reads the chain again.`;
+
   async function prepareRepurchase({ repoId }) {
-    const repo = await findRepo(repoId);
+    const { repo, error } = await findRepo(repoId);
+    if (error) return say("err", unreadRepo(repoId, error));
     if (!repo) return say("err", `Repo #${repoId} does not exist. POS ALL lists the repos.`);
     let due = null;
     if (repo.status === "Open") {
@@ -770,7 +789,7 @@ export function createTerminal(ctx) {
 
   function prepareWithdraw({ offerId, amount }) {
     const offer = (S.offers ?? []).find((o) => o.id === offerId);
-    if (!offer) return say("err", `Offer #${offerId} does not exist.`);
+    if (!offer) return say("err", bookKnown() ? `Offer #${offerId} does not exist. OFF shows the book.` : BOOK_UNREAD);
     const view = withdrawTicket({ offer, amount, wallet: wallet(), sd: sd(), code: codeOf(offer.stablecoin) });
     setTicket(view, () =>
       send(
@@ -782,8 +801,9 @@ export function createTerminal(ctx) {
   }
 
   async function prepareSeize({ repoId }) {
-    const repo = await findRepo(repoId);
-    if (!repo) return say("err", `Repo #${repoId} does not exist.`);
+    const { repo, error } = await findRepo(repoId);
+    if (error) return say("err", unreadRepo(repoId, error));
+    if (!repo) return say("err", `Repo #${repoId} does not exist. POS ALL lists the repos.`);
     const view = seizeTicket({ repo, wallet: wallet(), now: now(), sd: sd(), fd: fd(), code: codeOf(repo.stablecoin), sym: symbolOf(repo.fund) });
     setTicket(view, () =>
       send(

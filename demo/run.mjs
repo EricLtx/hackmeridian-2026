@@ -204,6 +204,17 @@ async function heartbeat() {
   ]);
 }
 
+/**
+ * A euro fund's operator (second and third funds) publishes the fund's NAV
+ * when the last one is over an hour old. Returns the NAV on the feed.
+ */
+async function euroNav(label, operator, oracle, shares, now) {
+  const nav = await read(state, oracle, "lastprice", [asset.stellar(shares)]);
+  if (nav && now - Number(nav.timestamp) < 3600) return nav;
+  await tx(label, operator, oracle, "publish", [asset.stellar(shares), sv.i128(NAV_EUR_AT_SETUP), sv.u64(Math.max(now - 1, Number(nav?.timestamp ?? 0)))]);
+  return read(state, oracle, "lastprice", [asset.stellar(shares)]);
+}
+
 /** Stops a scene that needs open entries when the contract is paused. */
 async function requireOpen() {
   if (!(await isPaused())) return true;
@@ -307,6 +318,10 @@ async function board() {
   title("Board: what the contract sees right now");
   await heartbeat();
   const now = await ledgerTime();
+  // The other funds' operators publish too, so a board run before a demo
+  // leaves every admitted fund priced.
+  const nav2 = C.shares2 ? await euroNav("Second operator publishes the euro fund NAV", "operator2", C.navOracle2, C.shares2, now) : null;
+  const nav3 = C.shares3 ? await euroNav("Third operator publishes the share NAV", "operator3", C.navOracle3, C.shares3, now) : null;
   const local = wallClock(new Date(now * 1000), "Europe/Paris");
   const weekend = !isBusinessDay(local);
   line("Ledger time (Paris)", `${dayName(local)} ${local.toISOString().slice(11, 16)}${weekend ? bold("  weekend") : ""}`);
@@ -344,12 +359,14 @@ async function board() {
     const fs2 = await read(state, C.openWindow, "get_fund_state", [sv.address(C.shares2)]);
     const cfg2 = await read(state, C.openWindow, "get_fund", [sv.address(C.shares2)]);
     line("Second fund (euro MMF share)", `${fmt(fs2.outstanding)} / ${fmt(cfg2.max_outstanding)} EUR lent, haircut ${pct(cfg2.haircut_bps)}, no FX leg`);
+    line("Second fund NAV, its operator", `${price14(nav2.price)} EUR  ${dim(`age ${age(now - Number(nav2.timestamp))}, max ${age(Number(cfg2.nav_max_age_secs))}`)}`);
   }
   if (C.shares3) {
     const fs3 = await read(state, C.openWindow, "get_fund_state", [sv.address(C.shares3)]);
     const cfg3 = await read(state, C.openWindow, "get_fund", [sv.address(C.shares3)]);
     const authorized = await read(state, C.shares3, "authorized", [sv.address(C.openWindow)]).catch(() => null);
     line("Third fund (classic asset, SAC)", `${fmt(fs3.outstanding)} / ${fmt(cfg3.max_outstanding)} EUR lent, haircut ${pct(cfg3.haircut_bps)}, contract ${authorized === false ? red("not authorized by the issuer") : "authorized by the issuer"}`);
+    line("Third fund NAV, its operator", `${price14(nav3.price)} EUR  ${dim(`age ${age(now - Number(nav3.timestamp))}, max ${age(Number(cfg3.nav_max_age_secs))}`)}`);
   }
 }
 
@@ -370,10 +387,7 @@ async function second() {
   const fund2 = sv.address(C.shares2);
   const now = await ledgerTime();
   // The second NAV operator publishes when its last value is over an hour old.
-  const nav = await read(state, C.navOracle2, "lastprice", [asset.stellar(C.shares2)]);
-  if (!nav || now - Number(nav.timestamp) >= 3600) {
-    await tx("Second operator publishes the euro fund NAV", "operator2", C.navOracle2, "publish", [asset.stellar(C.shares2), sv.i128(NAV_EUR_AT_SETUP), sv.u64(Math.max(now - 1, Number(nav?.timestamp ?? 0)))]);
-  }
+  await euroNav("Second operator publishes the euro fund NAV", "operator2", C.navOracle2, C.shares2, now);
   const [cfg1, cfg2, fs2] = await Promise.all([
     read(state, ow, "get_fund", [sv.address(C.shares)]),
     read(state, ow, "get_fund", [fund2]),
@@ -441,10 +455,7 @@ async function third() {
   const fund3 = sv.address(C.shares3);
   const borrower = pub("borrower");
   const now = await ledgerTime();
-  const nav = await read(state, C.navOracle3, "lastprice", [asset.stellar(C.shares3)]);
-  if (!nav || now - Number(nav.timestamp) >= 3600) {
-    await tx("Third operator publishes the share NAV", "operator3", C.navOracle3, "publish", [asset.stellar(C.shares3), sv.i128(NAV_EUR_AT_SETUP), sv.u64(Math.max(now - 1, Number(nav?.timestamp ?? 0)))]);
-  }
+  await euroNav("Third operator publishes the share NAV", "operator3", C.navOracle3, C.shares3, now);
   // Leftovers of an interrupted run: a repo still open, or shares still owed.
   if (state.ids.thirdRepo !== undefined) {
     const left = await getRepo(state.ids.thirdRepo).catch(() => null);

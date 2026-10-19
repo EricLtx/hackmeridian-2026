@@ -23,7 +23,7 @@ npm run setup -- --fresh         # new contracts, same funded accounts
 npm run setup -- --multisig      # governor becomes a 2-of-2 account with an outside co-signer
 npm run setup -- --second-fund   # admit a second fund (euro MMF share, own issuer and feed, no FX leg) and a second euro stablecoin
 npm run setup -- --third-fund    # admit a third fund whose share is a classic Stellar asset held through the Stellar Asset Contract (token code not ours), issuer flags: auth required, revocable, clawback
-npm run status                   # the board only
+npm run status                   # the board, after each fund operator republishes a NAV over an hour old
 npm run demo -- --only=second    # a repo on the second fund, in the second stablecoin (after --second-fund)
 npm run demo -- --only=third     # a repo on the classic-asset share; the issuer revokes the contract's authorization mid-repo (after --third-fund)
 OPEN_WINDOW_STATE=<name> npm run setup -- --fresh   # a disposable instance in .state/<name>.json; its deployment facts stay out of web/public/
@@ -95,7 +95,7 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 | `expired before landing` | Testnet congestion | Rerun the scene: nothing changed on chain |
 | `Entries are paused` | A run stopped between pause and unpause | `npm run demo -- --only=repair` |
 | `The wrong NAV may still be live` | The NAV correction did not take | `npm run demo -- --only=repair` |
-| `StalePrice` | NAV older than 26 h, or FX older than 3 days | `npm run status` republishes the NAV; for FX, `setup -- --fx=local` |
+| `StalePrice` | NAV older than its bound (26 h for the first fund, 64 h for the second and third), or FX older than 3 days | `npm run status` republishes every fund's NAV; for FX, `setup -- --fx=local` |
 | `PriceOutOfBand` outside the guardrails scene | EUR/USD moved more than 2 % since admission | `setup -- --fx=local`, or back with `--fx=reflector`: re-admission anchors today's rate |
 | `Repo #n from an earlier run is still open` | A rehearsal opened a repo and did not repurchase it | `npm run demo -- --only=repurchase` |
 | `No offer has enough funds left` | Offers drained by repeated runs | `setup -- --fresh` |

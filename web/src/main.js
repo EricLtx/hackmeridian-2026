@@ -1332,6 +1332,9 @@ async function start() {
     return;
   }
   S.chain = new Chain(S.dep);
+  // The terminal shows at once and fills as its own reads land; the guided
+  // page waits for the instance settings below.
+  if (initialFace() === "terminal") setFace("terminal", { persist: false });
   await loadHistory();
   const ow = S.dep.contracts.openWindow;
   const [delay, version] = await Promise.all([S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
@@ -1352,7 +1355,7 @@ async function start() {
 
   wire();
   renderAllWalletViews();
-  setFace(initialFace(), { persist: false });
+  if (S.face !== "terminal") setFace(initialFace(), { persist: false });
   await refreshAll();
   setInterval(() => {
     if (!document.hidden) refreshAll();
