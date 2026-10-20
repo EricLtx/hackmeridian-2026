@@ -1603,6 +1603,9 @@ impl OpenWindow {
             ensure_not_steward(&env, &fund, &config, &lender)?;
             ensure_attested(&env, &fund, &config, &lender)?;
         } else {
+            // A revocation stops the lender's new offers and loans at once.
+            // It does not stop the seizure of its open repos: their shares
+            // then wait for a new approval (decision S8, `seize`).
             storage::remove_lender_attestation(&env, &fund, &lender);
         }
         storage::set_lender_approved(&env, &fund, &lender, approved.then_some(&config.steward));
@@ -1904,9 +1907,12 @@ impl OpenWindow {
         }
         // The steward may have revoked the lender since the offer was made,
         // or have been replaced: a loan needs the current steward's approval
-        // (second review of rc2, M2), while a seized position must always
-        // be deliverable (decision S8). The read extends the approval past
-        // this repo's end.
+        // (second review of rc2, M2). Once the repo is open, neither stops
+        // its seizure (decision S8): the lender of record seizes without a
+        // current approval, and shares seized after a revocation wait in the
+        // contract until the lender is approved again or names an approved
+        // holder (review findings auth-1, econ-2 and state-2, 20 October
+        // 2026). The read extends the approval past this repo's end.
         if !storage::lender_approved_by_extending(&env, &fund, &offer.lender, &config.steward) {
             return Err(Error::LenderNotApproved);
         }
@@ -2048,7 +2054,8 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// From maturity, sends the shares to approved `to`. Lender.
+    /// From maturity, sends the shares to `to`: the lender, or a holder
+    /// approved for the fund. Lender.
     pub fn seize(env: Env, repo_id: u64, to: Address) -> Result<(), Error> {
         let mut repo = storage::repo(&env, repo_id)?;
         if repo.status != RepoStatus::Open {
@@ -2058,12 +2065,22 @@ impl OpenWindow {
             return Err(Error::NotMatured);
         }
         repo.lender.require_auth();
-        if !storage::lender_approved_extending(&env, &repo.fund, &to) {
-            return Err(Error::LenderNotApproved);
-        }
-        // Covers an approval of the steward granted before version 4.
+        // Seized shares never go to the steward, whatever approval it holds
+        // (MMF Regulation, Art. 35): this covers an approval granted before
+        // version 4, and a lender of record named steward since.
         if is_steward_or_last(&env, &repo.fund, &to) {
             return Err(Error::StewardCannotLend);
+        }
+        // The lender of record was approved when the repo opened: a
+        // revocation since must not take its recourse away (review findings
+        // auth-1, econ-2 and state-2, 20 October 2026). The default settles;
+        // without a current approval the shares wait in the contract,
+        // recorded for the lender, until it is approved again or redirects
+        // them to an approved holder (decision S8). Any other recipient needs
+        // its own approval.
+        let approved = storage::lender_approved_extending(&env, &repo.fund, &to);
+        if !approved && to != repo.lender {
+            return Err(Error::LenderNotApproved);
         }
 
         release_outstanding(&env, &repo)?;
@@ -2077,16 +2094,27 @@ impl OpenWindow {
             shares: repo.shares,
         }
         .publish(&env);
-        deliver_shares(&env, repo_id, &repo.fund, &to, repo.shares);
+        if approved {
+            deliver_shares(&env, repo_id, &repo.fund, &to, repo.shares);
+        } else {
+            defer_shares(&env, repo_id, &repo.fund, &to, repo.shares);
+        }
         Ok(())
     }
 
     /// Retries a deferred delivery; false if refused. Anyone.
     pub fn release(env: Env, repo_id: u64) -> Result<bool, Error> {
         let pending = storage::pending_release(&env, repo_id).ok_or(Error::NothingToRelease)?;
+        let repo = storage::repo(&env, repo_id)?;
+        // Seized shares reach only a holder approved for the fund, never its
+        // steward (decision S8): while the lender of record stays revoked,
+        // they wait as they do when the token refuses.
+        let withheld = repo.status == RepoStatus::Defaulted
+            && (!storage::lender_approved_extending(&env, &pending.fund, &pending.to)
+                || is_steward_or_last(&env, &pending.fund, &pending.to));
         // The transfer goes first so that a refusal leaves the record as it
         // is; Soroban forbids re-entering this contract during the call.
-        if !token_io::try_push(&env, &pending.fund, &pending.to, pending.shares) {
+        if withheld || !token_io::try_push(&env, &pending.fund, &pending.to, pending.shares) {
             storage::bump_pending_release(&env, repo_id);
             return Ok(false);
         }
@@ -2919,6 +2947,13 @@ fn deliver_shares(env: &Env, repo_id: u64, fund: &Address, to: &Address, shares:
     if token_io::try_push(env, fund, to, shares) {
         return;
     }
+    defer_shares(env, repo_id, fund, to, shares);
+}
+
+/// Keeps the shares a closed repo owes in the contract, recorded for `to`
+/// until `release` delivers them: after a token refusal (decision S9), or
+/// for seized shares whose recipient is not approved (decision S8).
+fn defer_shares(env: &Env, repo_id: u64, fund: &Address, to: &Address, shares: i128) {
     storage::set_pending_release(
         env,
         repo_id,

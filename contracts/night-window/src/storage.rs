@@ -275,8 +275,10 @@ pub fn set_fund_state(env: &Env, fund: &Address, state: &FundState) {
 }
 
 /// Whether an approval exists for `lender` on `fund`, whichever steward
-/// granted it. Seizures and redirections read this: a position opened under
-/// an approval stays deliverable after a steward change (decision S8).
+/// granted it. Seizures, releases of seized shares and redirections read
+/// this: a position opened under an approval stays deliverable after a
+/// steward change (decision S8). A revocation removes the entry; the lender
+/// of record still seizes, and its shares wait for a new approval.
 pub fn lender_approved(env: &Env, fund: &Address, lender: &Address) -> bool {
     env.storage()
         .persistent()
@@ -303,8 +305,8 @@ fn bump_lender(env: &Env, key: &DataKey) {
         .extend_ttl(key, LENDER_BUMP_THRESHOLD, BUMP_TO);
 }
 
-/// Whether `lender` is approved for `fund`, read by an opening, a seizure
-/// or a redirection of seized shares. An approval is written once and read
+/// Whether `lender` is approved for `fund`, read by a seizure, a release or
+/// a redirection of seized shares. An approval is written once and read
 /// months later: reading it extends it, so the approval a repo depends on
 /// does not age into archival before the repo ends.
 pub fn lender_approved_extending(env: &Env, fund: &Address, lender: &Address) -> bool {

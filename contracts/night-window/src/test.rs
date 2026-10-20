@@ -4475,6 +4475,225 @@ fn intruder_cannot_seize() {
     assert!(f.client.try_seize(&repo_id, &intruder).is_err());
 }
 
+/// Review findings auth-1, econ-2 and state-2 (20 October 2026), decision
+/// S8: the steward revokes the lender while its repo is open. In rc4 the
+/// seizure needed the approval the revocation removed, so a matured repo
+/// could not be seized and the borrower kept a free option. The lender of
+/// record now seizes: the default settles at once, and the shares wait in
+/// the contract, recorded for the lender, until the steward approves it
+/// again. Anyone else still needs an approval to receive them.
+#[test]
+fn a_revoked_lender_still_seizes_and_its_shares_wait_for_an_approval() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    assert!(!f.client.is_lender_approved(&f.shares, &f.lender));
+    advance(&f, 64 * HOUR);
+    let stranger = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_seize(&repo_id, &stranger),
+        Err(Ok(Error::LenderNotApproved))
+    );
+
+    f.client.seize(&repo_id, &f.lender);
+    assert_eq!(f.env.auths()[0].0, f.lender);
+    let shares = 10_000 * ONE;
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            RepoSeized {
+                repo_id,
+                to: f.lender.clone(),
+                shares
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            ReleaseDeferred {
+                repo_id,
+                to: f.lender.clone(),
+                shares
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(
+        f.client.get_repo(&repo_id).unwrap().status,
+        RepoStatus::Defaulted
+    );
+    assert_eq!(f.client.get_fund_state(&f.shares).unwrap().outstanding, 0);
+    assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 0);
+    assert_eq!(
+        f.client.pending_release(&repo_id),
+        Some(PendingRelease {
+            fund: f.shares.clone(),
+            to: f.lender.clone(),
+            shares
+        })
+    );
+    assert_eq!(balance(&f.env, &f.shares, &f.lender), 0);
+    assert_eq!(balance(&f.env, &f.shares, &f.contract_id), shares);
+    check_invariants(&f, &[offer_id], &[repo_id]);
+    assert_eq!(
+        f.client.try_repurchase(&repo_id),
+        Err(Ok(Error::RepoNotOpen))
+    );
+
+    // Anyone may retry; while the lender is not approved, the record stays.
+    f.env.set_auths(&[]);
+    assert!(!f.client.release(&repo_id));
+    assert!(own_events(&f).events().is_empty());
+    f.env.mock_all_auths();
+    assert!(f.client.pending_release(&repo_id).is_some());
+    assert_eq!(balance(&f.env, &f.shares, &f.contract_id), shares);
+
+    // A fresh attestation, signed by the lender and the steward, and a new
+    // approval: the release delivers.
+    f.client
+        .attest_lender(&f.shares, &f.lender, &declaration(&f.env, 0x5E));
+    f.client.approve_lender(&f.shares, &f.lender, &true);
+    f.env.set_auths(&[]);
+    assert!(f.client.release(&repo_id));
+    assert_eq!(
+        own_events(&f),
+        std::vec![SharesReleased {
+            repo_id,
+            to: f.lender.clone(),
+            shares
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    f.env.mock_all_auths();
+    assert_eq!(balance(&f.env, &f.shares, &f.lender), shares);
+    assert_eq!(f.client.pending_release(&repo_id), None);
+    check_invariants(&f, &[offer_id], &[repo_id]);
+}
+
+/// The revoked lender of record may send its seized shares to a holder the
+/// steward approved instead, and only to one.
+#[test]
+fn a_revoked_lender_redirects_its_seized_shares_to_an_approved_holder() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    advance(&f, 64 * HOUR);
+    f.client.seize(&repo_id, &f.lender);
+    let other = Address::generate(&f.env);
+    assert_eq!(
+        f.client.try_redirect_release(&repo_id, &other),
+        Err(Ok(Error::LenderNotApproved))
+    );
+    admit_lender(&f.client, &f.env, &f.shares, &other);
+    f.client.redirect_release(&repo_id, &other);
+    assert_eq!(f.env.auths()[0].0, f.lender);
+    f.env.set_auths(&[]);
+    assert!(f.client.release(&repo_id));
+    f.env.mock_all_auths();
+    assert_eq!(balance(&f.env, &f.shares, &other), 10_000 * ONE);
+    assert_eq!(f.client.pending_release(&repo_id), None);
+    check_invariants(&f, &[offer_id], &[repo_id]);
+}
+
+/// The stolen-key variant of finding auth-1: the playbook answers a stolen
+/// steward key by removing the fund, after which nobody can approve anyone
+/// on it, which made the block final in rc4. The seizure still settles, and
+/// the lender sends the shares to a holder approved before the removal.
+#[test]
+fn a_revoked_lender_seizes_on_a_removed_fund() {
+    let (f, offer_id) = ready();
+    let other = Address::generate(&f.env);
+    admit_lender(&f.client, &f.env, &f.shares, &other);
+    let repo_id = open(&f, offer_id);
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    f.client.remove_fund(&f.shares);
+    advance(&f, 64 * HOUR);
+
+    f.client.seize(&repo_id, &f.lender);
+    assert_eq!(
+        f.client.get_repo(&repo_id).unwrap().status,
+        RepoStatus::Defaulted
+    );
+    check_invariants(&f, &[offer_id], &[repo_id]);
+    assert_eq!(f.client.pending_release(&repo_id).unwrap().to, f.lender);
+    assert!(!f.client.release(&repo_id));
+    assert_eq!(
+        f.client
+            .try_attest_lender(&f.shares, &f.lender, &declaration(&f.env, 0x5E)),
+        Err(Ok(Error::FundNotAccepted))
+    );
+    f.client.redirect_release(&repo_id, &other);
+    assert!(f.client.release(&repo_id));
+    assert_eq!(balance(&f.env, &f.shares, &other), 10_000 * ONE);
+    check_invariants(&f, &[offer_id], &[repo_id]);
+}
+
+/// Decision S8 keeps the steward out (MMF Regulation, Art. 35): seized
+/// shares never go to it, even when it is the lender of record, which a
+/// revocation lets the governor and the issuer name steward. A record left
+/// for an address that became the steward is not released either, even
+/// with an approval granted before version 4.
+#[test]
+fn seized_shares_never_go_to_the_steward() {
+    let (f, offer_id) = ready();
+    let deferred = open(&f, offer_id);
+    let still_open = open(&f, offer_id);
+    advance(&f, 64 * HOUR);
+    assert_eq!(
+        f.client.try_seize(&deferred, &f.steward),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    f.client.seize(&deferred, &f.lender);
+    assert_eq!(f.client.pending_release(&deferred).unwrap().to, f.lender);
+
+    // The revoked lender becomes the steward.
+    let mut config = replacement(&f);
+    config.steward = f.lender.clone();
+    publish_nav(&f, NAV_EUR);
+    f.client.set_fund(&f.shares, &config);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().steward, f.lender);
+    assert_eq!(
+        f.client.try_seize(&still_open, &f.lender),
+        Err(Ok(Error::StewardCannotLend))
+    );
+    assert_eq!(
+        f.client.get_repo(&still_open).unwrap().status,
+        RepoStatus::Open
+    );
+
+    // An approval of the steward granted before version 4.
+    f.env.as_contract(&f.contract_id, || {
+        f.env
+            .storage()
+            .persistent()
+            .set(&DataKey::Lender(f.shares.clone(), f.lender.clone()), &true);
+    });
+    assert!(!f.client.release(&deferred));
+    assert_eq!(f.client.pending_release(&deferred).unwrap().to, f.lender);
+    assert_eq!(balance(&f.env, &f.shares, &f.lender), 0);
+}
+
+/// A release refused for want of an approval extends the record and its
+/// repo, as a refusal of the token does (review finding L6): a new approval
+/// may take months.
+#[test]
+fn a_release_waiting_for_an_approval_extends_the_record() {
+    let (f, offer_id) = ready();
+    let repo_id = open(&f, offer_id);
+    f.client.approve_lender(&f.shares, &f.lender, &false);
+    advance(&f, 64 * HOUR);
+    f.client.seize(&repo_id, &f.lender);
+    let key = DataKey::PendingRelease(repo_id);
+    let repo_key = DataKey::Repo(repo_id);
+    age_ledgers(&f);
+    assert!(entry_ttl(&f, &key) < BUMP_THRESHOLD_LEDGERS);
+    assert!(entry_ttl(&f, &repo_key) < BUMP_THRESHOLD_LEDGERS);
+    assert!(!f.client.release(&repo_id));
+    assert_eq!(entry_ttl(&f, &key), BUMP_TO_LEDGERS);
+    assert_eq!(entry_ttl(&f, &repo_key), BUMP_TO_LEDGERS);
+}
+
 // ---------------------------------------------------------------------------
 // Invariants and cost
 // ---------------------------------------------------------------------------
@@ -7582,7 +7801,11 @@ fn naming_the_trustee_takes_the_governor_and_the_trustee() {
 
 /// M2: a steward rotation ends the lending of the lenders the previous
 /// steward approved, on offers already made too, while the positions they
-/// opened before stay deliverable to them (decision S8).
+/// opened before stay deliverable to them (decision S8): the approval stays
+/// on record, so the seized shares reach the lender at once. A revocation
+/// removes it; the seizure still settles and the shares wait for a new
+/// approval, as tested by
+/// `a_revoked_lender_still_seizes_and_its_shares_wait_for_an_approval`.
 #[test]
 fn a_steward_rotation_stops_new_loans_but_not_the_seizure_of_old_ones() {
     let (f, offer_id) = ready();
@@ -7614,6 +7837,8 @@ fn a_steward_rotation_stops_new_loans_but_not_the_seizure_of_old_ones() {
         f.client.get_repo(&repo_id).unwrap().status,
         RepoStatus::Defaulted
     );
+    assert_eq!(balance(&f.env, &f.shares, &f.lender), 10_000 * ONE);
+    assert_eq!(f.client.pending_release(&repo_id), None);
 
     // The current steward attests and approves: lending resumes on the same offer.
     f.client
