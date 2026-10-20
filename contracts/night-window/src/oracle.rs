@@ -244,7 +244,8 @@ pub fn read_primary_checked(
     agree(nav, backup, feed)
 }
 
-/// Checks that `nav` lies in the corridor predicted from the fund's reference.
+/// Checks that `nav` lies in the corridor predicted from the fund's reference,
+/// its growth counted over at most the fund's NAV age bound.
 pub fn check_corridor(config: &FundConfig, state: &FundState, nav: &Reading) -> Result<(), Error> {
     let (low, high) = corridor(
         state.reference_nav,
@@ -252,6 +253,7 @@ pub fn check_corridor(config: &FundConfig, state: &FundState, nav: &Reading) -> 
         nav.timestamp,
         config.corridor_floor_bps,
         config.max_yield_bps,
+        config.nav_max_age_secs,
     )?;
     let value = nav.price.mantissa();
     if value < low || value > high {
@@ -261,8 +263,9 @@ pub fn check_corridor(config: &FundConfig, state: &FundState, nav: &Reading) -> 
 }
 
 /// Next reference after a NAV passed the corridor: it never falls, and it
-/// rises at most along the model path. Returns `None` when the reading is not
-/// newer than the reference.
+/// rises at most along the model path, by at most one NAV age bound of
+/// growth per update. Returns `None` when the reading is not newer than the
+/// reference.
 pub fn next_reference(
     config: &FundConfig,
     state: &FundState,
@@ -276,6 +279,7 @@ pub fn next_reference(
         state.reference_time,
         nav.timestamp,
         config.max_yield_bps,
+        config.nav_max_age_secs,
     )?;
     Ok(Some(
         nav.price.mantissa().min(ceiling).max(state.reference_nav),

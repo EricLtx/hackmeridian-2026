@@ -99,16 +99,32 @@ pub fn mul_div_ceil(a: i128, b: i128, c: i128) -> Result<i128, Error> {
     }
 }
 
+/// Seconds of growth the model grants a NAV observed at `observed_time`: the
+/// time since the reference, counted over at most `max_window_secs` (the
+/// fund's NAV age bound). An old reference grants no more growth than a
+/// fresh one: the corridor's span stays bounded, however long nobody moved
+/// the reference.
+fn growth_window(reference_time: u64, observed_time: u64, max_window_secs: u64) -> i128 {
+    i128::from(
+        observed_time
+            .saturating_sub(reference_time)
+            .min(max_window_secs),
+    )
+}
+
 /// Highest value the reference may take after `elapsed` seconds: the
-/// reference grown at `max_yield_bps` per year, rounded down. However often a
-/// faulty feed publishes, the reference cannot outrun this path.
+/// reference grown at `max_yield_bps` per year over at most
+/// `max_window_secs`, rounded down. However often a faulty feed publishes,
+/// the reference cannot outrun this path, and one update moves it by at
+/// most one window of growth.
 pub fn model_path(
     reference: i128,
     reference_time: u64,
     observed_time: u64,
     max_yield_bps: u32,
+    max_window_secs: u64,
 ) -> Result<i128, Error> {
-    let elapsed = i128::from(observed_time.saturating_sub(reference_time));
+    let elapsed = growth_window(reference_time, observed_time, max_window_secs);
     let year_bps = BPS.checked_mul(YEAR_SECS).ok_or(OVERFLOW)?;
     let growth = i128::from(max_yield_bps)
         .checked_mul(elapsed)
@@ -179,19 +195,26 @@ pub fn interest(principal: i128, rate_bps: u32, elapsed: u64) -> Result<i128, Er
 /// value grows slowly and almost never falls. Given a reference NAV observed
 /// at `reference_time`, a NAV observed at `observed_time` is plausible when it
 /// lies between `reference * (1 - floor)` and
-/// `reference * (1 + floor + max_yield * elapsed / year)`. The floor is a
-/// tolerance of the check only: the reference itself follows [`model_path`],
-/// never the oracle, so a faulty feed cannot ratchet it.
+/// `reference * (1 + floor + max_yield * elapsed / year)`, where `elapsed`
+/// counts at most `max_window_secs`, the fund's NAV age bound (review
+/// findings arith-2 and oracle-1, 20 October 2026). The span from a true NAV
+/// at the bottom to a reading at the top is then at most two floors plus
+/// one window of growth, which the fund's haircut must cover (enforced at
+/// admission); an honest NAV that outgrew it fails closed until the
+/// reference moves. The floor is a tolerance of the check only: the
+/// reference itself follows [`model_path`], never the oracle, so a faulty
+/// feed cannot ratchet it.
 pub fn corridor(
     reference: i128,
     reference_time: u64,
     observed_time: u64,
     floor_bps: u32,
     max_yield_bps: u32,
+    max_window_secs: u64,
 ) -> Result<(i128, i128), Error> {
     let floor = i128::from(floor_bps);
     let low = mul_div_floor(reference, BPS.checked_sub(floor).ok_or(OVERFLOW)?, BPS)?;
-    let elapsed = i128::from(observed_time.saturating_sub(reference_time));
+    let elapsed = growth_window(reference_time, observed_time, max_window_secs);
     let year_bps = BPS.checked_mul(YEAR_SECS).ok_or(OVERFLOW)?;
     let growth = i128::from(max_yield_bps)
         .checked_mul(elapsed)

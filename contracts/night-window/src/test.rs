@@ -232,9 +232,15 @@ fn ready() -> (Fixture, u64) {
 /// `ready` on a fixture prepared beforehand, for instance in sole-lender
 /// mode.
 fn ready_from(f: Fixture) -> (Fixture, u64) {
+    let config = fund_config(&f);
+    ready_with(f, config)
+}
+
+/// `ready` with another configuration of the fund.
+fn ready_with(f: Fixture, config: FundConfig) -> (Fixture, u64) {
     f.client.set_stablecoin(&f.eurc, &eur(&f.env));
     f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
-    f.client.set_fund(&f.shares, &fund_config(&f));
+    f.client.set_fund(&f.shares, &config);
     admit_lender(&f.client, &f.env, &f.shares, &f.lender);
     mint(&f.env, &f.eurc, &f.lender, 1_000_000 * ONE);
     mint(&f.env, &f.eurc, &f.borrower, 100_000 * ONE);
@@ -977,7 +983,7 @@ fn reference_cannot_be_ratcheted_by_a_faulty_feed() {
         let _ = f.client.try_refresh_reference(&f.shares);
     }
     let state = f.client.get_fund_state(&f.shares).unwrap();
-    let path = math::model_path(NAV_EUR, T0, T0 + 3_500, 500).unwrap();
+    let path = math::model_path(NAV_EUR, T0, T0 + 3_500, 500, 26 * HOUR).unwrap();
     assert!(
         state.reference_nav <= path,
         "{} > {}",
@@ -1016,6 +1022,292 @@ fn steward_re_anchors_after_a_legitimate_drop() {
     assert_eq!(f.client.reset_reference(&f.shares).price, nav);
     assert_eq!(f.env.auths()[0].0, f.steward);
     assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+}
+
+/// The loosest NAV settings the default envelope allows (corridor floor
+/// 0.5 %, 10 % a year of growth, NAV age 3 days), with the smallest haircut
+/// that covers that corridor from rc5 on: 2 x 50 + ceil(1,000 x 3 / 365) =
+/// 109 bps, where the envelope alone asks for 100.
+fn loosest_config(f: &Fixture) -> FundConfig {
+    FundConfig {
+        haircut_bps: 109,
+        corridor_floor_bps: 50,
+        max_yield_bps: 1_000,
+        nav_max_age_secs: 3 * DAY,
+        ..fund_config(f)
+    }
+}
+
+/// Top of the corridor of `config` around `reference`, its growth counted
+/// over at most `window`.
+fn corridor_top(config: &FundConfig, reference: i128, from: u64, to: u64, window: u64) -> i128 {
+    math::corridor(
+        reference,
+        from,
+        to,
+        config.corridor_floor_bps,
+        config.max_yield_bps,
+        window,
+    )
+    .unwrap()
+    .1
+}
+
+/// Review findings arith-2, oracle-1 and econ-1 (20 October 2026), first
+/// path: for 30 days nobody opens a repo or refreshes the reference while
+/// the operator republishes a constant NAV. One wrong publication at the
+/// rc4 top of the corridor, which grew with the age of the reference, lent
+/// 10,522.84 EURC against shares worth 10,500 EUR. The growth now counts
+/// over at most the NAV age bound: that publication is refused, the top is
+/// that of a three-day-old reference, and the loan it allows stays below
+/// the value.
+#[test]
+fn a_quiet_month_grants_no_more_growth_than_one_nav_age() {
+    let f = bare();
+    let config = loosest_config(&f);
+    let (f, offer_id) = ready_with(f, config.clone());
+    for _ in 0..30 {
+        advance(&f, DAY);
+        publish_nav(&f, NAV_EUR);
+    }
+    let now = f.env.ledger().timestamp();
+    let shares = 10_000 * ONE;
+    let lent_at = |nav: i128| shares * nav / 10i128.pow(NAV_DECIMALS) * 9_891 / 10_000;
+    let true_value = shares * NAV_EUR / 10i128.pow(NAV_DECIMALS);
+    let rc4_top = corridor_top(&config, NAV_EUR, T0, now, u64::MAX);
+    assert_eq!(
+        (lent_at(rc4_top), true_value),
+        (105_228_384_348, 105_000_000_000)
+    );
+    publish_nav(&f, rc4_top);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &shares, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client
+            .try_open_repo(&f.borrower, &offer_id, &f.shares, &shares, &ONE, &DAY),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let top = corridor_top(&config, NAV_EUR, T0, now, config.nav_max_age_secs);
+    assert_eq!(
+        top,
+        corridor_top(&config, NAV_EUR, T0, T0 + 3 * DAY, u64::MAX)
+    );
+    publish_nav(&f, top + 1);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &shares, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish_nav(&f, top);
+    let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+    assert_eq!(quote.max_principal, lent_at(top));
+    assert!(quote.max_principal < true_value);
+    // The honest NAV passes.
+    publish_nav(&f, NAV_EUR);
+    f.client
+        .open_repo(&f.borrower, &offer_id, &f.shares, &shares, &ONE, &DAY);
+}
+
+/// Review finding arith-2, second path: the honest NAV sits at the bottom of
+/// the corridor, half a percent under the reference, and a wrong
+/// publication three days later, within the NAV age bound, sits at its top.
+/// That span, two floors plus three days of growth, exceeded the 100 bps
+/// haircut the envelope allowed (by 8.02 EURC on 10,000 shares); the
+/// 109 bps the cross-invariant demands cover it.
+#[test]
+fn the_haircut_covers_the_corridor_from_its_bottom_to_its_top() {
+    let f = bare();
+    let config = loosest_config(&f);
+    let (f, offer_id) = ready_with(f, config.clone());
+    let shares = 10_000 * ONE;
+    let bottom = NAV_EUR * 9_950 / 10_000;
+    advance(&f, HOUR);
+    publish_nav(&f, bottom);
+    assert!(f.client.try_quote(&f.shares, &shares, &f.eurc).is_ok());
+    f.client.refresh_reference(&f.shares);
+    // The reference never falls; its time moves.
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!(
+        (state.reference_nav, state.reference_time),
+        (NAV_EUR, T0 + HOUR)
+    );
+    advance(&f, 3 * DAY);
+    let now = f.env.ledger().timestamp();
+    let top = corridor_top(&config, NAV_EUR, T0 + HOUR, now, config.nav_max_age_secs);
+    publish_nav(&f, top);
+    let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+    let true_value = shares * bottom / 10i128.pow(NAV_DECIMALS);
+    assert_eq!(
+        (quote.max_principal, true_value),
+        (104_460_138_184, 104_475_000_000)
+    );
+    // With the 100 bps the envelope alone asks for: 10,455.52 EURC.
+    assert_eq!(
+        shares * top / 10i128.pow(NAV_DECIMALS) * 9_900 / 10_000,
+        104_555_188_355
+    );
+    f.client.open_repo(
+        &f.borrower,
+        &offer_id,
+        &f.shares,
+        &shares,
+        &quote.max_principal,
+        &DAY,
+    );
+}
+
+/// A stale reference fails closed (review findings arith-2 and oracle-1).
+/// The fund's NAV truly grows 3 % a year. Ten days without anyone moving the
+/// reference leave the NAV inside the corridor, the floor absorbing the gap;
+/// each refresh then steps the reference forward by at most one NAV age of
+/// growth, and thirteen daily publications later it has caught up. Thirty
+/// more quiet days and the NAV has outgrown the floor plus one NAV age of
+/// growth: quotes, openings and `refresh_reference` are refused until the
+/// governor and the steward re-anchor the fund.
+#[test]
+fn a_stale_reference_fails_closed_and_refreshes_step_it_forward() {
+    let (f, offer_id) = ready();
+    let config = fund_config(&f);
+    let nav_at = |t: u64| NAV_EUR + NAV_EUR * 300 * i128::from(t - T0) / (10_000 * 31_536_000);
+    let publish = |f: &Fixture| publish_nav(f, nav_at(f.env.ledger().timestamp()));
+    let reference = |f: &Fixture| {
+        let state = f.client.get_fund_state(&f.shares).unwrap();
+        (state.reference_nav, state.reference_time)
+    };
+
+    advance(&f, 10 * DAY);
+    publish(&f);
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+    f.client.refresh_reference(&f.shares);
+    let now = f.env.ledger().timestamp();
+    let path =
+        |window: u64| math::model_path(NAV_EUR, T0, now, config.max_yield_bps, window).unwrap();
+    assert_eq!(reference(&f), (path(config.nav_max_age_secs), now));
+    assert!(path(config.nav_max_age_secs) < path(u64::MAX));
+    let mut steps = 0;
+    while reference(&f).0 < nav_at(f.env.ledger().timestamp()) {
+        assert!(steps < 30, "the reference does not catch up");
+        advance(&f, DAY);
+        publish(&f);
+        f.client.refresh_reference(&f.shares);
+        steps += 1;
+    }
+    assert_eq!(steps, 13);
+
+    // 24.6 bps of growth against a corridor of 11.5 bps.
+    advance(&f, 30 * DAY);
+    publish(&f);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client
+            .try_open_repo(&f.borrower, &offer_id, &f.shares, &ONE, &ONE, &DAY),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let nav = nav_at(f.env.ledger().timestamp());
+    f.client.propose_reanchor(&f.shares, &nav, &0);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish(&f);
+    f.client.apply_reanchor(&f.shares);
+    f.client
+        .open_repo(&f.borrower, &offer_id, &f.shares, &ONE, &ONE, &DAY);
+}
+
+/// The envelope's cross-invariant (review findings arith-2, oracle-1 and
+/// econ-1): a fund's haircut covers its NAV corridor, two floors plus the
+/// growth over its NAV age bound, rounded up. Each bound of the envelope may
+/// hold while their sum does not. Checked at admission, at a replacement and
+/// when the steward tunes the haircut. The fixtures' 200 / 10 / 500 / 26 h
+/// need 22 bps.
+#[test]
+fn the_haircut_must_cover_the_corridor() {
+    let f = bare();
+    assert_eq!(corridor_haircut_bps(&fund_config(&f)), Ok(22));
+    assert_eq!(corridor_haircut_bps(&loosest_config(&f)), Ok(109));
+    // The growth rounds up: 5 % a year over 126,144 seconds is exactly
+    // 2 bps, one second more needs 3.
+    let mut config = fund_config(&f);
+    config.nav_max_age_secs = 126_144;
+    assert_eq!(corridor_haircut_bps(&config), Ok(22));
+    config.nav_max_age_secs = 126_145;
+    assert_eq!(corridor_haircut_bps(&config), Ok(23));
+
+    // Admission, on fresh fixtures whose envelope accepts any haircut.
+    let admit = |haircut_bps: u32, nav_max_age_secs: u64, loosest: bool| {
+        let f = bare();
+        let mut envelope = default_envelope();
+        envelope.min_haircut_bps = 0;
+        f.client.set_envelope(&envelope);
+        let base = if loosest {
+            loosest_config(&f)
+        } else {
+            fund_config(&f)
+        };
+        let config = FundConfig {
+            haircut_bps,
+            nav_max_age_secs,
+            ..base
+        };
+        f.client.try_set_fund(&f.shares, &config)
+    };
+    assert_eq!(admit(21, 26 * HOUR, false), Err(Ok(Error::OutsideEnvelope)));
+    assert_eq!(admit(22, 26 * HOUR, false), Ok(Ok(())));
+    assert_eq!(admit(22, 126_144, false), Ok(Ok(())));
+    assert_eq!(admit(22, 126_145, false), Err(Ok(Error::OutsideEnvelope)));
+    assert_eq!(admit(108, 3 * DAY, true), Err(Ok(Error::OutsideEnvelope)));
+    assert_eq!(admit(109, 3 * DAY, true), Ok(Ok(())));
+
+    // The steward tunes the haircut of an admitted fund.
+    let f = bare();
+    let config = loosest_config(&f);
+    let (f, _) = ready_with(f, config.clone());
+    let limits = |haircut_bps: u32| {
+        f.client.try_set_fund_limits(
+            &f.shares,
+            &haircut_bps,
+            &config.max_principal_per_repo,
+            &config.max_outstanding,
+        )
+    };
+    assert_eq!(limits(108), Err(Ok(Error::OutsideEnvelope)));
+    assert_eq!(limits(150), Ok(Ok(())));
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().haircut_bps, 150);
+    // Back to 109: a loosening, which waits, and is allowed.
+    assert_eq!(limits(109), Ok(Ok(())));
+    assert_eq!(
+        f.client
+            .pending_fund_limits_change(&f.shares)
+            .map(|p| p.haircut_bps),
+        Some(109)
+    );
+
+    // A replacement covers its own corridor.
+    let uncovered = FundConfig {
+        haircut_bps: 108,
+        ..config.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &uncovered),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    // A shorter NAV age needs less: 100 + ceil(1,000 x 1 / 365) = 103.
+    let covered = FundConfig {
+        haircut_bps: 103,
+        nav_max_age_secs: DAY,
+        ..config
+    };
+    f.client.set_fund(&f.shares, &covered);
+    assert_eq!(
+        f.client.pending_fund_change(&f.shares).map(|p| p.config),
+        Some(covered)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3543,8 +3835,14 @@ fn reanchor_installs_the_readings_of_the_proposal() {
     // Review of the re-anchor round, item 3: the apply follows the model
     // from the proposed NAV. 0.2 % up in two days is faster than the
     // corridor (0.1 % floor plus 5 % a year), 0.15 % down is below its
-    // floor: both refused.
-    for moved in [dropped * 1_002 / 1_000, dropped * 9_985 / 10_000] {
+    // floor: both refused. So is 0.12 % up from rc5 on: the growth counts
+    // over at most the NAV age bound, 26 hours, not the two days of the
+    // delay (review finding arith-2).
+    for moved in [
+        dropped * 1_002 / 1_000,
+        dropped * 9_985 / 10_000,
+        dropped * 10_012 / 10_000,
+    ] {
         publish_nav(&f, moved);
         assert_eq!(
             f.client.try_apply_reanchor(&f.shares),
@@ -3552,10 +3850,10 @@ fn reanchor_installs_the_readings_of_the_proposal() {
         );
     }
     assert!(f.client.pending_reanchor(&f.shares).is_some());
-    // 0.12 % up: more than the 0.1 % floor, but on the model path, which a
+    // 0.11 % up: more than the 0.1 % floor, but on the model path, which a
     // symmetric band would wrongly refuse. The proposal's readings are
     // installed, not the spot.
-    publish_nav(&f, dropped * 10_012 / 10_000);
+    publish_nav(&f, dropped * 10_011 / 10_000);
     f.env.set_auths(&[]);
     f.client.apply_reanchor(&f.shares);
     assert!(f.env.auths().is_empty());
@@ -4641,11 +4939,21 @@ fn arithmetic_overflow_is_a_typed_error() {
 
 #[test]
 fn corridor_bounds() {
-    let (low, high) = math::corridor(1_000_000, 0, 0, 10, 500).unwrap();
+    let year = 31_536_000;
+    let (low, high) = math::corridor(1_000_000, 0, 0, 10, 500, 26 * HOUR).unwrap();
     assert_eq!((low, high), (999_000, 1_001_000));
-    // A year later the top grows by the maximum yield.
-    let (_, high) = math::corridor(1_000_000, 0, 31_536_000, 10, 500).unwrap();
+    // A year later the top grows by the maximum yield over a year-long
+    // window...
+    let (_, high) = math::corridor(1_000_000, 0, year, 10, 500, year).unwrap();
     assert_eq!(high, 1_051_000);
+    // ...and over a tenth of a year when that is the window: a year-old
+    // reference grants no more growth than one window.
+    let (_, high) = math::corridor(1_000_000, 0, year, 10, 500, year / 10).unwrap();
+    assert_eq!(high, 1_006_000);
+    assert_eq!(
+        math::model_path(1_000_000, 0, year, 500, year / 10),
+        Ok(1_005_000)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -7331,12 +7639,20 @@ fn two_moves_at_the_top_of_the_corridor_cannot_ratchet_the_reference() {
             to,
             config.corridor_floor_bps,
             config.max_yield_bps,
+            config.nav_max_age_secs,
         )
         .unwrap()
         .1
     };
     let path = |reference: i128, from: u64, to: u64| {
-        math::model_path(reference, from, to, config.max_yield_bps).unwrap()
+        math::model_path(
+            reference,
+            from,
+            to,
+            config.max_yield_bps,
+            config.nav_max_age_secs,
+        )
+        .unwrap()
     };
     let (t1, t2) = (T0 + DAY, T0 + 2 * DAY);
 
@@ -7368,8 +7684,12 @@ fn two_moves_at_the_top_of_the_corridor_cannot_ratchet_the_reference() {
     let reference = f.client.get_fund_state(&f.shares).unwrap().reference_nav;
     assert_eq!(reference, path(path(NAV_EUR, T0, t1), t1, t2));
     // Chaining two steps of the path compounds the yield, a second-order
-    // excess (about 2e-8 here), far below the floor (1e-3).
-    let single = path(NAV_EUR, T0, t2);
+    // excess (about 2e-8 here), far below the floor (1e-3). Each step spans
+    // a day, within the NAV age bound, so the comparison is with the
+    // two-day path itself, which a single update could no longer take
+    // (rc5: one update grows the reference by at most one NAV age).
+    let single = math::model_path(NAV_EUR, T0, t2, config.max_yield_bps, u64::MAX).unwrap();
+    assert!(path(NAV_EUR, T0, t2) < single);
     assert!(reference >= single && reference - single < NAV_EUR / 1_000_000);
     // A third move measured from the second NAV is refused as well.
     advance(&f, DAY);

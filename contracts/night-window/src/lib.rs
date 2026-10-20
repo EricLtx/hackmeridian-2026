@@ -1176,6 +1176,7 @@ impl OpenWindow {
             nav.timestamp,
             config.corridor_floor_bps,
             config.max_yield_bps,
+            config.nav_max_age_secs,
         )?;
         if !math::within_band(nav_value, expected_nav, config.corridor_floor_bps)? {
             return Err(Error::PriceOutOfBand);
@@ -1249,12 +1250,16 @@ impl OpenWindow {
         {
             return Err(Error::CurrencyMismatch);
         }
+        // The growth since the proposal counts over at most the NAV age
+        // bound, as for any valuation: the installed reference keeps the
+        // proposal's time, and the corridor around it grants no more.
         let (low, high) = math::corridor(
             pending.nav,
             pending.nav_time,
             nav.timestamp,
             config.corridor_floor_bps,
             config.max_yield_bps,
+            config.nav_max_age_secs,
         )?;
         let value = nav.price.mantissa();
         if value < low || value > high {
@@ -2912,8 +2917,25 @@ fn deliver_shares(env: &Env, repo_id: u64, fund: &Address, to: &Address, shares:
     .publish(env);
 }
 
-/// Checks a fund configuration against the envelope and the currencies its
-/// oracles report in.
+/// Smallest haircut, in basis points, that covers a fund's NAV corridor: a
+/// true NAV at the corridor's bottom and a wrong reading at its top lie at
+/// most two floors plus one NAV age bound of growth apart (`math::corridor`),
+/// the growth rounded up. Review findings arith-2, oracle-1 and econ-1 of
+/// 20 October 2026; the fixtures' 200 / 10 / 500 / 26 h need 22.
+fn corridor_haircut_bps(config: &FundConfig) -> Result<i128, Error> {
+    let growth = math::mul_div_ceil(
+        i128::from(config.max_yield_bps),
+        i128::from(config.nav_max_age_secs),
+        math::YEAR_SECS,
+    )?;
+    i128::from(config.corridor_floor_bps)
+        .checked_mul(2)
+        .and_then(|floors| floors.checked_add(growth))
+        .ok_or(Error::ArithmeticOverflow)
+}
+
+/// Checks a fund configuration against the envelope, its haircut against
+/// its NAV corridor, and the currencies its oracles report in.
 fn check_fund_config(env: &Env, config: &FundConfig) -> Result<(), Error> {
     let envelope = storage::envelope(env);
     let haircut = Bps::haircut(config.haircut_bps)?;
@@ -2923,6 +2945,11 @@ fn check_fund_config(env: &Env, config: &FundConfig) -> Result<(), Error> {
         || config.nav_max_age_secs == 0
         || config.nav_max_age_secs > envelope.max_nav_age_secs
     {
+        return Err(Error::OutsideEnvelope);
+    }
+    // The envelope's cross-invariant: each bound may hold on its own while
+    // the haircut leaves part of the corridor uncovered.
+    if i128::from(haircut.get()) < corridor_haircut_bps(config)? {
         return Err(Error::OutsideEnvelope);
     }
     if config.max_principal_per_repo <= 0

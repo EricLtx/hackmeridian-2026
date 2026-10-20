@@ -128,7 +128,9 @@ proptest! {
     }
 
     /// The corridor brackets its reference, its top bracket the model path,
-    /// and both the top and the path only rise with time.
+    /// and both the top and the path only rise with time. Their growth
+    /// counts over at most the window: past it, the bounds stay those of an
+    /// observation one window after the reference.
     #[test]
     fn corridor_bounds_are_ordered(
         reference in 1i128..=100_000_000_000_000_000_000,
@@ -137,21 +139,38 @@ proptest! {
         later in 0u64..=TEN_YEARS,
         floor in 0u32..10_000,
         yield_bps in 0u32..=10_000,
+        window in 0u64..=TEN_YEARS,
     ) {
         let observed = reference_time + elapsed;
         let (low, high) =
-            math::corridor(reference, reference_time, observed, floor, yield_bps).unwrap();
-        let path = math::model_path(reference, reference_time, observed, yield_bps).unwrap();
+            math::corridor(reference, reference_time, observed, floor, yield_bps, window)
+                .unwrap();
+        let path =
+            math::model_path(reference, reference_time, observed, yield_bps, window).unwrap();
         prop_assert!(0 <= low && low <= reference);
         prop_assert!(reference <= path && path <= high);
         prop_assert!(math::within_band(reference, reference, floor).unwrap());
 
-        let (_, higher) =
-            math::corridor(reference, reference_time, observed + later, floor, yield_bps).unwrap();
+        let (_, higher) = math::corridor(
+            reference, reference_time, observed + later, floor, yield_bps, window,
+        )
+        .unwrap();
         let further =
-            math::model_path(reference, reference_time, observed + later, yield_bps).unwrap();
+            math::model_path(reference, reference_time, observed + later, yield_bps, window)
+                .unwrap();
         prop_assert!(higher >= high);
         prop_assert!(further >= path);
+
+        let capped = reference_time + elapsed.min(window);
+        prop_assert_eq!(
+            (low, high),
+            math::corridor(reference, reference_time, capped, floor, yield_bps, u64::MAX)
+                .unwrap()
+        );
+        prop_assert_eq!(
+            path,
+            math::model_path(reference, reference_time, capped, yield_bps, u64::MAX).unwrap()
+        );
     }
 
     /// Whatever the inputs, the arithmetic returns a value or a typed error;
@@ -166,6 +185,7 @@ proptest! {
         third in any::<u32>(),
         time in any::<u64>(),
         later in any::<u64>(),
+        window in any::<u64>(),
     ) {
         let check = |result: Result<i128, Error>| match result {
             Ok(_) => Ok(()),
@@ -177,9 +197,9 @@ proptest! {
         check(math::mul_div_ceil(a, b, c))?;
         check(math::rescale_floor(a, small, other))?;
         check(math::interest(a, small, time))?;
-        check(math::model_path(a, time, later, small))?;
+        check(math::model_path(a, time, later, small, window))?;
         check(math::within_band(a, b, small).map(i128::from))?;
-        check(math::corridor(a, time, later, small, other).map(|(low, _)| low))?;
+        check(math::corridor(a, time, later, small, other, window).map(|(low, _)| low))?;
         check(math::ceil_to_hour(time).map(i128::from))?;
         if let (Ok(price), Ok(quote), Ok(cut)) =
             (Price::new(a, small % 40), Price::new(b, other % 40), Bps::haircut(third))
@@ -215,8 +235,10 @@ fn edge_values_give_typed_errors_not_panics() {
                 assert!(ok(math::rescale_floor(a, n, n % 40)));
                 for &t in &times {
                     assert!(ok(math::interest(a, n, t)));
-                    assert!(ok(math::model_path(a, t, t / 2, n)));
-                    assert!(ok(math::corridor(a, t / 2, t, n, n).map(|(low, _)| low)));
+                    for &w in &times {
+                        assert!(ok(math::model_path(a, t / 2, t, n, w)));
+                        assert!(ok(math::corridor(a, t / 2, t, n, n, w).map(|(low, _)| low)));
+                    }
                 }
             }
         }
