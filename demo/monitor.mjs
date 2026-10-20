@@ -1079,7 +1079,14 @@ async function rehearse() {
     if (!supported) {
       console.log("  instance without rc4 code; skipped");
     } else {
-      const token = C.backupFeed ?? C.navOracle; // any contract address stands for an unknown token: it is never registered
+      // A token of its own stands for an unknown stablecoin: it is never
+      // registered. Since rc5 a proposal needs a token that answers 7
+      // decimals (F4), so a feed contract no longer does; deployed once.
+      if (!C.drillToken) {
+        C.drillToken = await deploy(state, "operator", "fund_token.wasm", [sv.address(pub("operator")), sv.u32(7), sv.string("Rehearsal stand-in token"), sv.string("tDRILL")]);
+        saveState(state);
+      }
+      const token = C.drillToken;
       const proposed = await invoke(state, "governor", C.openWindow, "set_stablecoin", [sv.address(token), sv.symbol("XXX")]);
       const { s, alerts } = await pass(monitor);
       const fired = alerts.some((a) => a.level === "critical" && /stablecoin registration proposed/.test(a.message));
