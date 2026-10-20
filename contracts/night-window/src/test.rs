@@ -2127,6 +2127,64 @@ fn fallbacks_are_capped() {
     assert_eq!(count(&f), 0);
 }
 
+/// Review finding VAL-4 (20 October 2026): the rule that a fallback is
+/// never the primary feed itself (oracle-5) was checked only when a
+/// fallback is proposed or applied. A replacement making the active
+/// fallback's feed the primary kept the fallback: one source twice, one
+/// silent feed silencing both, and a slot of `MAX_FALLBACKS` held. The
+/// replacement now removes that fallback, published as `FallbackRemoved` by
+/// the contract. During the delay the fallback still stands in for the
+/// silent primary; afterwards the fund prices on its new primary, and the
+/// old primary, still publishing, may be proposed as the new fallback.
+#[test]
+fn promoting_the_fallback_to_primary_removes_it() {
+    let (f, _offer_id, feed) = ready_with_fallback();
+    let fallback = f.client.get_fallback(&f.shares).unwrap();
+    let next = FundConfig {
+        oracle: fallback.oracle.clone(),
+        oracle_asset: fallback.asset.clone(),
+        ..fund_config(&f)
+    };
+    f.client.set_fund(&f.shares, &next);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_on(&f, &feed, NAV_EUR_8);
+    // The primary last published two days ago: the fallback stands in.
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FallbackRemoved {
+                fund: f.shares.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundSet {
+                fund: f.shares.clone(),
+                oracle: fallback.oracle.clone(),
+                haircut_bps: 200
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.get_fund(&f.shares), Some(next));
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+    let count = f
+        .env
+        .as_contract(&f.contract_id, || crate::storage::fallback_count(&f.env));
+    assert_eq!(count, 0);
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+    // The promoted feed cannot come back as its own fallback; the old
+    // primary can be proposed as one.
+    assert_eq!(
+        f.client.try_propose_fallback(&f.shares, &fallback),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    publish_nav(&f, NAV_EUR);
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &f.nav_oracle));
+}
+
 #[test]
 fn removing_a_fund_removes_its_fallback() {
     let (f, _, _) = ready_with_fallback();

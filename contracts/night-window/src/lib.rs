@@ -3017,8 +3017,12 @@ fn carry_fx_reference(
 /// as the one a later re-admission must hear from. Proposals made against
 /// the configuration it replaces go: pending loosened limits and a pending
 /// re-anchor (both read against the old settings), and a pending fallback
-/// when the steward who signed it is no longer the steward. They are
-/// cancelled by the contract itself, as no caller chose it.
+/// when the steward who signed it is no longer the steward. An active
+/// fallback whose feed becomes the primary goes too: the fund would have
+/// one source twice, which a fallback proposal refuses (review findings
+/// oracle-5 and VAL-4, 20 October 2026). It stood in for a silent primary
+/// during the delay, and its slot is freed. All are cancelled or removed by
+/// the contract itself, as no caller chose it.
 fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) {
     let by = env.current_contract_address();
     drop_pending_fund_limits(env, &fund, &by);
@@ -3030,6 +3034,16 @@ fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) 
         drop_pending_steward_recovery(env, &fund, &by);
         drop_pending_steward_backup(env, &fund, &by);
         storage::remove_steward_backup(env, &fund);
+    }
+    if storage::fallback(env, &fund)
+        .is_some_and(|(feed, _)| feed.oracle == config.oracle && feed.asset == config.oracle_asset)
+    {
+        storage::remove_fallback(env, &fund);
+        FallbackRemoved {
+            fund: fund.clone(),
+            by: by.clone(),
+        }
+        .publish(env);
     }
     storage::set_fund(env, &fund, &config);
     storage::set_fund_state(env, &fund, &state);
