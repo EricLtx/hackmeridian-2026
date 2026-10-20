@@ -1207,6 +1207,7 @@ impl OpenWindow {
         }
         steward_alive(&env, &fund, &steward);
         let config = pricing_config(&env, &fund)?;
+        check_reanchor_cover(&env, &config)?;
         let (nav, fx) = read_anchor(&env, &fund, &config)?;
         let nav_value = nav.price.mantissa();
         let eta = eta(&env)?;
@@ -1283,6 +1284,9 @@ impl OpenWindow {
         if !same_feeds {
             return Err(Error::NotProposed);
         }
+        // Checked again: the delay may have grown and the haircut may have
+        // been loosened since the proposal.
+        check_reanchor_cover(&env, &config)?;
         let (nav, fx) = read_anchor(&env, &fund, &config)?;
         // A SEP-40 feed keeps its decimals for life, so this only trips on a
         // broken feed; readings in other units than the proposal's cannot be
@@ -1321,10 +1325,12 @@ impl OpenWindow {
         // The NAV reference is carried from the proposal's reading to this
         // one along the model, in one step: never below the NAV the two
         // signers proposed, never above the model path from it at the
-        // maximum yield over the real elapsed time. A reference may never
-        // advance faster than that path, which successive refreshes already
-        // allow; the two signers fix the floor of the anchor and its FX
-        // rate, and whoever applies picks neither.
+        // maximum yield over the real elapsed time. The two signers fix the
+        // floor of the anchor and its FX rate, and whoever applies picks
+        // neither; but this one reading, signed by nobody, may lift the
+        // reference by the whole growth over the proposal's life, where a
+        // refresh grants one NAV age of growth per reading. The fund's
+        // haircut covers that lift (`check_reanchor_cover`, decision S30).
         let ceiling = math::model_path(
             pending.nav,
             pending.nav_time,
@@ -3181,6 +3187,43 @@ fn corridor_haircut_bps(config: &FundConfig) -> Result<i128, Error> {
         .checked_mul(2)
         .and_then(|floors| floors.checked_add(growth))
         .ok_or(Error::ArithmeticOverflow)
+}
+
+/// Smallest haircut, in basis points, that covers a fund's corridor across
+/// a re-anchor. The apply of a re-anchor, open to anyone within the grace
+/// period, carries the reference up to the model path from the proposal's
+/// reading over the real elapsed time (`apply_reanchor`): one wrong reading
+/// at that moment lifts the reference by the growth over the reading's age,
+/// the delay and the grace, where a refresh grants one NAV age of growth per
+/// reading (review finding VAL-1, second round, 20 October 2026). Two floors
+/// plus that growth, rounded up, with the delay as set at the call; the
+/// fixtures' 200 / 10 / 500 / 26 h need 34 under the default delay.
+fn reanchor_haircut_bps(env: &Env, config: &FundConfig) -> Result<i128, Error> {
+    let span = storage::timelock_delay(env, DEFAULT_TIMELOCK_SECS)
+        .checked_add(PROPOSAL_GRACE_SECS)
+        .and_then(|secs| secs.checked_add(config.nav_max_age_secs))
+        .ok_or(Error::ArithmeticOverflow)?;
+    let growth = math::mul_div_ceil(
+        i128::from(config.max_yield_bps),
+        i128::from(span),
+        math::YEAR_SECS,
+    )?;
+    i128::from(config.corridor_floor_bps)
+        .checked_mul(2)
+        .and_then(|floors| floors.checked_add(growth))
+        .ok_or(Error::ArithmeticOverflow)
+}
+
+/// Refuses a re-anchor, proposed or applied, of a fund whose haircut does
+/// not cover the lift one wrong reading at its apply could give the
+/// reference (decision S30). The steward widens the haircut first
+/// (`set_fund_limits`, at once); the delay only grows, so a fund admitted
+/// at the loosest settings may need that before any re-anchor.
+fn check_reanchor_cover(env: &Env, config: &FundConfig) -> Result<(), Error> {
+    if i128::from(config.haircut_bps) < reanchor_haircut_bps(env, config)? {
+        return Err(Error::OutsideEnvelope);
+    }
+    Ok(())
 }
 
 /// Checks a fund configuration against the envelope, its haircut against

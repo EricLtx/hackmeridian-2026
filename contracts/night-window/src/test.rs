@@ -4804,6 +4804,181 @@ fn a_reanchor_applies_under_a_two_week_delay() {
         .open_repo(&f.borrower, &offer_id, &f.shares, &ONE, &ONE, &DAY);
 }
 
+/// The haircut a re-anchor of `f`'s fund needs under the delay set on it.
+fn reanchor_cover(f: &Fixture, config: &FundConfig) -> i128 {
+    f.env
+        .as_contract(&f.contract_id, || reanchor_haircut_bps(&f.env, config))
+        .unwrap()
+}
+
+/// Review finding VAL-1, second round (20 October 2026): since the apply
+/// carries the reference along the model path from the proposal, one wrong
+/// primary reading at the apply, made by anyone at a moment of its choosing
+/// within the grace, lifts the reference by the growth over the delay, the
+/// grace and the NAV age at once, where a refresh grants one NAV age of
+/// growth per reading. At the loosest settings the default envelope allows
+/// (haircut 109, the cover of the corridor alone), under a 14-day or a
+/// 30-day delay and a flat true NAV republished daily, that lift (57 and
+/// 101 bps) exceeded the cover: a second wrong reading three days later at
+/// the top of the new corridor lent more than 10,500 EURC against 10,000
+/// shares worth that much. Such a re-anchor is now refused at its proposal
+/// until the steward widens the haircut to two floors plus that growth (166
+/// and 210 bps), and refused at its apply when the delay grew meanwhile.
+/// Under the widened haircut the same two readings lend less than the
+/// value; the honest NAV still fails closed after the first one, as any NAV
+/// under its corridor does, until `reset_reference`.
+#[test]
+fn a_reanchor_needs_a_haircut_that_covers_one_wrong_reading_at_its_apply() {
+    for (delay, bound) in [(14 * DAY, 166), (MAX_TIMELOCK_SECS, 210)] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let config = loosest_config(&f);
+        assert_eq!(corridor_haircut_bps(&config), Ok(109));
+        let (f, offer_id) = ready_with(f, config.clone());
+        assert_eq!(reanchor_cover(&f, &config), bound);
+        let outside = Err(Ok(Error::OutsideEnvelope));
+        assert_eq!(
+            f.client.try_propose_reanchor(&f.shares, &NAV_EUR, &0),
+            outside
+        );
+        // One basis point short is still refused; the bound itself passes.
+        // Widening the haircut tightens, so it applies at once.
+        let widen = |haircut_bps: i128| {
+            f.client.set_fund_limits(
+                &f.shares,
+                &u32::try_from(haircut_bps).unwrap(),
+                &config.max_principal_per_repo,
+                &config.max_outstanding,
+            );
+        };
+        widen(bound - 1);
+        assert_eq!(
+            f.client.try_propose_reanchor(&f.shares, &NAV_EUR, &0),
+            outside
+        );
+        widen(bound);
+        let config = f.client.get_fund(&f.shares).unwrap();
+        f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+
+        let shares = 10_000 * ONE;
+        let true_value = shares * NAV_EUR / 10i128.pow(NAV_DECIMALS);
+        for _ in 0..(delay + PROPOSAL_GRACE_SECS) / DAY {
+            advance(&f, DAY);
+            publish_nav(&f, NAV_EUR);
+            f.client.refresh_reference(&f.shares);
+            assert!(f.client.try_quote(&f.shares, &shares, &f.eurc).is_ok());
+        }
+        let applied_at = f.env.ledger().timestamp();
+        publish_nav(&f, corridor_top(&config, NAV_EUR, T0, applied_at, u64::MAX));
+        f.client.apply_reanchor(&f.shares);
+        let path =
+            math::model_path(NAV_EUR, T0, applied_at, config.max_yield_bps, u64::MAX).unwrap();
+        let state = f.client.get_fund_state(&f.shares).unwrap();
+        assert_eq!(
+            (state.reference_nav, state.reference_time),
+            (path, applied_at)
+        );
+        let lift_bps = (path - NAV_EUR) * 10_000 / NAV_EUR;
+        assert!(lift_bps > i128::from(config.corridor_floor_bps));
+        assert!(lift_bps <= bound - 2 * i128::from(config.corridor_floor_bps));
+        publish_nav(&f, NAV_EUR);
+        assert_eq!(
+            f.client.try_quote(&f.shares, &shares, &f.eurc),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+        advance(&f, config.nav_max_age_secs);
+        let later = f.env.ledger().timestamp();
+        let top = corridor_top(&config, path, applied_at, later, config.nav_max_age_secs);
+        publish_nav(&f, top);
+        let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+        // At the 109 bps the corridor alone needs, this reading lent more
+        // than the shares are worth; the cover across the re-anchor holds.
+        let value_read = shares * top / 10i128.pow(NAV_DECIMALS);
+        assert!(value_read * 9_891 / 10_000 > true_value);
+        assert_eq!(quote.max_principal, value_read * (10_000 - bound) / 10_000);
+        assert!(quote.max_principal < true_value);
+        f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &shares,
+            &quote.max_principal,
+            &DAY,
+        );
+    }
+
+    // The apply reads the delay of its own day: grown from 14 to 30 days
+    // after the proposal, the cover is checked against the longer life.
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let config = FundConfig {
+        haircut_bps: 166,
+        ..loosest_config(&f)
+    };
+    let (f, _) = ready_with(f, config.clone());
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    f.client.set_timelock_delay(&MAX_TIMELOCK_SECS);
+    assert_eq!(reanchor_cover(&f, &config), 210);
+    advance(&f, 14 * DAY);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    f.client.set_fund_limits(
+        &f.shares,
+        &210,
+        &config.max_principal_per_repo,
+        &config.max_outstanding,
+    );
+    f.client.apply_reanchor(&f.shares);
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+}
+
+/// Review finding VAL-1, second round: at the 48-hour default and the
+/// fixtures' settings (10 / 500 / 26 h) the re-anchor needs 34 bps and the
+/// 200 bps haircut covers it; under the one-minute to five-minute delay of
+/// a demonstration, 32. One wrong reading at the apply still lifts the
+/// reference by the model path over the delay and the grace, 12.3 bps,
+/// above the 10 bps floor: the honest flat NAV then fails closed, which the
+/// cover makes safe and the steward undoes with `reset_reference`.
+#[test]
+fn at_the_default_delay_one_wrong_reading_at_the_apply_fails_the_honest_nav_closed() {
+    let f = bare();
+    f.client.set_timelock_delay(&300);
+    assert_eq!(reanchor_cover(&f, &fund_config(&f)), 32);
+
+    let (f, _) = ready();
+    let config = fund_config(&f);
+    assert_eq!(reanchor_cover(&f, &config), 34);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    for _ in 0..9 {
+        advance(&f, DAY);
+        publish_nav(&f, NAV_EUR);
+        f.client.refresh_reference(&f.shares);
+    }
+    let now = f.env.ledger().timestamp();
+    assert_eq!(now, T0 + DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS);
+    let top = corridor_top(&config, NAV_EUR, T0, now, u64::MAX);
+    publish_nav(&f, top);
+    f.client.apply_reanchor(&f.shares);
+    let lifted = f.client.get_fund_state(&f.shares).unwrap().reference_nav;
+    // 12.32 bps, in hundredths.
+    assert_eq!((lifted - NAV_EUR) * 1_000_000 / NAV_EUR, 1_232);
+    // The reading that lifted it values the shares under the cover.
+    let shares = 10_000 * ONE;
+    let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+    assert!(quote.max_principal < shares * NAV_EUR / 10i128.pow(NAV_DECIMALS));
+    advance(&f, HOUR);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    f.client.reset_reference(&f.shares);
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+}
+
 /// A cross fund admitted under `delay`, its USD NAV accruing `growth_bps` a
 /// year, refreshed daily by a keeper. EUR/USD moves 2.5 % up, beyond the
 /// 2 % band: the fund stops pricing until a re-anchor on the new rate
