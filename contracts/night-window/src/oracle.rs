@@ -5,6 +5,9 @@
 //! corridor (decision S2). When the NAV is not reported in the loan currency,
 //! a second feed converts it (cross price) and an FX haircut covers the risk
 //! that the exchange rate is frozen over a weekend while markets are closed.
+//! The rate must lie in a band around the fund's FX reference, and the NAV is
+//! divided by the higher of the rate and that reference: the lender's side
+//! of the band (decision S22).
 
 use soroban_sdk::{contractclient, Address, Env};
 
@@ -30,11 +33,37 @@ pub struct Reading {
     pub timestamp: u64,
 }
 
+/// The FX leg of a cross valuation: the rate read and the rate applied.
+#[derive(Clone, Copy, Debug)]
+pub struct FxValuation {
+    /// The FX feed's reading, with the fund's FX decimals.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "recorded with each loan from rc5 F6 on; remove this attribute then"
+        )
+    )]
+    pub rate: Reading,
+    /// The divisor of the NAV: the rate read, or the fund's FX reference when
+    /// the rate is below it. Same decimals as the rate.
+    pub applied: Price,
+}
+
 /// What the shares of a fund are worth now, and the haircut to apply.
 #[derive(Clone, Copy, Debug)]
 pub struct Valuation {
     /// NAV as reported by the NAV oracle, in its own base.
     pub nav: Reading,
+    /// The FX leg, for a cross price; `None` for a fund priced directly.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "recorded with each loan from rc5 F6 on; remove this attribute then"
+        )
+    )]
+    pub fx: Option<FxValuation>,
     /// Share price in the loan currency.
     pub price: Price,
     /// Fund haircut, plus the FX haircut for a cross price.
@@ -267,24 +296,42 @@ pub fn value(
     match &config.source {
         PriceSource::Direct => Ok(Valuation {
             nav,
+            fx: None,
             price: nav.price,
             haircut,
         }),
-        PriceSource::Cross(fx) => {
+        PriceSource::Cross(leg) => {
             let rate = read_fresh(
                 env,
-                &fx.oracle,
-                &fx.asset,
+                &leg.oracle,
+                &leg.asset,
                 state.fx_decimals,
-                fx.max_age_secs,
+                leg.max_age_secs,
             )?;
-            if !within_band(rate.price.mantissa(), state.reference_fx, fx.band_bps)? {
+            if !within_band(rate.price.mantissa(), state.reference_fx, leg.band_bps)? {
                 return Err(Error::PriceOutOfBand);
             }
+            // The band is centred on the reference, which only a two-key
+            // re-anchor moves, while the market drifts inside it. A rate
+            // below the reference raises the price: read as published, a
+            // wrong rate at the low edge while the market sits near the top
+            // would overvalue the shares by about two bands (review finding
+            // arith-1, 20 October 2026). Divided by the higher of the rate
+            // and the reference, they are overvalued by at most the market's
+            // move above the reference, itself at most the band, which the
+            // FX haircut covers (S22: band <= FX haircut).
+            let fx = FxValuation {
+                rate,
+                applied: Price::new(
+                    rate.price.mantissa().max(state.reference_fx),
+                    state.fx_decimals,
+                )?,
+            };
             Ok(Valuation {
                 nav,
-                price: nav.price.divided_by(rate.price)?,
-                haircut: haircut.plus(Bps::haircut(fx.haircut_bps)?)?,
+                fx: Some(fx),
+                price: nav.price.divided_by(fx.applied)?,
+                haircut: haircut.plus(Bps::haircut(leg.haircut_bps)?)?,
             })
         }
     }

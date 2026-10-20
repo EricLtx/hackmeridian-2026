@@ -528,6 +528,8 @@ fn quote_values_shares_minus_the_haircut() {
     assert_eq!(quote.haircut_bps, 200);
     // 10,000 shares x 1.05 EUR x 98 % = 10,290 EUR.
     assert_eq!(quote.max_principal, 10_290 * ONE);
+    // A fund priced directly has no FX leg.
+    assert!(contract_valuation(&f).fx.is_none());
 }
 
 /// A fund whose NAV oracle reports in USD, borrowed against in EUR through an
@@ -628,9 +630,9 @@ fn cross_fund_refuses_an_fx_haircut_below_the_envelope() {
     );
 }
 
-/// Economic model of 17 October 2026 (I16): a rate the FX band admits must
-/// stay covered by the FX haircut, otherwise an in-band wrong rate lends
-/// beyond the haircut-adjusted value.
+/// Economic model of 17 October 2026 (I16) and decision S22: the FX band may
+/// not exceed the FX haircut, otherwise an in-band wrong rate lends beyond
+/// the haircut-adjusted value.
 #[test]
 fn fx_band_wider_than_the_fx_haircut_is_refused_at_admission() {
     let f = bare();
@@ -661,7 +663,11 @@ fn fx_band_wider_than_the_fx_haircut_is_refused_at_admission() {
         f.client.try_set_fund(&f.shares, &config),
         Err(Ok(Error::FxBandExceedsHaircut))
     );
-    // Equal is allowed: the haircut covers every rate the band admits.
+    // Equal is allowed: a rate below the reference is priced at the
+    // reference (rc5, review finding arith-1), so a rate the band admits
+    // overvalues the shares by at most the market's move above the
+    // reference. That move is at most the band, or honest rates would fail
+    // the band, and the FX haircut covers the band.
     config.source = PriceSource::Cross(leg(200));
     f.client.set_fund(&f.shares, &config);
 }
@@ -700,6 +706,194 @@ fn stale_fx_rate_blocks_the_quote() {
         f.client.try_quote(&f.shares, &ONE, &f.eurc),
         Err(Ok(Error::StalePrice))
     );
+}
+
+/// A cross fund at the settings of review finding arith-1 (20 October
+/// 2026): fund haircut 1 %, FX haircut and FX band 1.5 % each, the band as
+/// wide as S22 allows. An approved lender offers 100,000 EURC and the
+/// borrower holds 10,000 shares. Returns the offer, the NAV feed and the FX
+/// feed.
+fn cross_fund_at_the_band_limit() -> (
+    Fixture,
+    u64,
+    MockOracleClient<'static>,
+    MockOracleClient<'static>,
+) {
+    let f = bare();
+    let nav_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let nav_feed = MockOracleClient::new(leak(f.env.clone()), leak(nav_oracle.clone()));
+    let fx_oracle = f
+        .env
+        .register(MockOracle, (Asset::Other(usd(&f.env)), NAV_DECIMALS));
+    let fx_feed = MockOracleClient::new(leak(f.env.clone()), leak(fx_oracle.clone()));
+    publish_cross(&f, &nav_feed, &fx_feed, EUR_USD);
+    let mut config = fund_config(&f);
+    config.oracle = nav_oracle;
+    config.haircut_bps = 100;
+    config.source = PriceSource::Cross(FxLeg {
+        oracle: fx_oracle,
+        asset: Asset::Other(eur(&f.env)),
+        haircut_bps: 150,
+        max_age_secs: 3 * DAY,
+        band_bps: 150,
+    });
+    f.client.set_stablecoin(&f.eurc, &eur(&f.env));
+    f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
+    f.client.set_fund(&f.shares, &config);
+    admit_lender(&f.client, &f.env, &f.shares, &f.lender);
+    mint(&f.env, &f.eurc, &f.lender, 100_000 * ONE);
+    mint(&f.env, &f.shares, &f.borrower, 10_000 * ONE);
+    let offer_id = f.client.create_offer(
+        &f.lender,
+        &f.eurc,
+        &(100_000 * ONE),
+        &RATE_BPS,
+        &(7 * DAY),
+        &vec![&f.env, f.shares.clone()],
+    );
+    (f, offer_id, nav_feed, fx_feed)
+}
+
+/// Publishes the fund's USD NAV, unchanged, and an EUR/USD rate, both stamped
+/// at the current ledger time.
+fn publish_cross(f: &Fixture, nav_feed: &MockOracleClient, fx_feed: &MockOracleClient, rate: i128) {
+    let now = f.env.ledger().timestamp();
+    nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+}
+
+/// Price of one share in EUR, with the NAV feed's decimals, when the NAV is
+/// divided by `rate`.
+fn eur_price_at(rate: i128) -> i128 {
+    NAV_USD * 10i128.pow(NAV_DECIMALS) / rate
+}
+
+/// The contract's own valuation of the fund's shares, the one `quote` and
+/// `open_repo` compute.
+fn contract_valuation(f: &Fixture) -> crate::oracle::Valuation {
+    let config = f.client.get_fund(&f.shares).unwrap();
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    f.env.as_contract(&f.contract_id, || {
+        let fallback = crate::storage::fallback_for_pricing(&f.env, &f.shares);
+        crate::oracle::value(&f.env, &config, &state, fallback.as_ref()).unwrap()
+    })
+}
+
+/// Review findings arith-1 and oracle-2 (20 October 2026): two weeks after
+/// the admission, EUR/USD stands 1.49 % above the reference, inside the
+/// 1.5 % band, and the FX feed publishes one wrong rate at the other edge of
+/// the band. Read as published (rc4), that rate valued the shares 3 % above
+/// their worth against 2.5 % of haircuts: the loan exceeded the collateral.
+/// Priced on the lender's side, at the reference, the loan stays below the
+/// shares' true value, and `open_repo` lends what `quote` announces, not one
+/// unit more.
+#[test]
+fn a_wrong_fx_rate_inside_the_band_lends_no_more_than_the_true_value() {
+    let (f, offer_id, nav_feed, fx_feed) = cross_fund_at_the_band_limit();
+    advance(&f, 14 * DAY);
+    let market = EUR_USD * 10_149 / 10_000;
+    let wrong = EUR_USD * 9_850 / 10_000;
+    publish_cross(&f, &nav_feed, &fx_feed, wrong);
+    let shares = 10_000 * ONE;
+    let worth = |price: i128| shares * price / 10i128.pow(NAV_DECIMALS);
+    let true_value = worth(eur_price_at(market));
+    let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+    assert_eq!(quote.price, eur_price_at(EUR_USD));
+    assert_eq!(quote.haircut_bps, 250);
+    // 10,196.19 EURC against shares worth 10,304.10 EUR.
+    assert_eq!(quote.max_principal, 101_961_923_489);
+    assert_eq!(true_value, 103_041_020_577);
+    // At the wrong rate, rc4 lent 10,351.46 EURC.
+    assert_eq!(worth(eur_price_at(wrong)) * 9_750 / 10_000, 103_514_643_136);
+    assert_eq!(
+        f.client.try_open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &shares,
+            &(quote.max_principal + 1),
+            &DAY,
+        ),
+        Err(Ok(Error::LoanTooLarge))
+    );
+    let repo_id = f.client.open_repo(
+        &f.borrower,
+        &offer_id,
+        &f.shares,
+        &shares,
+        &quote.max_principal,
+        &DAY,
+    );
+    assert_eq!(
+        f.client.get_repo(&repo_id).unwrap().principal,
+        quote.max_principal
+    );
+    assert_eq!(balance(&f.env, &f.eurc, &f.borrower), quote.max_principal);
+}
+
+/// Decision S22 from rc5: the NAV is divided by the rate read when that rate
+/// is at or above the fund's FX reference, by the reference when the rate is
+/// below it. Both edges of the band are accepted, one unit beyond either is
+/// refused, and `open_repo` lends what `quote` announces at either edge.
+#[test]
+fn fx_leg_is_priced_at_the_higher_of_the_rate_and_the_reference() {
+    let (f, offer_id, nav_feed, fx_feed) = cross_fund_at_the_band_limit();
+    // The band's half-width, 1.5 % of the reference: an exact number of
+    // units, so the edges do not depend on rounding.
+    let edge = EUR_USD * 150 / 10_000;
+    assert_eq!(edge * 10_000, EUR_USD * 150);
+    for (rate, applied) in [
+        (EUR_USD, EUR_USD),
+        (EUR_USD + 1, EUR_USD + 1),
+        (EUR_USD * 10_100 / 10_000, EUR_USD * 10_100 / 10_000),
+        (EUR_USD + edge, EUR_USD + edge),
+        (EUR_USD - 1, EUR_USD),
+        (EUR_USD * 9_900 / 10_000, EUR_USD),
+        (EUR_USD - edge, EUR_USD),
+    ] {
+        publish_cross(&f, &nav_feed, &fx_feed, rate);
+        let fx = contract_valuation(&f).fx.unwrap();
+        assert_eq!(fx.rate.price.mantissa(), rate);
+        assert_eq!(fx.rate.timestamp, f.env.ledger().timestamp());
+        assert_eq!(fx.applied.mantissa(), applied, "rate {rate}");
+        assert_eq!(fx.applied.decimals(), NAV_DECIMALS);
+        assert_eq!(
+            f.client.quote(&f.shares, &ONE, &f.eurc).price,
+            eur_price_at(applied),
+            "rate {rate}"
+        );
+    }
+    for rate in [EUR_USD + edge + 1, EUR_USD - edge - 1] {
+        publish_cross(&f, &nav_feed, &fx_feed, rate);
+        assert_eq!(
+            f.client.try_quote(&f.shares, &ONE, &f.eurc),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+    }
+    let shares = 1_000 * ONE;
+    for rate in [EUR_USD + edge, EUR_USD - edge] {
+        publish_cross(&f, &nav_feed, &fx_feed, rate);
+        let ceiling = f.client.quote(&f.shares, &shares, &f.eurc).max_principal;
+        assert_eq!(
+            ceiling,
+            shares * eur_price_at(rate.max(EUR_USD)) / 10i128.pow(NAV_DECIMALS) * 9_750 / 10_000
+        );
+        assert_eq!(
+            f.client.try_open_repo(
+                &f.borrower,
+                &offer_id,
+                &f.shares,
+                &shares,
+                &(ceiling + 1),
+                &DAY,
+            ),
+            Err(Ok(Error::LoanTooLarge))
+        );
+        f.client
+            .open_repo(&f.borrower, &offer_id, &f.shares, &shares, &ceiling, &DAY);
+    }
 }
 
 #[test]

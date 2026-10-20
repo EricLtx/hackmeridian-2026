@@ -2949,6 +2949,9 @@ fn check_fund_config(env: &Env, config: &FundConfig) -> Result<(), Error> {
             {
                 return Err(Error::OutsideEnvelope);
             }
+            // S22. The valuation divides by the higher of the rate and the
+            // reference (`oracle::value`), so an admitted rate overvalues
+            // the shares by at most the band.
             if fx.band_bps > fx.haircut_bps {
                 return Err(Error::FxBandExceedsHaircut);
             }
