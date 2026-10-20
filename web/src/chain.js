@@ -110,6 +110,24 @@ function isTransient(error) {
   return /fetch|load failed|network|connection was lost|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|\b(429|50[0-4])\b/i.test(text);
 }
 
+/** An endpoint that asks to slow down (HTTP 429): Gateway.fm allows 30 requests per second per IP, shared behind a venue's NAT. */
+function isRateLimited(error) {
+  return error?.response?.status === 429 || /status code 429\b/.test(String(error?.message ?? ""));
+}
+
+/** The wait before a call an endpoint refused with HTTP 429 goes there again, when it gives no usable Retry-After. */
+const RATE_LIMIT_WAIT_MS = 1000;
+/** The longest Retry-After honoured: an endpoint cannot hold a call longer than a timeout would. */
+const MAX_RETRY_AFTER_MS = 5000;
+
+/** The wait a 429 asks for: its Retry-After in seconds when the browser can read it (the endpoint must expose the header), else about a second. */
+function retryAfterMs(error) {
+  const headers = error?.response?.headers;
+  const raw = typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"];
+  const seconds = raw === null || raw === undefined || raw === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : RATE_LIMIT_WAIT_MS;
+}
+
 /** Ledgers the endpoint in use may trail the highest one before calls move to another endpoint. */
 export const STALE_LEDGERS = 10;
 /** Ledgers within which an endpoint counts as level with the highest: each one is read at a slightly different moment. */
@@ -118,9 +136,60 @@ export const LEVEL_LEDGERS = 1;
  * How long an endpoint whose call failed or timed out rests before calls may
  * return to it, even level: a public RPC that answers its height but is slow
  * to simulate (8.5 s on 20 October) would otherwise be left and rejoined at
- * every pass.
+ * every pass. It is the first rest; see `restAfterFailure`.
  */
 export const RETURN_QUIET_MS = 60_000;
+/** The longest rest of an endpoint that keeps failing soon after calls return to it. */
+export const MAX_REST_MS = 600_000;
+/**
+ * Calls in flight on one endpoint at most; the others wait for a slot. One
+ * board pass sent 31 requests within a second to Gateway.fm, whose limit is
+ * 30 per second per IP.
+ */
+export const MAX_IN_FLIGHT = 6;
+
+/**
+ * The rest of an endpoint that just failed a call, in milliseconds, from
+ * its `{ restMs, failedAt, returnedAt }` (its rest so far, its previous
+ * failure, when calls last came to it) and the time `now`. A first failure
+ * rests RETURN_QUIET_MS. An endpoint that fails within its rest period after
+ * calls returned to it rests twice as long (60, 120, 240 s... up to
+ * MAX_REST_MS); one that served calls quietly for longer starts again from
+ * RETURN_QUIET_MS. On 20 October the public endpoint answered its height at
+ * once but about 7 % of its calls took 6 to 15 s: a fixed rest returned to
+ * it, and left it again, about once a minute.
+ */
+export function restAfterFailure({ restMs, failedAt, returnedAt } = {}, now = Date.now()) {
+  const rest = Number.isFinite(restMs) && restMs > 0 ? restMs : RETURN_QUIET_MS;
+  const soon = Number.isFinite(failedAt) && Number.isFinite(returnedAt) && returnedAt >= failedAt && now - returnedAt < rest;
+  return soon ? Math.min(rest * 2, MAX_REST_MS) : RETURN_QUIET_MS;
+}
+
+/** Whether `endpoint` is inside its rest after a failed call, at time `now`. */
+const resting = (endpoint, now = Date.now()) => now - (endpoint.failedAt ?? -Infinity) < (endpoint.restMs ?? RETURN_QUIET_MS);
+
+/** One of the MAX_IN_FLIGHT slots of `endpoint`: resolves a function that gives it back, once one is free. */
+function slotOn(endpoint) {
+  endpoint.inFlight ??= 0;
+  endpoint.waiting ??= [];
+  return new Promise((resolve) => {
+    const grant = () => {
+      let given = false;
+      resolve(() => {
+        if (given) return;
+        given = true;
+        const next = endpoint.waiting.shift();
+        if (next) next(); // the slot passes to the next call waiting
+        else endpoint.inFlight -= 1;
+      });
+    };
+    if (endpoint.inFlight < MAX_IN_FLIGHT) {
+      endpoint.inFlight += 1;
+      grant();
+    } else endpoint.waiting.push(grant);
+  });
+}
+
 /**
  * How long the height poll may hold a refresh pass: per endpoint, getHealth
  * and the getLatestLedger asked after it share this one budget, and the
@@ -553,22 +622,45 @@ export class Chain {
    * made on endpoint `from`. Many calls run at once: only the first failure
    * on the endpoint in use switches; the others find the switch done and
    * retry on the new endpoint, so the interface never bounces between them.
-   * False when there is no other endpoint or the error is not the network's.
+   * The endpoint left rests (`restAfterFailure`); the next one is the first
+   * after it that is not resting, or simply the next when every other one
+   * rests. False when there is no other endpoint, the error is not the
+   * network's, or it is an HTTP 429: back-pressure, which `net` waits out on
+   * the same endpoint.
    */
   failover(error, from = this.active) {
     if (this.endpoints.length < 2) return false;
     if (!(error instanceof RpcTimeout) && !isTransient(error)) return false;
+    if (isRateLimited(error)) return false;
     if (from !== this.active) return true;
+    const now = Date.now();
     const previous = this.endpoints[this.active];
-    previous.failures += 1;
-    previous.failedAt = Date.now();
-    this.active = (this.active + 1) % this.endpoints.length;
+    previous.failures = (previous.failures ?? 0) + 1;
+    previous.restMs = restAfterFailure(previous, now);
+    previous.failedAt = now;
+    this.moveTo(this.nextEndpoint(this.active, now), now);
     try {
       this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
     } catch {
       // A failing listener never stops a call.
     }
     return true;
+  }
+
+  /** The first endpoint after `from` that is not resting at `now`; the next one when every other one rests. */
+  nextEndpoint(from, now = Date.now()) {
+    const count = this.endpoints.length;
+    for (let step = 1; step < count; step += 1) {
+      const index = (from + step) % count;
+      if (!resting(this.endpoints[index], now)) return index;
+    }
+    return (from + 1) % count;
+  }
+
+  /** Sends calls to endpoint `index` from `now` on: the time counts for its rest if it fails soon after (`restAfterFailure`). */
+  moveTo(index, now = Date.now()) {
+    this.active = index;
+    this.endpoints[index].returnedAt = now;
   }
 
   /**
@@ -625,20 +717,20 @@ export class Chain {
    * endpoint's latest ledger and close time and applies `pickEndpoint`, so a
    * fallback is left for the first endpoint once that one is level or
    * current again, and, when it was left after a failed call, has rested
-   * RETURN_QUIET_MS. The page runs it before each refresh, within
+   * (`restAfterFailure`). The page runs it before each refresh, within
    * HEIGHT_BUDGET_MS (`pollHeights`): the pass, its clock included, then
    * reads an endpoint that is current. Never throws; returns the reads.
    */
   async checkHeights() {
     if (this.endpoints.length < 2) return [];
     const reads = await this.heights();
-    // An endpoint that just failed a call is no target yet, however level it is (RETURN_QUIET_MS).
+    // An endpoint that failed a call is no target before its rest is over, however level it is.
     const now = Date.now();
-    const candidates = reads.map((read, i) => (now - (this.endpoints[i].failedAt ?? -Infinity) < RETURN_QUIET_MS ? null : read));
+    const candidates = reads.map((read, i) => (resting(this.endpoints[i], now) ? null : read));
     const { index, reason, behind } = pickEndpoint(candidates, this.active, now / 1000);
     if (reason && index !== this.active) {
       const previous = this.endpoints[this.active];
-      this.active = index;
+      this.moveTo(index, now);
       try {
         this.onRpcChange?.({ from: previous.host, to: this.endpoints[index].host, reason, behind });
       } catch {
@@ -649,30 +741,48 @@ export class Chain {
   }
 
   /**
-   * Runs `call` on the endpoint in use, within `timeoutMs`. A timeout or a
-   * transient network failure moves at once to the next endpoint when there
-   * is one, else waits and retries; at most `attempts` calls.
+   * Runs `call` on the endpoint in use, within `timeoutMs`, holding one of
+   * its MAX_IN_FLIGHT slots; a call that waited for a slot while calls moved
+   * goes to the endpoint now in use. A timeout or a transient network
+   * failure moves at once to the next endpoint when there is one, else waits
+   * and retries. An HTTP 429 is back-pressure: the call waits as asked
+   * (`retryAfterMs`) and goes to the same endpoint again. At most `attempts`
+   * calls.
    */
   async net(call, { timeoutMs = RPC_TIMEOUT_MS, attempts = 4 } = {}) {
     let delay = 800;
     let moves = 0;
-    for (let attempt = 1; ; attempt += 1) {
+    for (let attempt = 1; ; ) {
       const index = this.active;
       const endpoint = this.endpoints[index];
+      const release = await slotOn(endpoint);
+      if (index !== this.active) {
+        // Calls moved while this one waited: it follows them, and that counts as its move, so that it
+        // backs off rather than bouncing back when the new endpoint fails it too.
+        release();
+        moves += 1;
+        continue;
+      }
       const started = Date.now();
+      let error;
       try {
         const result = await withTimeout(call(), timeoutMs);
         endpoint.lastMs = Date.now() - started;
         endpoint.failures = 0;
         return result;
-      } catch (error) {
-        if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
-        // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
-        if (moves < this.endpoints.length - 1 && this.failover(error, index)) moves += 1;
-        else {
-          await sleep(delay);
-          delay *= 2;
-        }
+      } catch (caught) {
+        error = caught;
+      } finally {
+        release();
+      }
+      if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
+      attempt += 1;
+      if (isRateLimited(error)) await sleep(retryAfterMs(error));
+      // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
+      else if (moves < this.endpoints.length - 1 && this.failover(error, index)) moves += 1;
+      else {
+        await sleep(delay);
+        delay *= 2;
       }
     }
   }
