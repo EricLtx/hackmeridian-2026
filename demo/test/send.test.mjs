@@ -4,12 +4,13 @@
 // fee beyond the cap. Each is refused before anything is signed or sent.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { beforeEach, test } from "node:test";
 
 process.env.STELLAR_RPC_URLS = "https://rpc.stub.invalid";
 process.env.OPEN_WINDOW_STATE = "offline-test";
 
-const { Account, Address, Keypair, Networks, Operation, SorobanDataBuilder, TransactionBuilder, nativeToScVal, rpc, xdr } = await import("@stellar/stellar-sdk");
+const { Account, Address, Keypair, Networks, Operation, SorobanDataBuilder, StrKey, TransactionBuilder, nativeToScVal, rpc, xdr } = await import("@stellar/stellar-sdk");
 const lib = await import("../lib.mjs");
 const { server } = lib;
 
@@ -134,6 +135,32 @@ test("a resource fee above 25 XLM is refused; a call may raise its cap", async (
   assert.equal(sent.length, 0);
   await lib.invoke(state, "governor", OW, "pause", pauseArgs(), { maxResourceFee: 30n * XLM });
   assert.equal(sent.length, 1);
+});
+
+test("an upload writes only the code it uploads, under its own cap", async () => {
+  const wasm = Buffer.from([0, 97, 115, 109, 1, 0, 0, 0]);
+  const upload = Operation.uploadContractWasm({ wasm });
+  answer.readOnly = [];
+  answer.readWrite = [lib.codeKey(createHash("sha256").update(wasm).digest())];
+  answer.fee = 50n * XLM;
+  await lib.send(state, "governor", upload, "upload", { maxResourceFee: lib.UPLOAD_MAX_FEE });
+  assert.equal(sent.length, 1);
+  answer.readWrite = [lib.codeKey(Buffer.alloc(32, 6))];
+  await assert.rejects(lib.send(state, "governor", upload, "upload", { maxResourceFee: lib.UPLOAD_MAX_FEE }), /writes a contract's code, which this call does not touch/);
+  assert.equal(sent.length, 1);
+});
+
+test("a contract creation writes its new contract's data, and nothing else", async () => {
+  const deployer = roles.governor.publicKey();
+  const creation = Operation.createCustomContract({ address: new Address(deployer), wasmHash: Buffer.alloc(32, 1), salt: Buffer.alloc(32, 2), constructorArgs: [lib.sv.address(deployer)] });
+  // The id the network derives from the deployer and the salt.
+  const preimage = xdr.HashIdPreimage.envelopeTypeContractId(new xdr.HashIdPreimageContractId({ networkId: createHash("sha256").update(Networks.TESTNET).digest(), contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(new xdr.ContractIdPreimageFromAddress({ address: new Address(deployer).toScAddress(), salt: Buffer.alloc(32, 2) })) }));
+  const created = StrKey.encodeContract(createHash("sha256").update(preimage.toXDR()).digest());
+  answer.readWrite = [instanceKey(created)];
+  await lib.send(state, "governor", creation, "deploy");
+  assert.equal(sent.length, 1);
+  answer.readWrite = [instanceKey(FOREIGN)];
+  await assert.rejects(lib.send(state, "governor", creation, "deploy"), new RegExp(`writes data of ${FOREIGN}`));
 });
 
 test("an extension whose footprint is swapped for other entries is refused", async () => {

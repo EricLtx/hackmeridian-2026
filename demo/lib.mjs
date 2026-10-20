@@ -669,7 +669,8 @@ export function checkFootprint(state, ready, func, expected, label) {
   const known = { addresses: new Set(expected) };
   for (const id of Object.values(state.contracts ?? {})) if (typeof id === "string" && id.startsWith("C")) known.addresses.add(id);
   for (const role of Object.keys(state.keys ?? {})) known.addresses.add(publicKeyOf(state, role));
-  if (func.type === "hostFunctionTypeUploadContractWasm") known.code = new Set([hash(Buffer.from(func.wasm)).toString("hex")]);
+  // The SDK's hash() returns a Uint8Array: hex through a Buffer.
+  if (func.type === "hostFunctionTypeUploadContractWasm") known.code = new Set([Buffer.from(hash(Buffer.from(func.wasm))).toString("hex")]);
   for (const key of sorobanDataOf(ready).resources.footprint.readWrite) {
     const why = foreignWrite(key, known);
     if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; nothing signed (rpc-1)`);
