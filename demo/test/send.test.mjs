@@ -360,3 +360,24 @@ test("a restore of the instance's own code restores exactly that entry, under it
   await assert.rejects(lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE }), /above the 100\.00 XLM/);
   assert.equal(sent.length, 1);
 });
+
+test("naming a sentinel carries the sentinel's own signature with the guardian's transaction (STATE-1 in the contract)", async () => {
+  // rc5: set_sentinel takes the guardian's and the named key's authority.
+  // The guardian is the source; the sentinel signs its entry, as setup.mjs
+  // declares it; a host without the sentinel's key signs nothing.
+  const guardian = Keypair.random();
+  const sentinel = Keypair.random();
+  const host = { keys: { guardian: guardian.secret(), sentinel: sentinel.secret() }, contracts: { openWindow: OW } };
+  const args = [lib.sv.address(sentinel.publicKey())];
+  const call = callOf(OW, "set_sentinel", args);
+  answer.auth = [new xdr.SorobanAuthorizationEntry({ credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(), rootInvocation: node(call) }), entryFor(sentinel.publicKey(), call)];
+  await lib.invoke(host, "guardian", OW, "set_sentinel", args, { cosigners: ["sentinel"] });
+  assert.equal(sent.length, 1);
+  const [own, named] = sent[0].operations[0].auth;
+  assert.equal(own.credentials.type, "sorobanCredentialsSourceAccount");
+  assert.equal(Address.fromScAddress(named.credentials.address.address).toString(), sentinel.publicKey());
+  assert.equal(named.credentials.address.signature.type, "scvVec", "the sentinel's entry carries its signature");
+  const withoutKey = { keys: { guardian: guardian.secret() }, contracts: { openWindow: OW } };
+  await assert.rejects(lib.invoke(withoutKey, "guardian", OW, "set_sentinel", args), new RegExp(`no local key can authorize ${sentinel.publicKey()}`));
+  assert.equal(sent.length, 1);
+});

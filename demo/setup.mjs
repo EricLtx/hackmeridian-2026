@@ -459,7 +459,9 @@ async function main() {
  * The sentinel (decision S26, rc4): a key the monitoring host holds, which
  * the guardian names and which may only pause and cancel proposals. The
  * guardian key itself leaves the host. Skipped, and left to a rerun, while the
- * instance still runs code without the role.
+ * instance still runs code without the role. Since rc5 the named key signs
+ * its naming too (review finding STATE-1): its key is on this host, created
+ * and funded first, and declared as the call's co-signer.
  */
 async function nameSentinel(state, ow) {
   step("Sentinel: the guardian names the monitoring key");
@@ -475,10 +477,11 @@ async function nameSentinel(state, ow) {
   if (!state.keys.sentinel) {
     state.keys.sentinel = Keypair.random().secret();
     saveState(state);
-    await friendbot(keypair(state, "sentinel").publicKey());
   }
   const sentinel = keypair(state, "sentinel").publicKey();
-  await invoke(state, "guardian", ow, "set_sentinel", [sv.address(sentinel)]);
+  // Its signature needs its account: funded once (friendbot accepts a rerun).
+  await friendbot(sentinel);
+  await invoke(state, "guardian", ow, "set_sentinel", [sv.address(sentinel)], { cosigners: ["sentinel"] });
   state.done.sentinel = true;
   saveState(state);
   console.log(`  sentinel ${sentinel.slice(0, 8)}…: pause and cancel only; the monitor acts with it from now on`);
