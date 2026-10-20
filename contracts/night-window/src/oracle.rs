@@ -48,6 +48,9 @@ pub struct FxValuation {
 pub struct Valuation {
     /// NAV as reported by the NAV oracle, in its own base.
     pub nav: Reading,
+    /// Whether the fallback feed supplied the NAV, the primary being stale
+    /// or silent (review finding VAL-5, 20 October 2026).
+    pub fallback: bool,
     /// The FX leg, for a cross price; `None` for a fund priced directly.
     pub fx: Option<FxValuation>,
     /// Share price in the loan currency.
@@ -150,21 +153,22 @@ pub fn read_fallback(
 /// a fresh fallback stands in; when both are, the primary's error is
 /// returned, as without a fallback. A primary that publishes an invalid
 /// price is not replaced: that is a faulty feed to investigate, not an
-/// outage.
+/// outage. Returns the reading and whether the fallback supplied it.
 pub fn read_nav(
     env: &Env,
     config: &FundConfig,
     state: &FundState,
     fallback: Option<&(FallbackFeed, u32)>,
-) -> Result<Reading, Error> {
+) -> Result<(Reading, bool), Error> {
     let Some((feed, decimals)) = fallback else {
-        return read_fresh(
+        let nav = read_fresh(
             env,
             &config.oracle,
             &config.oracle_asset,
             state.nav_decimals,
             config.nav_max_age_secs,
-        );
+        )?;
+        return Ok((nav, false));
     };
     let primary = read_fresh_or_silent(
         env,
@@ -176,8 +180,10 @@ pub fn read_nav(
     );
     let backup = read_fallback(env, config, feed, *decimals, state.nav_decimals);
     match primary {
-        Ok(nav) => agree(nav, backup, feed),
-        Err(error @ (Error::StalePrice | Error::NoPrice)) => backup.map_err(|_| error),
+        Ok(nav) => Ok((agree(nav, backup, feed)?, false)),
+        Err(error @ (Error::StalePrice | Error::NoPrice)) => {
+            backup.map(|nav| (nav, true)).map_err(|_| error)
+        }
         Err(error) => Err(error),
     }
 }
@@ -280,12 +286,13 @@ pub fn value(
     state: &FundState,
     fallback: Option<&(FallbackFeed, u32)>,
 ) -> Result<Valuation, Error> {
-    let nav = read_nav(env, config, state, fallback)?;
+    let (nav, from_fallback) = read_nav(env, config, state, fallback)?;
     check_corridor(config, state, &nav)?;
     let haircut = Bps::haircut(config.haircut_bps)?;
     match &config.source {
         PriceSource::Direct => Ok(Valuation {
             nav,
+            fallback: from_fallback,
             fx: None,
             price: nav.price,
             haircut,
@@ -319,6 +326,7 @@ pub fn value(
             };
             Ok(Valuation {
                 nav,
+                fallback: from_fallback,
                 fx: Some(fx),
                 price: nav.price.divided_by(fx.applied)?,
                 haircut: haircut.plus(Bps::haircut(leg.haircut_bps)?)?,

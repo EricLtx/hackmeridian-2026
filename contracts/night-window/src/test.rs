@@ -2500,6 +2500,7 @@ fn opening_a_repo_publishes_its_valuation_and_any_move_of_the_reference() {
             fund: f.shares.clone(),
             nav,
             nav_time,
+            fallback: false,
             fx: 0,
             fx_applied: 0,
             fx_time: 0,
@@ -2586,6 +2587,7 @@ fn opening_a_cross_priced_repo_publishes_its_fx_leg() {
                     fund: f.shares.clone(),
                     nav: NAV_USD,
                     nav_time: T0,
+                    fallback: false,
                     fx: rate,
                     fx_applied: applied,
                     fx_time: T0,
@@ -2596,6 +2598,52 @@ fn opening_a_cross_priced_repo_publishes_its_fx_leg() {
             ]
         );
     }
+}
+
+/// Review finding VAL-5 (20 October 2026): `RepoValued` recorded the NAV
+/// and its time, not which feed supplied them, so a loan priced by the
+/// fallback while the primary was stale read exactly like one priced by the
+/// primary, a value the primary never published. It now says so: false
+/// while the primary is fresh, even with a fallback that agrees, true when
+/// the fallback stands in.
+#[test]
+fn an_opening_records_whether_the_fallback_priced_it() {
+    let (f, offer_id, feed) = ready_with_fallback();
+    let valued = |repo_id: u64, nav: i128, nav_time: u64, fallback: bool| {
+        RepoValued {
+            repo_id,
+            fund: f.shares.clone(),
+            nav,
+            nav_time,
+            fallback,
+            fx: 0,
+            fx_applied: 0,
+            fx_time: 0,
+            price: nav,
+            haircut_bps: 200,
+        }
+        .to_xdr(&f.env, &f.contract_id)
+    };
+    let published = f.env.ledger().timestamp();
+    let first = open(&f, offer_id);
+    assert!(own_events(&f)
+        .events()
+        .contains(&valued(first, NAV_EUR, published, false)));
+
+    // The primary goes stale; the fallback publishes 1.0501 EUR (8 decimals).
+    advance(&f, 26 * HOUR + 1);
+    let now = f.env.ledger().timestamp();
+    publish_on(&f, &feed, NAV_EUR_8 + 10_000);
+    let second = open(&f, offer_id);
+    let nav = (NAV_EUR_8 + 10_000) * 1_000_000;
+    let events = own_events(&f);
+    assert!(events.events().contains(&valued(second, nav, now, true)));
+    assert!(!events.events().contains(&valued(second, nav, now, false)));
+    let primary = f
+        .oracle
+        .lastprice(&Asset::Stellar(f.shares.clone()))
+        .unwrap();
+    assert_eq!((primary.price, primary.timestamp), (NAV_EUR, published));
 }
 
 #[test]

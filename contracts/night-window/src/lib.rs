@@ -1740,7 +1740,7 @@ impl OpenWindow {
         steward_alive(&env, &fund, &config.steward);
         let mut state = storage::fund_state(&env, &fund)?;
         let fallback = storage::fallback_for_pricing(&env, &fund);
-        let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
+        let (nav, _) = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
         let lowered = nav.price.mantissa().min(state.reference_nav);
         let timestamp = nav.timestamp.max(state.reference_time);
         Ok(set_reference(&env, &fund, &mut state, lowered, timestamp))
@@ -1768,7 +1768,7 @@ impl OpenWindow {
         let config = storage::fund(&env, &fund)?;
         let mut state = storage::fund_state(&env, &fund)?;
         let fallback = storage::fallback_for_pricing(&env, &fund);
-        let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
+        let (nav, _) = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
         oracle::check_corridor(&config, &state, &nav)?;
         if let Some(next) = oracle::next_reference(&config, &state, &nav)? {
             return Ok(set_reference(&env, &fund, &mut state, next, nav.timestamp));
@@ -2081,6 +2081,7 @@ impl OpenWindow {
             fund: fund.clone(),
             nav: valuation.nav.price.mantissa(),
             nav_time: valuation.nav.timestamp,
+            fallback: valuation.fallback,
             fx,
             fx_applied,
             fx_time,
