@@ -10,7 +10,7 @@ import { beforeEach, test } from "node:test";
 process.env.STELLAR_RPC_URLS = "https://rpc.stub.invalid";
 process.env.OPEN_WINDOW_STATE = "offline-test";
 
-const { Account, Address, Keypair, Networks, Operation, SorobanDataBuilder, StrKey, TransactionBuilder, nativeToScVal, rpc, xdr } = await import("@stellar/stellar-sdk");
+const { Account, Address, Asset, Keypair, Networks, Operation, SorobanDataBuilder, StrKey, TransactionBuilder, nativeToScVal, rpc, xdr } = await import("@stellar/stellar-sdk");
 const lib = await import("../lib.mjs");
 const { server } = lib;
 
@@ -32,11 +32,11 @@ function callOf(contract, fn, args) {
   return tx.operations[0].func.invokeContract;
 }
 
-/** An address-credential entry for `address` over `call`, unsigned, as a simulation records it. */
-function entryFor(address, call) {
+/** An address-credential entry for `address` over `call` (and the calls under it), unsigned, as a simulation records it. */
+function entryFor(address, call, subInvocations = []) {
   return new xdr.SorobanAuthorizationEntry({
     credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(new xdr.SorobanAddressCredentials({ address: new Address(address).toScAddress(), nonce: xdr.Int64.fromString("7"), signatureExpirationLedger: 0, signature: xdr.ScVal.scvVoid() })),
-    rootInvocation: new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(call), subInvocations: [] }),
+    rootInvocation: new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(call), subInvocations }),
   });
 }
 
@@ -234,4 +234,58 @@ test("an endpoint that holds the transaction back cannot have it called expired 
   const maxTime = Number(sent[0].timeBounds.maxTime);
   assert.match(verdict ?? "", /expired before landing; nothing changed on chain, rerun the step$/);
   assert.ok(Date.now() / 1000 > maxTime + lib.EXPIRY_MARGIN_SECS, `called expired ${(maxTime - Date.now() / 1000).toFixed(0)} s before the transaction's own limit`);
+});
+
+// Below the root of an authorization tree (review finding TOOL-5): only a
+// transfer by the signer of a deployment token into Open Window is signed.
+const SHARES = "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB";
+const EURO = "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX";
+const deployment = { ...state, contracts: { openWindow: OW, shares: SHARES, euro: EURO } };
+const node = (call, subInvocations = []) => new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(call), subInvocations });
+const sourceEntry = (root) => new xdr.SorobanAuthorizationEntry({ credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(), rootInvocation: root });
+const transfer = (token, from, to, amount = 5n) => callOf(token, "transfer", [lib.sv.address(from), lib.sv.address(to), lib.sv.i128(amount)]);
+
+test("a call some contract on the path could make in the signer's name is refused under the operation's own call (TOOL-5)", async () => {
+  // set_stablecoin calls the candidate token's decimals(): a compromised
+  // token makes the governor's XLM move inside that call.
+  const xlm = Asset.native().contractId(Networks.TESTNET);
+  const attacker = Keypair.random().publicKey();
+  const args = [lib.sv.address(FOREIGN), lib.sv.symbol("EUR")];
+  answer.auth = [sourceEntry(node(callOf(OW, "set_stablecoin", args), [node(transfer(xlm, roles.governor.publicKey(), attacker, 10_000n * XLM))]))];
+  await assert.rejects(lib.invoke(deployment, "governor", OW, "set_stablecoin", args), /asks governor \(G.{5}…\) to authorize C.{7}….transfer inside this call, which is not a transfer of its own tokens into Open Window; nothing signed \(rpc-1\)$/);
+  // A compromised feed under a re-anchor takes the share token's admin role with the steward's signature.
+  const reanchor = [lib.sv.address(SHARES), lib.sv.i128(1n), lib.sv.i128(1n)];
+  const takeover = node(callOf(SHARES, "set_admin", [lib.sv.address(attacker)]));
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "propose_reanchor", reanchor), [takeover])];
+  await assert.rejects(lib.invoke(deployment, "governor", OW, "propose_reanchor", reanchor, { cosigners: ["steward"] }), /asks steward \(G.{5}…\) to authorize CAEXP2UG….set_admin inside this call/);
+  assert.equal(simulations, 2, "refused at the first simulation each time: nothing signed went out");
+  assert.equal(sent.length, 0);
+});
+
+test("a deployment token's transfer into Open Window by its signer is signed; elsewhere, by another, or deeper, it is refused (TOOL-5)", async () => {
+  // open_repo pulls the borrower's shares (token_io::pull): the tree the host records.
+  const borrower = roles.lender.publicKey();
+  const args = [lib.sv.address(borrower), lib.sv.u64(1), lib.sv.address(SHARES), lib.sv.i128(10n), lib.sv.i128(9n), lib.sv.u64(3600)];
+  const open = callOf(OW, "open_repo", args);
+  answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n))]))];
+  await lib.invoke(deployment, "lender", OW, "open_repo", args);
+  assert.equal(sent.length, 1);
+  // A co-signer's own pull is signed with its entry too.
+  const offer = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "offer_test", offer), [node(transfer(EURO, roles.steward.publicKey(), OW))])];
+  await lib.invoke(deployment, "governor", OW, "offer_test", offer, { cosigners: ["steward"] });
+  assert.equal(sent.length, 2);
+  const refusedWith = async (subs) => {
+    answer.auth = [sourceEntry(node(open, subs))];
+    await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /inside this call, which is not a transfer of its own tokens into Open Window/);
+  };
+  await refusedWith([node(transfer(SHARES, borrower, FOREIGN, 10n))]); // to another address
+  await refusedWith([node(transfer(SHARES, roles.keeper.publicKey(), OW, 10n))]); // from another holder
+  await refusedWith([node(transfer(FOREIGN, borrower, OW, 10n))]); // a token the deployment does not know
+  await refusedWith([node(transfer(SHARES, borrower, OW, 10n), [node(callOf(SHARES, "set_admin", [lib.sv.address(FOREIGN)]))])]); // deeper
+  assert.equal(sent.length, 2);
+  // A token the state does not list is accepted once the caller declares it.
+  answer.auth = [sourceEntry(node(open, [node(transfer(FOREIGN, borrower, OW, 10n))]))];
+  await lib.invoke(deployment, "lender", OW, "open_repo", args, { tokens: [FOREIGN] });
+  assert.equal(sent.length, 3);
 });

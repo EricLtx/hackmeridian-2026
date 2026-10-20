@@ -658,21 +658,66 @@ const signedForSimulation = (count, expiry) =>
  * authority as source-account credentials, which only this transaction
  * carries. An address credential for the source would be a signature that
  * any transaction, from any fee payer, could carry until its expiry.
- * `source` is the source's G-address; `tail` ends the message.
+ *
+ * Below the root, the only node signed is a transfer by the entry's signer
+ * of a token of this deployment into the Open Window contract (review
+ * finding TOOL-5): see `checkSubInvocations`.
+ *
+ * `source` is the source's G-address, `tail` ends the message, `tokens`
+ * adds token contracts the state does not list (a registered stablecoin).
  */
-export function checkAuthEntries(state, entries, func, expected, label, source = null, tail = NOTHING_SIGNED) {
+export function checkAuthEntries(state, entries, func, expected, label, { source = null, tail = NOTHING_SIGNED, tokens = [] } = {}) {
+  const allowed = deploymentTokens(state, tokens);
   for (const entry of entries) {
     const root = entry.rootInvocation.function;
     if (!isOwnCall(root, func)) {
       throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; ${tail} (rpc-1)`);
     }
+    let signer = source;
     if (isAddressCredential(entry)) {
       const address = credentialAddress(entry);
       if (source && address === source) {
         throw new Error(`${label}: the simulation asks the transaction's source, ${roleOf(state, address)}, to sign this call apart from the transaction, which an honest endpoint never does and which another transaction could replay; ${tail} (rpc-1)`);
       }
       if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; ${tail} (rpc-1)`);
+      signer = address;
     }
+    checkSubInvocations(state, entry.rootInvocation, signer, allowed, label, tail);
+  }
+}
+
+/** The token contracts a transfer into Open Window may move: every contract of this deployment but Open Window itself, and those the caller declares. */
+function deploymentTokens(state, extra = []) {
+  const ow = state.contracts?.openWindow;
+  const ids = Object.values(state.contracts ?? {}).filter((id) => typeof id === "string" && id.startsWith("C") && id !== ow);
+  return new Set([...ids, ...extra]);
+}
+
+/** The address an ScVal holds, or null for any other value. */
+const addressOf = (value) => (value?.type === "scvAddress" ? Address.fromScAddress(value.address).toString() : null);
+
+/**
+ * Walks the tree below an entry's root, at every depth. The only node it
+ * accepts is `transfer(from, to, amount)` on a token of `tokens`, from the
+ * entry's `signer`, to the Open Window contract: how the contract pulls
+ * collateral, offer funds and repayments (token_io::pull). Any other node,
+ * a transfer elsewhere or another function, is the signer's authority over
+ * a call some contract on the path could make in its name: a compromised
+ * feed or token, say, moving the signer's funds or taking a token's admin
+ * role (review finding TOOL-5, 20 October 2026). Refused before a signature.
+ */
+function checkSubInvocations(state, node, signer, tokens, label, tail) {
+  const ow = state.contracts?.openWindow;
+  for (const sub of node.subInvocations ?? []) {
+    const fn = sub.function;
+    const call = fn.type === "sorobanAuthorizedFunctionTypeContractFn" ? armOf(fn) : null;
+    const token = call ? Address.fromScAddress(call.contractAddress).toString() : null;
+    const pull = call && String(call.functionName) === "transfer" && call.args.length === 3
+      && tokens.has(token) && addressOf(call.args[0]) === signer && addressOf(call.args[1]) === ow;
+    if (!pull) {
+      throw new Error(`${label}: the simulation asks ${signer ? roleOf(state, signer) : "the signer"} to authorize ${describeCall(fn)} inside this call, which is not a transfer of its own tokens into Open Window; ${tail} (rpc-1)`);
+    }
+    checkSubInvocations(state, sub, signer, tokens, label, tail);
   }
 }
 
@@ -799,13 +844,15 @@ async function signAuth(state, entries, expiry) {
  * the seconds including simulation and signing, and the fee in stroops.
  *
  * Before anything is signed, the simulation must authorize only this call,
- * by its source, the addresses it names and the declared `cosigners`; write
- * only entries the call touches; and ask at most `maxResourceFee` (25 XLM by
- * default). Otherwise it throws and nothing leaves this machine. The
- * entries of the co-signers are signed before the second simulation, which
- * checks them: a refusal after that point says what went out.
+ * by its source, the addresses it names and the declared `cosigners`, with
+ * nothing below it but the signers' own transfers into Open Window of a
+ * deployment token or one of `tokens`; write only entries the call touches;
+ * and ask at most `maxResourceFee` (25 XLM by default). Otherwise it throws
+ * and nothing leaves this machine. The entries of the co-signers are signed
+ * before the second simulation, which checks them: a refusal after that
+ * point says what went out.
  */
-export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE } = {}) {
+export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE, tokens = [] } = {}) {
   const begun = Date.now();
   const source = keypair(state, sourceRole);
   let tx = await build(source.publicKey(), operation);
@@ -815,7 +862,7 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
 
   const recorded = normalizeAuth(sim.result?.auth);
-  checkAuthEntries(state, recorded, func, expected, label, source.publicKey());
+  checkAuthEntries(state, recorded, func, expected, label, { source: source.publicKey(), tokens });
   let tail = NOTHING_SIGNED;
   if (recorded.some(isAddressCredential)) {
     const expiry = await signatureExpiry(label);
@@ -829,7 +876,7 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
   const ready = rpc.assembleTransaction(tx, sim).build();
   // The assembled transaction keeps our entries when we signed some, else it
   // takes the simulation's: check what is actually there.
-  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label, source.publicKey(), tail);
+  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label, { source: source.publicKey(), tail, tokens });
   checkFootprint(state, ready, func, expected, label, tail);
   checkFee(ready, maxResourceFee, label, tail);
   signTx(state, sourceRole, ready);
@@ -848,7 +895,9 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
  * Calls a contract function in a transaction. `options.cosigners` names the
  * roles the contract requires besides the source and the addresses in
  * `args` (the steward on record for `propose_fallback`, the trustee for
- * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap.
+ * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap;
+ * `options.tokens` names a token the state does not list whose transfer
+ * into Open Window the call makes (a registered stablecoin).
  */
 export function invoke(state, sourceRole, contractId, fn, args = [], options = {}) {
   const operation = Operation.invokeContractFunction({ contract: contractId, function: fn, args });
