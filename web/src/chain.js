@@ -121,7 +121,14 @@ export const LEVEL_LEDGERS = 1;
  * every pass.
  */
 export const RETURN_QUIET_MS = 60_000;
-const HEIGHT_TIMEOUT_MS = 4000;
+/**
+ * How long the height poll may hold a refresh pass: per endpoint, getHealth
+ * and the getLatestLedger asked after it share this one budget, and the
+ * page waits no longer for the whole poll (`pollHeights`). The public
+ * endpoint's getHealth took 4.6 to 9.1 s at times on 20 October: such an
+ * answer is skipped for that pass, not waited for.
+ */
+export const HEIGHT_BUDGET_MS = 1500;
 /**
  * Seconds the endpoint in use may go without closing a ledger, by its own
  * close time against the local clock, before another endpoint's greater
@@ -571,19 +578,23 @@ export class Chain {
    * `getLatestLedger` now ships the whole ledger's metadata (about 330 KB on
    * testnet); an endpoint that calls itself unhealthy (its last ledger is
    * old) is asked `getLatestLedger`, since a lagging endpoint is what the
-   * comparison looks for.
+   * comparison looks for. Both calls share one budget per endpoint,
+   * `budgetMs`: the poll ends within it whatever the endpoints do.
    */
-  async heights() {
+  async heights(budgetMs = HEIGHT_BUDGET_MS) {
     return Promise.all(
       this.endpoints.map(async (endpoint) => {
+        const until = Date.now() + budgetMs;
         try {
-          const health = await withTimeout(endpoint.server.getHealth(), HEIGHT_TIMEOUT_MS);
+          const health = await withTimeout(endpoint.server.getHealth(), budgetMs);
           if (Number.isSafeInteger(health?.latestLedger)) return heightRead(health.latestLedger, health.latestLedgerCloseTime);
         } catch (error) {
           if (error instanceof RpcTimeout || isTransient(error)) return null;
         }
+        const left = until - Date.now();
+        if (left <= 0) return null;
         try {
-          const latest = await withTimeout(endpoint.server.getLatestLedger(), HEIGHT_TIMEOUT_MS);
+          const latest = await withTimeout(endpoint.server.getLatestLedger(), left);
           return heightRead(latest?.sequence, latest?.closeTime);
         } catch {
           return null;
@@ -593,13 +604,30 @@ export class Chain {
   }
 
   /**
+   * `checkHeights`, but a pass never waits longer than `budgetMs` for it.
+   * A move it decides later still applies: every call reads the endpoint in
+   * use when it runs. Resolves the reads, or null when the budget ran out.
+   */
+  async pollHeights(budgetMs = HEIGHT_BUDGET_MS) {
+    let timer;
+    const bound = new Promise((resolve) => {
+      timer = setTimeout(resolve, budgetMs, null);
+    });
+    try {
+      return await Promise.race([this.checkHeights(), bound]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * Moves calls away from an endpoint that answers but lags: compares every
    * endpoint's latest ledger and close time and applies `pickEndpoint`, so a
    * fallback is left for the first endpoint once that one is level or
    * current again, and, when it was left after a failed call, has rested
-   * RETURN_QUIET_MS. The page runs it before each refresh: the pass, its
-   * clock included, then reads an endpoint that is current. Never throws;
-   * returns the reads.
+   * RETURN_QUIET_MS. The page runs it before each refresh, within
+   * HEIGHT_BUDGET_MS (`pollHeights`): the pass, its clock included, then
+   * reads an endpoint that is current. Never throws; returns the reads.
    */
   async checkHeights() {
     if (this.endpoints.length < 2) return [];

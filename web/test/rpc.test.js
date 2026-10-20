@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Chain, RETURN_QUIET_MS, RpcTimeout, pickEndpoint, rpcChangeText, rpcServer, withTimeout } from "../src/chain.js";
+import { Chain, HEIGHT_BUDGET_MS, RETURN_QUIET_MS, RpcTimeout, pickEndpoint, rpcChangeText, rpcServer, withTimeout } from "../src/chain.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 const never = () => new Promise(() => {});
@@ -259,6 +259,40 @@ test("the height poll: a fallback that over-reports its height takes no call fro
   back.active = 1;
   await back.checkHeights();
   assert.equal(back.rpcInfo().host, "first.example");
+});
+
+test("the height poll never holds a refresh pass more than about 1.5 s", async () => {
+  // WEB-3: it ran before every pass, the first included, and waited 4 s for a silent endpoint, 8 s with its fallback.
+  assert.equal(HEIGHT_BUDGET_MS, 1500);
+  const now = () => Math.floor(Date.now() / 1000);
+  const health = async () => ({ status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(now()) });
+  const timed = async (run) => {
+    const started = Date.now();
+    const value = await run();
+    return { value, ms: Date.now() - started };
+  };
+
+  // One endpoint never answers getHealth: the poll and the pass's bounded wait both end at the budget.
+  const silent = chainWith(fake("first.example", { getHealth: health }), fake("silent.example", { getHealth: never, getLatestLedger: never }));
+  const poll = await timed(() => silent.checkHeights());
+  assert.ok(poll.ms < 1700, `checkHeights took ${poll.ms} ms`);
+  assert.equal(poll.value[0].height, 100);
+  assert.equal(poll.value[1], null);
+  const bounded = await timed(() => silent.pollHeights());
+  assert.ok(bounded.ms < 1700, `pollHeights took ${bounded.ms} ms`);
+
+  // An unhealthy endpoint that refuses getHealth after 1.2 s, then hangs on getLatestLedger: one budget for both.
+  const refuses = () => new Promise((_, reject) => setTimeout(() => reject({ code: -32603, message: "latency (95s) since last known ledger closed is too high (>30s)" }), 1200));
+  const slow = chainWith(fake("first.example", { getHealth: health }), fake("unhealthy.example", { getHealth: refuses, getLatestLedger: never }));
+  const shared = await timed(() => slow.checkHeights());
+  assert.ok(shared.ms < 1700, `getHealth and getLatestLedger shared ${shared.ms} ms`);
+
+  // Whatever holds the poll, the pass waits at most the budget; a move decided later applies to later calls.
+  const stuck = chainWith(fake("first.example", { getHealth: health }), fake("second.example", { getHealth: health }));
+  stuck.checkHeights = never;
+  const race = await timed(() => stuck.pollHeights(100));
+  assert.equal(race.value, null);
+  assert.ok(race.ms < 400, `pollHeights(100) took ${race.ms} ms`);
 });
 
 test("every move between endpoints is told in a sentence", () => {

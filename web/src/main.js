@@ -1252,8 +1252,9 @@ async function refreshAll({ history = false } = {}) {
   S.refreshing = true;
   const updated = $("board-updated");
   try {
-    // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger.
-    await S.chain.checkHeights();
+    // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger;
+    // the poll holds the pass 1.5 s at most (a silent endpoint), and a move it decides later applies to later calls.
+    await S.chain.pollHeights();
     await refreshBoard();
     if (S.historyDue) {
       S.historyDue = false;
