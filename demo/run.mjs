@@ -96,11 +96,11 @@ async function pause(next) {
   rl.close();
 }
 
-/** Sends a transaction, prints its latency and link, and records it. */
-async function tx(label, role, contract, fn, fnArgs) {
+/** Sends a transaction, prints its latency and link, and records it. `options` go to `invoke` (the token a repurchase repays in). */
+async function tx(label, role, contract, fn, fnArgs, options = {}) {
   process.stdout.write(`  ${label} … `);
   try {
-    const result = await invoke(state, role, contract, fn, fnArgs);
+    const result = await invoke(state, role, contract, fn, fnArgs, options);
     const fee = result.fee === null ? "" : `, fee ${(Number(result.fee) / 1e7).toFixed(4)} XLM`;
     console.log(green(`confirmed in ${result.seconds.toFixed(1)} s`) + dim(` (${result.total.toFixed(1)} s with simulation${fee})`));
     console.log(dim(`    ${explorer(result.hash)}`));
@@ -133,10 +133,10 @@ async function allowed(label, role, contract, fn, fnArgs) {
 }
 
 /** Retries a cleanup transaction: on stage, a failed cleanup must not go unnoticed. */
-async function cleanup(label, role, contract, fn, fnArgs) {
+async function cleanup(label, role, contract, fn, fnArgs, options = {}) {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      return await tx(label, role, contract, fn, fnArgs);
+      return await tx(label, role, contract, fn, fnArgs, options);
     } catch (error) {
       console.log(dim(`    attempt ${attempt}: ${error.message}`));
       await sleep(2000 * attempt);
@@ -152,6 +152,14 @@ async function cleanup(label, role, contract, fn, fnArgs) {
 const balance = (token, who) => read(state, token, "balance", [sv.address(who)]);
 const isPaused = () => read(state, C.openWindow, "is_paused");
 const getRepo = (id) => read(state, C.openWindow, "get_repo", [sv.u64(id)]);
+
+/**
+ * The `invoke` options of a repurchase: the repo's stablecoin, which the
+ * contract reads from storage and pulls from the borrower. The library
+ * signs a pull only on the token the call names or the caller declares
+ * (TOOL-5), so every repurchase declares it.
+ */
+const repayWith = async (id) => ({ tokens: [String((await getRepo(id)).stablecoin)] });
 
 /** A unit enum variant decodes as `["Open"]`; accept a bare string too. */
 const statusOf = (repo) => (Array.isArray(repo.status) ? repo.status[0] : repo.status);
@@ -431,7 +439,7 @@ async function second() {
 
   if (state.ids.secondRepo !== undefined && statusOf(await getRepo(state.ids.secondRepo)) === "Open") {
     alarm(`Repo #${state.ids.secondRepo} on the second fund is still open.`, "npm run demo -- --only=second (repurchases it first)");
-    await tx("repurchase (second fund)", "borrower", ow, "repurchase", [sv.u64(state.ids.secondRepo)]);
+    await tx("repurchase (second fund)", "borrower", ow, "repurchase", [sv.u64(state.ids.secondRepo)], await repayWith(state.ids.secondRepo));
     delete state.ids.secondRepo;
     saveState(state);
   }
@@ -454,7 +462,7 @@ async function second() {
   line("EUR outstanding, both stablecoins", `${fmt(capBefore)} → ${bold(fmt(await read(state, ow, "currency_outstanding", [sv.symbol("EUR")])))} of ${fmt(cap)} (one cap, two tokens)`);
   line("Fund 2 outstanding", `${fmt(fs2.outstanding)} → ${fmt((await read(state, ow, "get_fund_state", [fund2])).outstanding)} of ${fmt(cfg2.max_outstanding)}`);
   const interest = BigInt(await read(state, ow, "repo_due", [sv.u64(state.ids.secondRepo)]));
-  await tx("repurchase", "borrower", ow, "repurchase", [sv.u64(state.ids.secondRepo)]);
+  await tx("repurchase", "borrower", ow, "repurchase", [sv.u64(state.ids.secondRepo)], { tokens: [C.euro2] });
   delete state.ids.secondRepo;
   saveState(state);
   line("Repaid", `${fmt(principal + interest, 7, 4)} tEURB, of which interest ${fmt(interest, 7, 4)}; shares back to the borrower`);
@@ -485,7 +493,7 @@ async function third() {
     const left = await getRepo(state.ids.thirdRepo).catch(() => null);
     if (left && statusOf(left) === "Open") {
       alarm(`Repo #${state.ids.thirdRepo} on the third fund is still open.`, "npm run demo -- --only=third (repurchases it first)");
-      await tx("repurchase (third fund)", "borrower", ow, "repurchase", [sv.u64(state.ids.thirdRepo)]);
+      await tx("repurchase (third fund)", "borrower", ow, "repurchase", [sv.u64(state.ids.thirdRepo)], { tokens: [String(left.stablecoin)] });
     }
     if (await read(state, ow, "pending_release", [sv.u64(state.ids.thirdRepo)])) {
       await tx("Issuer authorizes the contract again", "issuer3", C.shares3, "set_authorized", [sv.address(ow), sv.bool(true)]);
@@ -521,7 +529,7 @@ async function third() {
   await tx("Issuer revokes the contract's authorization (native freeze)", "issuer3", C.shares3, "set_authorized", [sv.address(ow), sv.bool(false)]);
   line("Contract authorized by the issuer", red(String(await read(state, C.shares3, "authorized", [sv.address(ow)]))));
   const interest = BigInt(await read(state, ow, "repo_due", [sv.u64(state.ids.thirdRepo)]));
-  await tx("repurchase while the issuer blocks the shares", "borrower", ow, "repurchase", [sv.u64(state.ids.thirdRepo)]);
+  await tx("repurchase while the issuer blocks the shares", "borrower", ow, "repurchase", [sv.u64(state.ids.thirdRepo)], { tokens: [C.euro] });
   const pending = await read(state, ow, "pending_release", [sv.u64(state.ids.thirdRepo)]);
   line("Debt settled", `${fmt(principal + interest, 7, 4)} tEUR repaid, of which interest ${fmt(interest, 7, 4)}; the lender is whole`);
   line("Shares held back", pending ? `${fmt(pending.shares)} tSHARE owed to the borrower, recorded on chain (ReleaseDeferred)` : red("none recorded"));
@@ -647,7 +655,7 @@ async function repurchase() {
   line("Due now", `${fmt(due, 7, 4)} tEUR, of which interest ${fmt(interest, 7, 4)} (per started hour, one at least)`);
   const offerBefore = await read(state, C.openWindow, "get_offer", [sv.u64(repo.offer_id)]);
   const sharesBefore = await balance(C.shares, pub("borrower"));
-  await tx("repurchase", "borrower", C.openWindow, "repurchase", [id]);
+  await tx("repurchase", "borrower", C.openWindow, "repurchase", [id], { tokens: [String(repo.stablecoin)] });
   delete state.ids.liveRepo;
   saveState(state);
   const offerAfter = await read(state, C.openWindow, "get_offer", [sv.u64(repo.offer_id)]);
@@ -763,7 +771,7 @@ async function repair() {
   const nav = await read(state, C.navOracle, "lastprice", [asset.stellar(C.shares)]);
   line("NAV", `${price14(nav.price)} USD`);
   if (state.ids.liveRepo !== undefined && statusOf(await getRepo(state.ids.liveRepo)) === "Open") {
-    await cleanup(`Borrower repurchases repo #${state.ids.liveRepo}`, "borrower", C.openWindow, "repurchase", [sv.u64(state.ids.liveRepo)]);
+    await cleanup(`Borrower repurchases repo #${state.ids.liveRepo}`, "borrower", C.openWindow, "repurchase", [sv.u64(state.ids.liveRepo)], await repayWith(state.ids.liveRepo));
   }
   if (state.ids.liveRepo !== undefined && statusOf(await getRepo(state.ids.liveRepo)) !== "Open") {
     delete state.ids.liveRepo;

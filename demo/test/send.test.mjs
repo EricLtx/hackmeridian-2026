@@ -305,24 +305,66 @@ test("a deployment token's transfer into Open Window by its signer is signed; el
   answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n))]))];
   await lib.invoke(deployment, "lender", OW, "open_repo", args);
   assert.equal(sent.length, 1);
-  // A co-signer's own pull is signed with its entry too.
-  const offer = [lib.sv.address(FOREIGN)];
-  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "offer_test", offer), [node(transfer(EURO, roles.steward.publicKey(), OW))])];
-  await lib.invoke(deployment, "governor", OW, "offer_test", offer, { cosigners: ["steward"] });
+  // A co-signer's own pull is signed with its entry too: the lender of create_offer funds the offer in the stablecoin it names.
+  const offer = [lib.sv.address(roles.steward.publicKey()), lib.sv.address(EURO), lib.sv.i128(5n), lib.sv.u32(300), lib.sv.u64(3600), lib.sv.vec([lib.sv.address(SHARES)])];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "create_offer", offer), [node(transfer(EURO, roles.steward.publicKey(), OW))])];
+  await lib.invoke(deployment, "governor", OW, "create_offer", offer, { cosigners: ["steward"] });
   assert.equal(sent.length, 2);
-  const refusedWith = async (subs) => {
+  const refusedWith = async (subs, why = /inside this call, which is not a transfer of its own tokens into Open Window/) => {
     answer.auth = [sourceEntry(node(open, subs))];
-    await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /inside this call, which is not a transfer of its own tokens into Open Window/);
+    await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), why);
   };
   await refusedWith([node(transfer(SHARES, borrower, FOREIGN, 10n))]); // to another address
   await refusedWith([node(transfer(SHARES, roles.keeper.publicKey(), OW, 10n))]); // from another holder
-  await refusedWith([node(transfer(FOREIGN, borrower, OW, 10n))]); // a token the deployment does not know
+  await refusedWith([node(transfer(FOREIGN, borrower, OW, 10n))], /which pulls CAEXP2UG…, not that token/); // a token the call does not pull
   await refusedWith([node(transfer(SHARES, borrower, OW, 10n), [node(callOf(SHARES, "set_admin", [lib.sv.address(FOREIGN)]))])]); // deeper
   assert.equal(sent.length, 2);
-  // A token the state does not list is accepted once the caller declares it.
-  answer.auth = [sourceEntry(node(open, [node(transfer(FOREIGN, borrower, OW, 10n))]))];
-  await lib.invoke(deployment, "lender", OW, "open_repo", args, { tokens: [FOREIGN] });
-  assert.equal(sent.length, 3);
+});
+
+test("a pull is signed only under a call that pulls, on the token it names, at the amount it names, and once: never under set_stablecoin, never twice under open_repo (TOOL-5 residual)", async () => {
+  // A hostile endpoint adds the node; a compromised candidate token's
+  // decimals() would then make the call: the governor's tEUR would end up
+  // held by Open Window with no record. set_stablecoin pulls nothing.
+  const register = [lib.sv.address(FOREIGN), lib.sv.symbol("EUR")];
+  answer.auth = [sourceEntry(node(callOf(OW, "set_stablecoin", register), [node(transfer(EURO, roles.governor.publicKey(), OW, 1_000_000n * XLM))]))];
+  await assert.rejects(lib.invoke(deployment, "governor", OW, "set_stablecoin", register), /asks governor \(G.{5}…\) to authorize CC7Z4END….transfer inside this call, which pulls no token from its signer; nothing signed \(rpc-1\)$/);
+  // Under open_repo, a second pull of the borrower's whole share balance beside the real one.
+  const borrower = roles.lender.publicKey();
+  const args = [lib.sv.address(borrower), lib.sv.u64(1), lib.sv.address(SHARES), lib.sv.i128(10n), lib.sv.i128(9n), lib.sv.u64(3600)];
+  const open = callOf(OW, "open_repo", args);
+  answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n)), node(transfer(SHARES, borrower, OW, 10n ** 15n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /which pulls that token once, not twice; nothing signed/);
+  // One pull, of another amount than the shares the call names.
+  answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n ** 15n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /which moves 1000000000000000 units of it where the call names 10; nothing signed/);
+  // The other token of the deployment, which open_repo does not pull.
+  answer.auth = [sourceEntry(node(open, [node(transfer(EURO, borrower, OW, 10n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /which pulls CAEXP2UG…, not that token/);
+  assert.equal(sent.length, 0);
+  // Under create_offer, the offer's stablecoin at the offer's amount is the pull; another amount is refused.
+  const offer = [lib.sv.address(borrower), lib.sv.address(EURO), lib.sv.i128(1_000n * XLM), lib.sv.u32(300), lib.sv.u64(3600), lib.sv.vec([lib.sv.address(SHARES)])];
+  answer.auth = [sourceEntry(node(callOf(OW, "create_offer", offer), [node(transfer(EURO, borrower, OW, 1_000n * XLM))]))];
+  await lib.invoke(deployment, "lender", OW, "create_offer", offer);
+  answer.auth = [sourceEntry(node(callOf(OW, "create_offer", offer), [node(transfer(EURO, borrower, OW, 1_001n * XLM))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "create_offer", offer), /moves 10010000000 units of it where the call names 10000000000/);
+  assert.equal(sent.length, 1);
+});
+
+test("under repurchase, which reads the repo's stablecoin from storage, the pull is signed only on the token the caller declares (TOOL-5)", async () => {
+  const borrower = roles.lender.publicKey();
+  const repay = [lib.sv.u64(1)];
+  // The repayment the contract computes is not in the arguments: any amount of the declared token, once.
+  answer.auth = [sourceEntry(node(callOf(OW, "repurchase", repay), [node(transfer(EURO, borrower, OW, 1_234n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "repurchase", repay), /which pulls no token from its signer; nothing signed/);
+  await lib.invoke(deployment, "lender", OW, "repurchase", repay, { tokens: [EURO] });
+  assert.equal(sent.length, 1);
+  // Declared for repurchase: still only that token, and a declaration never widens a call that names its token.
+  answer.auth = [sourceEntry(node(callOf(OW, "repurchase", repay), [node(transfer(SHARES, borrower, OW, 1_234n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "repurchase", repay, { tokens: [EURO] }), /which pulls CC7Z4END…, not that token/);
+  const args = [lib.sv.address(borrower), lib.sv.u64(1), lib.sv.address(SHARES), lib.sv.i128(10n), lib.sv.i128(9n), lib.sv.u64(3600)];
+  answer.auth = [sourceEntry(node(callOf(OW, "open_repo", args), [node(transfer(EURO, borrower, OW, 10n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args, { tokens: [EURO] }), /which pulls CAEXP2UG…, not that token/);
+  assert.equal(sent.length, 1);
 });
 
 test("a release writes the trustline of a holder it does not name only once the caller declares that holder, who still signs nothing (TOOL-9)", async () => {

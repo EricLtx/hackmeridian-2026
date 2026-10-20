@@ -947,7 +947,9 @@ async function rehearse() {
     ]);
     const repoId = Number(opened.value);
     await invoke(state, "steward", C.shares, "set_frozen", [sv.address(C.openWindow), sv.bool(true)]);
-    const repaid = await invoke(state, "borrower", C.openWindow, "repurchase", [sv.u64(repoId)]);
+    // The repayment's token is read from the repo: a pull is signed only on the token the caller declares (TOOL-5).
+    const repo = await read(state, C.openWindow, "get_repo", [sv.u64(repoId)]);
+    const repaid = await invoke(state, "borrower", C.openWindow, "repurchase", [sv.u64(repoId)], { tokens: [String(repo.stablecoin)] });
     console.log(`  repo #${repoId} repaid while the contract is frozen: ${explorer(repaid.hash)}`);
     // While the token refuses, release returns false and keeps the record (and its TTL).
     const delivered = await read(state, C.openWindow, "release", [sv.u64(repoId)], "operator");

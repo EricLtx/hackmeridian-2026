@@ -741,10 +741,11 @@ function refusedAfterSigning(error, label, tail) {
  * finding TOOL-5): see `checkSubInvocations`.
  *
  * `source` is the source's G-address, `tail` ends the message, `tokens`
- * adds token contracts the state does not list (a registered stablecoin).
+ * names the token a call pulls without naming it in its arguments (the
+ * repo's stablecoin under `repurchase`).
  */
 export function checkAuthEntries(state, entries, func, expected, label, { source = null, tail = NOTHING_SIGNED, tokens = [] } = {}) {
-  const allowed = deploymentTokens(state, tokens);
+  const pulls = pullsOf(func, tokens);
   for (const entry of entries) {
     const root = entry.rootInvocation.function;
     if (!isOwnCall(root, func)) {
@@ -759,42 +760,82 @@ export function checkAuthEntries(state, entries, func, expected, label, { source
       if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; ${tail} (rpc-1)`);
       signer = address;
     }
-    checkSubInvocations(state, entry.rootInvocation, signer, allowed, label, tail);
+    checkSubInvocations(state, entry.rootInvocation, signer, pulls, label, tail);
   }
-}
-
-/** The token contracts a transfer into Open Window may move: every contract of this deployment but Open Window itself, and those the caller declares. */
-function deploymentTokens(state, extra = []) {
-  const ow = state.contracts?.openWindow;
-  const ids = Object.values(state.contracts ?? {}).filter((id) => typeof id === "string" && id.startsWith("C") && id !== ow);
-  return new Set([...ids, ...extra]);
 }
 
 /** The address an ScVal holds, or null for any other value. */
 const addressOf = (value) => (value?.type === "scvAddress" ? Address.fromScAddress(value.address).toString() : null);
 
+/** The i128 an ScVal holds, as a BigInt, or null for any other value. */
+const i128Of = (value) => (value?.type === "scvI128" ? BigInt(scValToNative(value)) : null);
+
+/**
+ * The calls of the Open Window contract that pull a token from a signer
+ * into the contract (token_io::pull), with the argument that names the
+ * token and the one that names the amount. `repurchase` reads both from
+ * the repo in storage: the caller declares the token (`tokens`), and the
+ * amount is the repayment the contract computes.
+ */
+const PULLS = {
+  create_offer: { token: 1, amount: 2 }, // lender, stablecoin, amount, rate, term, funds
+  open_repo: { token: 2, amount: 3 }, // borrower, offer_id, fund, shares, principal, term
+  repurchase: { token: null, amount: null }, // repo_id
+};
+
+/**
+ * The pulls the operation `func` may make: token contract -> the amount it
+ * names, or null when the contract computes it. Empty for a call that pulls
+ * nothing, whatever the caller `declared`.
+ */
+function pullsOf(func, declared = []) {
+  const pulls = new Map();
+  if (func.type !== "hostFunctionTypeInvokeContract") return pulls;
+  const call = armOf(func);
+  const rule = PULLS[String(call.functionName)];
+  if (!rule) return pulls;
+  if (rule.token !== null) {
+    const token = addressOf(call.args[rule.token]);
+    if (token) pulls.set(token, rule.amount === null ? null : i128Of(call.args[rule.amount]));
+  } else {
+    for (const token of declared) pulls.set(token, null);
+  }
+  return pulls;
+}
+
 /**
  * Walks the tree below an entry's root, at every depth. The only node it
- * accepts is `transfer(from, to, amount)` on a token of `tokens`, from the
- * entry's `signer`, to the Open Window contract: how the contract pulls
- * collateral, offer funds and repayments (token_io::pull). Any other node,
- * a transfer elsewhere or another function, is the signer's authority over
- * a call some contract on the path could make in its name: a compromised
- * feed or token, say, moving the signer's funds or taking a token's admin
- * role (review finding TOOL-5, 20 October 2026). Refused before a signature.
+ * accepts is `transfer(from, to, amount)` from the entry's `signer` to the
+ * Open Window contract, on a token the root call pulls (`pulls`, from
+ * `pullsOf`): the fund's shares under `open_repo`, the offer's stablecoin
+ * under `create_offer`, the repo's stablecoin under `repurchase`; at the
+ * amount the call names, where it names one; and once per token. Any other
+ * node, a transfer elsewhere, of another token, of another amount, a second
+ * one, or another function, is the signer's authority over a call some
+ * contract on the path could make in its name: a compromised feed or token,
+ * say, moving the signer's funds, locking them in the contract with no
+ * record, or taking a token's admin role (review finding TOOL-5 and its
+ * residual, 20 October 2026). Refused before a signature.
  */
-function checkSubInvocations(state, node, signer, tokens, label, tail) {
+function checkSubInvocations(state, node, signer, pulls, label, tail, seen = new Set()) {
   const ow = state.contracts?.openWindow;
+  const refusal = (fn, why) => new Error(`${label}: the simulation asks ${signer ? roleOf(state, signer) : "the signer"} to authorize ${describeCall(fn)} inside this call, which ${why}; ${tail} (rpc-1)`);
   for (const sub of node.subInvocations ?? []) {
     const fn = sub.function;
     const call = fn.type === "sorobanAuthorizedFunctionTypeContractFn" ? armOf(fn) : null;
     const token = call ? Address.fromScAddress(call.contractAddress).toString() : null;
-    const pull = call && String(call.functionName) === "transfer" && call.args.length === 3
-      && tokens.has(token) && addressOf(call.args[0]) === signer && addressOf(call.args[1]) === ow;
-    if (!pull) {
-      throw new Error(`${label}: the simulation asks ${signer ? roleOf(state, signer) : "the signer"} to authorize ${describeCall(fn)} inside this call, which is not a transfer of its own tokens into Open Window; ${tail} (rpc-1)`);
+    const shaped = call && String(call.functionName) === "transfer" && call.args.length === 3
+      && addressOf(call.args[0]) === signer && addressOf(call.args[1]) === ow;
+    if (!shaped) throw refusal(fn, "is not a transfer of its own tokens into Open Window");
+    if (!pulls.has(token)) {
+      throw refusal(fn, pulls.size === 0 ? "pulls no token from its signer" : `pulls ${[...pulls.keys()].map((t) => `${t.slice(0, 8)}…`).join(", ")}, not that token`);
     }
-    checkSubInvocations(state, sub, signer, tokens, label, tail);
+    if (seen.has(token)) throw refusal(fn, "pulls that token once, not twice");
+    seen.add(token);
+    const named = pulls.get(token);
+    const amount = i128Of(call.args[2]);
+    if (named !== null && amount !== named) throw refusal(fn, `moves ${amount} units of it where the call names ${named}`);
+    checkSubInvocations(state, sub, signer, pulls, label, tail, seen);
   }
 }
 
@@ -943,8 +984,9 @@ async function signAuth(state, entries, expiry) {
  *
  * Before anything is signed, the simulation must authorize only this call,
  * by its source, the addresses it names and the declared `cosigners`, with
- * nothing below it but the signers' own transfers into Open Window of a
- * deployment token or one of `tokens`; write only entries the call touches;
+ * nothing below it but the signers' own transfers into Open Window of the
+ * token the call pulls (named in its arguments, or declared in `tokens`
+ * for `repurchase`), at the amount it names; write only entries the call touches;
  * and ask at most `maxResourceFee` (25 XLM by default). Otherwise it throws
  * and nothing leaves this machine. The entries of the co-signers are signed
  * before the second simulation, which checks them: a refusal after that
@@ -996,8 +1038,8 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
  * roles the contract requires besides the source and the addresses in
  * `args` (the steward on record for `propose_fallback`, the trustee for
  * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap;
- * `options.tokens` names a token the state does not list whose transfer
- * into Open Window the call makes (a registered stablecoin);
+ * `options.tokens` names the token a call pulls into Open Window without
+ * naming it in its arguments (the repo's stablecoin under `repurchase`);
  * `options.extraAddresses` names addresses the call writes to without
  * naming them (the holder a `release` delivers to), never signers.
  */
