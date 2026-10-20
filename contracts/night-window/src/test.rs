@@ -8231,6 +8231,92 @@ fn a_proposed_stablecoin_is_cancelled_dropped_by_a_removal_or_expires() {
     );
 }
 
+/// A SEP-41 token with `decimals` decimals: the demo's allowlisted share
+/// token, standing for a Soroban-native or bridged stablecoin.
+fn sep41_token(env: &Env, decimals: u32) -> Address {
+    env.register(
+        fund_token::FundToken,
+        (
+            Address::generate(env),
+            decimals,
+            soroban_sdk::String::from_str(env, "Test euro stablecoin"),
+            soroban_sdk::String::from_str(env, "tEURX"),
+        ),
+    )
+}
+
+/// Review findings arith-3 and token-3 (20 October 2026): caps and
+/// outstanding totals add base units across the stablecoins of a currency.
+/// A coin with 6 decimals multiplied every cap by ten, one with 18 made them
+/// useless. Only coins with 7 decimals are registered, the decimals of every
+/// Stellar classic asset through its Stellar Asset Contract: before the
+/// first admission, at once or not at all.
+#[test]
+fn a_stablecoin_needs_seven_decimals_to_be_registered() {
+    let f = bare();
+    for decimals in [6, 18] {
+        let coin = sep41_token(&f.env, decimals);
+        assert_eq!(
+            f.client.try_set_stablecoin(&coin, &eur(&f.env)),
+            Err(Ok(raised(Error::StablecoinNotAccepted)))
+        );
+        assert_eq!(f.client.get_stablecoin(&coin), None);
+    }
+    let coin = sep41_token(&f.env, STABLECOIN_DECIMALS);
+    f.client.set_stablecoin(&coin, &eur(&f.env));
+    assert_eq!(
+        f.client.get_stablecoin(&coin),
+        Some(StablecoinConfig {
+            currency: eur(&f.env),
+            decimals: 7
+        })
+    );
+}
+
+/// After the first admission the decimals are checked at the proposal, so
+/// that a coin the registry would refuse never waits for the delay, and
+/// again at the apply: a proposal made before rc5 was not checked.
+#[test]
+fn a_stablecoin_needs_seven_decimals_at_its_proposal_and_its_apply() {
+    let (f, _offer_id) = ready();
+    let six = sep41_token(&f.env, 6);
+    assert_eq!(
+        f.client.try_set_stablecoin(&six, &eur(&f.env)),
+        Err(Ok(raised(Error::StablecoinNotAccepted)))
+    );
+    assert_eq!(f.client.pending_stablecoin_change(&six), None);
+
+    // The same coin, proposed under rc4.
+    let eta = f.env.ledger().timestamp() + f.client.timelock_delay();
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::set_pending_stablecoin(
+            &f.env,
+            &six,
+            &PendingStablecoinChange {
+                currency: eur(&f.env),
+                eta,
+            },
+        );
+    });
+    let seven = sep41_token(&f.env, 7);
+    f.client.set_stablecoin(&seven, &eur(&f.env));
+    advance(&f, f.client.timelock_delay());
+    assert_eq!(
+        f.client.try_apply_stablecoin_change(&six),
+        Err(Ok(Error::StablecoinNotAccepted))
+    );
+    assert_eq!(f.client.get_stablecoin(&six), None);
+    assert!(f.client.pending_stablecoin_change(&six).is_some());
+    f.client.apply_stablecoin_change(&seven);
+    assert_eq!(
+        f.client.get_stablecoin(&seven),
+        Some(StablecoinConfig {
+            currency: eur(&f.env),
+            decimals: 7
+        })
+    );
+}
+
 /// Covers: S7, S26
 #[test]
 fn sentinel_pauses_and_cancels_but_neither_vetoes_nor_decides() {

@@ -113,6 +113,13 @@ pub const MAX_PENDING_CURRENCY_CAPS: u32 = 8;
 /// in to nothing since. At 6 decimals one unit of a price near 1 is
 /// 0.01 bps.
 pub const MIN_FEED_DECIMALS: u32 = 6;
+/// Decimals of every stablecoin: those of a Stellar classic asset through
+/// its Stellar Asset Contract. Caps and outstanding totals add base units
+/// across the stablecoins of a currency, so these must share one precision
+/// (review findings arith-3 and token-3, 20 October 2026): a coin with 6
+/// decimals would multiply every cap by ten. Normalising units is a later
+/// version.
+pub const STABLECOIN_DECIMALS: u32 = 7;
 
 /// Envelope at deployment. The governor may tighten or widen it.
 pub fn default_envelope() -> RiskEnvelope {
@@ -647,15 +654,21 @@ impl OpenWindow {
             .filter(|p| is_live(&env, p.eta))
     }
 
-    /// Registers a stablecoin; after the first admission, proposes it for
-    /// the delay. Governor.
+    /// Registers a 7-decimal stablecoin; after the first admission,
+    /// proposes it for the delay. Governor.
     pub fn set_stablecoin(env: Env, stablecoin: Address, currency: Symbol) {
         storage::require_governor(&env);
+        // The signature predates the delay and the decimals rule, so the
+        // failures are raised the way `set_admin` raises. A coin the
+        // registry would refuse is refused at once, not after the delay.
+        let decimals = match check_stablecoin_decimals(&env, &stablecoin) {
+            Ok(decimals) => decimals,
+            Err(error) => panic_with_error!(&env, error),
+        };
         if storage::past_bootstrap(&env) {
             // A new stablecoin, or a new currency for a registered one,
             // widens what lenders may be repaid in: it waits like any other
-            // loosening (decision S7). The signature predates the delay, so
-            // the one failure is raised the way `set_admin` raises.
+            // loosening (decision S7).
             let eta = match eta(&env) {
                 Ok(eta) => eta,
                 Err(error) => panic_with_error!(&env, error),
@@ -677,15 +690,18 @@ impl OpenWindow {
             .publish(&env);
             return;
         }
-        install_stablecoin(&env, stablecoin, currency);
+        install_stablecoin(&env, stablecoin, currency, decimals);
     }
 
     /// Applies a proposed stablecoin once its delay has elapsed. Anyone.
     pub fn apply_stablecoin_change(env: Env, stablecoin: Address) -> Result<(), Error> {
         let pending = storage::pending_stablecoin(&env, &stablecoin).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
+        // Checked again: a proposal made before rc5 was not, and a token's
+        // code may change during the delay.
+        let decimals = check_stablecoin_decimals(&env, &stablecoin)?;
         storage::remove_pending_stablecoin(&env, &stablecoin);
-        install_stablecoin(&env, stablecoin, pending.currency);
+        install_stablecoin(&env, stablecoin, pending.currency, decimals);
         Ok(())
     }
 
@@ -2418,10 +2434,20 @@ fn ensure_schema_current(env: &Env) -> Result<(), Error> {
     Ok(())
 }
 
-fn install_stablecoin(env: &Env, stablecoin: Address, currency: Symbol) {
+/// A stablecoin's decimals, refused unless they are `STABLECOIN_DECIMALS`:
+/// at a registration, at its proposal and at its apply.
+fn check_stablecoin_decimals(env: &Env, stablecoin: &Address) -> Result<u32, Error> {
+    let decimals = token_io::decimals(env, stablecoin);
+    if decimals != STABLECOIN_DECIMALS {
+        return Err(Error::StablecoinNotAccepted);
+    }
+    Ok(decimals)
+}
+
+fn install_stablecoin(env: &Env, stablecoin: Address, currency: Symbol, decimals: u32) {
     let config = StablecoinConfig {
         currency: currency.clone(),
-        decimals: token_io::decimals(env, &stablecoin),
+        decimals,
     };
     storage::set_stablecoin(env, &stablecoin, &config);
     storage::bump_instance(env);
