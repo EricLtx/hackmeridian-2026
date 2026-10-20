@@ -263,7 +263,7 @@ export function tapeLine(e, ctx = {}) {
     },
     repo_repurchased: () => ({ code: t("REPAY"), tone: "ok", repoId: tp[0], text: t("#{id} {principal} + {interest} interest", { id: tp[0], principal: money(d.principal, repoCode(tp[0])), interest: exact(d.interest, "") }) }),
     repo_seized: () => ({ code: t("SEIZE"), tone: "bad", repoId: tp[0], text: t("#{id} {shares} shares to the lender {to}", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
-    release_deferred: () => ({ code: t("HELD"), tone: "warn", repoId: tp[0], text: t("#{id} {shares} shares owed to {to}: the share token refused the transfer", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
+    release_deferred: () => ({ code: t("HELD"), tone: "warn", repoId: tp[0], text: t("#{id} {shares} shares owed to {to}: the delivery waits for the share token or for the lender's approval", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
     release_redirected: () => ({ code: t("REDIR"), tone: "warn", repoId: tp[0], text: t("#{id} delivery redirected to {to}", { id: tp[0], to: short(d.to) }) }),
     shares_released: () => ({ code: t("DLVR"), tone: "ok", repoId: tp[0], text: t("#{id} {shares} shares delivered to {to}", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
     offer_created: () => ({
@@ -539,7 +539,7 @@ export function seizeTicket({ repo, wallet = null, now = 0, sd = 7, fd = 7, code
   return ticket("seize", t("TAKE SHARES · repo #{id}", { id: repo.id }), rows, checks, note);
 }
 
-/** Ticket to retry the delivery of shares a token held back. */
+/** Ticket to retry the delivery of shares held back: by the share token, or for a lender not approved for the fund. */
 export function releaseTicket({ repoId, pending = null, wallet = null, fd = 7, sym = "" }) {
   const rows = pending
     ? [
@@ -550,7 +550,7 @@ export function releaseTicket({ repoId, pending = null, wallet = null, fd = 7, s
     : [[t("Repo"), `#${repoId}`]];
   const checks = [check(Boolean(pending), pending ? t("Shares are waiting for delivery") : t("No shares are waiting on repo #{id}", { id: repoId }))];
   const note = wallet
-    ? t("Anyone may retry; the shares only go to the recorded beneficiary. If the issuer still blocks the token, nothing moves and the record stays.")
+    ? t("Anyone may retry; the shares only go to the recorded beneficiary. While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves and the record stays.")
     : noWallet();
   return ticket("release", t("DELIVER · repo #{id}", { id: repoId }), rows, checks, note);
 }

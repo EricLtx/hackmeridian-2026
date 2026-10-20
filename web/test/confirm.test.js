@@ -83,6 +83,24 @@ test("with a single endpoint, its answer is the confirmation", async () => {
   assert.ok(seen.includes("confirmed") && !seen.includes("confirming"));
 });
 
+test("a repurchase or a seizure reports whether its shares wait in the contract", async () => {
+  const chain = new Chain(dep);
+  chain.invoke = async () => ({ value: undefined, hash: "abc", seconds: 1, fee: 1n });
+  const pending = { fund: dep.contracts.fundShares, to: G, shares: 10_000_000_000n };
+  let answer = pending;
+  chain.read = async (contract, fn) => {
+    if (fn !== "pending_release") throw new Error(`unexpected read ${fn}`);
+    if (answer instanceof Error) throw answer;
+    return answer;
+  };
+  assert.equal((await chain.seize({ address: G }, 5)).deferred, true, "a lender whose approval was revoked: the shares wait");
+  answer = null;
+  assert.equal((await chain.seize({ address: G }, 5)).deferred, false);
+  assert.equal((await chain.repurchase({ address: G }, 6)).deferred, false);
+  answer = new TypeError("Failed to fetch");
+  assert.equal((await chain.repurchase({ address: G }, 6)).deferred, null, "unknown when the read fails; the write itself succeeded");
+});
+
 test("an unconfirmed write reads as such, never as a failure or a success", () => {
   const { text, name } = describeError(new TransactionError("TxUnconfirmed", "second.example did not confirm it in time.", "abc"));
   assert.equal(name, "TxUnconfirmed");

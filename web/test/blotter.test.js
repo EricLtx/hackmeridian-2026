@@ -317,6 +317,14 @@ test("seize, withdraw, lend and release tickets", () => {
   assert.equal(releaseTicket({ repoId: 4, pending: { to: ME, shares: 10n * ONE }, wallet: ME, sym: "tMMF" }).blocking, false);
 });
 
+test("a deferred delivery waits for the share token or for the lender's approval (rc5)", () => {
+  const deferred = tapeLine({ event: "release_deferred", topics: ["4"], data: { to: LENDER, shares: "10000000000" }, closedAt: new Date(T0 * 1000).toISOString() }, { now: T0 });
+  assert.deepEqual([deferred.code, deferred.tone, deferred.repoId], ["HELD", "warn", 4]);
+  assert.equal(deferred.text, "#4 1,000.00 shares owed to GLEN…AAAL: the delivery waits for the share token or for the lender's approval");
+  const note = releaseTicket({ repoId: 4, pending: { to: ME, shares: 10n * ONE }, wallet: ME, sym: "tMMF" }).note;
+  assert.match(note, /While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves/);
+});
+
 test("the quote view and the band", () => {
   const q = quoteView({ shares: 1_000n * ONE, quote, fundSymbol: "tMMF", bestRateBps: 250, code: "tEUR" });
   assert.equal(row(q, "Ceiling"), "1,000.00 tEUR");

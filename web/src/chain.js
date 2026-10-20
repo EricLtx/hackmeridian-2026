@@ -1052,8 +1052,24 @@ export class Chain {
     return { ...result, repoId: Number(result.value) };
   }
 
-  repurchase(signer, repoId, onStatus) {
-    return this.invoke(signer, "repurchase", [sv.u64(repoId)], onStatus);
+  /** Repays an open repo. `deferred` says whether its shares wait in the contract (`deferredAfter`). */
+  async repurchase(signer, repoId, onStatus) {
+    const result = await this.invoke(signer, "repurchase", [sv.u64(repoId)], onStatus);
+    return { ...result, deferred: await this.deferredAfter(repoId) };
+  }
+
+  /**
+   * After a write that closed repo `repoId`: true when its shares wait in the
+   * contract for a later delivery, false when none do, null when the read
+   * failed. The write succeeds either way: a token refusal, or a lender whose
+   * approval was revoked, only defers the delivery.
+   */
+  async deferredAfter(repoId) {
+    try {
+      return (await this.pendingRelease(repoId)) !== null;
+    } catch {
+      return null;
+    }
   }
 
   async createOffer(signer, { amount, rateBps, maxTerm, funds = [this.fund] }, onStatus) {
@@ -1078,22 +1094,27 @@ export class Chain {
   }
 
   /**
-   * Lender takes the shares of an unpaid repo from its maturity on. `to`
-   * must be a lender the fund's steward approved; by default the lender.
+   * Lender takes the shares of an unpaid repo from its maturity on. `to` is
+   * by default the lender; another address must be a lender the fund's
+   * steward approved. Since rc5 the lender of record may seize even after
+   * its approval was revoked: the repo settles and the shares wait in the
+   * contract until it is approved again (`deferred`, see `deferredAfter`).
    */
-  seize(signer, repoId, onStatus, to = signer.address) {
-    return this.invoke(signer, "seize", [sv.u64(repoId), sv.address(to)], onStatus);
+  async seize(signer, repoId, onStatus, to = signer.address) {
+    const result = await this.invoke(signer, "seize", [sv.u64(repoId), sv.address(to)], onStatus);
+    return { ...result, deferred: await this.deferredAfter(repoId) };
   }
 
   /**
-   * Shares owed on a closed repo that the share token refused to move (an
-   * issuer freeze or allowlist removal): `{ fund, to, shares }` or null.
+   * Shares owed on a closed repo and not delivered: the share token refused
+   * to move them (an issuer freeze or allowlist removal), or, for a seizure,
+   * the lender is not approved for the fund. `{ fund, to, shares }` or null.
    */
   async pendingRelease(repoId) {
     return checkPendingRelease(await this.read(this.contracts.openWindow, "pending_release", [sv.u64(repoId)]));
   }
 
-  /** Retries the delivery of held-back shares; anyone may call it. Resolves `value` true when delivered. */
+  /** Retries the delivery of held-back shares; anyone may call it. Resolves `value` true when delivered, false when it still waits. */
   release(signer, repoId, onStatus) {
     return this.invoke(signer, "release", [sv.u64(repoId)], onStatus);
   }

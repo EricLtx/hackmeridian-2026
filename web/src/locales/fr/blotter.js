@@ -19,7 +19,6 @@ export default {
   "#{id} {principal} + {interest} interest": "#{id} {principal} + {interest} d'intérêts",
   "SEIZE": "SAISIE",
   "#{id} {shares} shares to the lender {to}": "#{id} {shares} parts au prêteur {to}",
-  "#{id} {shares} shares owed to {to}: the share token refused the transfer": "#{id} {shares} parts dues à {to} : le jeton de part a refusé le transfert",
   "REDIR": "REDIR",
   "#{id} delivery redirected to {to}": "#{id} livraison redirigée vers {to}",
   "DLVR": "LIVR",
@@ -173,7 +172,6 @@ export default {
   "To": "Destinataire",
   "Shares are waiting for delivery": "Des parts attendent leur livraison",
   "No shares are waiting on repo #{id}": "Aucune part n'attend sur le repo #{id}",
-  "Anyone may retry; the shares only go to the recorded beneficiary. If the issuer still blocks the token, nothing moves and the record stays.": "Tout le monde peut réessayer ; les parts ne vont qu'au bénéficiaire enregistré. Si l'émetteur bloque encore le jeton, rien ne bouge et l'enregistrement demeure.",
   "DELIVER · repo #{id}": "LIVRER · repo #{id}",
   "Shares": "Parts",
   "Price": "Prix",
@@ -197,4 +195,8 @@ export default {
   "none pending": "rien en attente",
   "{n} pending": "{n} en attente",
   "Governance changes waiting for their time delay": "Changements de gouvernance en attente de leur délai",
+  "#{id} {shares} shares owed to {to}: the delivery waits for the share token or for the lender's approval":
+    "#{id} {shares} parts dues à {to} : la livraison attend le jeton de part ou l'agrément du prêteur",
+  "Anyone may retry; the shares only go to the recorded beneficiary. While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves and the record stays.":
+    "Tout le monde peut réessayer ; les parts ne vont qu'au bénéficiaire enregistré. Tant que le jeton de part les refuse, ou qu'un prêteur bénéficiaire n'est pas agréé pour le fonds, rien ne bouge et l'enregistrement demeure.",
 };

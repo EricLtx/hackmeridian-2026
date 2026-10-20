@@ -34,7 +34,7 @@ import {
   withdrawalAmount,
 } from "./terms.js";
 import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
-import { eventsOfRepo, timelineOf } from "./timeline.js";
+import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
@@ -948,7 +948,7 @@ function onRepurchase(id) {
     $("positions-tx"),
     { code: code() },
     (onStatus) => S.chain.repurchase(S.wallet, id, onStatus),
-    () => t("Repo #{id} repurchased: {shares} back in your wallet.", { id, shares: shareAmount(repo.shares) }),
+    (result) => closingLine("repurchase", { id, shares: shareAmount(repo.shares), deferred: result.deferred }),
   );
 }
 
@@ -1171,7 +1171,8 @@ function releaseNote(id) {
   const pending = S.releases.get(id);
   if (!pending) return "";
   const mine = pending.to === S.wallet?.address;
-  return ` <span class="pill pill-danger">${esc(t("{shares} held: the issuer blocks the transfer", { shares: shareAmount(pending.shares) }))}</span>${
+  const status = (S.mine.get(id) ?? S.lent.get(id))?.status;
+  return ` <span class="pill pill-danger">${esc(heldNote(status, shareAmount(pending.shares)))}</span>${
     mine ? ` <button type="button" class="btn btn-secondary" data-write data-release="${id}">${esc(t("Release"))}</button>` : ""
   }`;
 }
@@ -1185,7 +1186,7 @@ function onRelease(id) {
     (result) =>
       result.value
         ? t("Repo #{id}: {shares} delivered to your wallet.", { id, shares: shareAmount(pending?.shares ?? 0n) })
-        : t("Repo #{id}: the issuer still blocks the transfer. The shares stay reserved for you; try again later.", { id }),
+        : stillHeldLine((S.mine.get(id) ?? S.lent.get(id))?.status, id),
   );
 }
 
@@ -1196,7 +1197,7 @@ function onSeize(id) {
     $("lend-tx"),
     { action: "seize", when: formatDateTime(repo.maturity) },
     (onStatus) => S.chain.seize(S.wallet, id, onStatus),
-    () => t("Repo #{id} closed: {shares} sent to your wallet.", { id, shares: shareAmount(repo.shares) }),
+    (result) => closingLine("seize", { id, shares: shareAmount(repo.shares), deferred: result.deferred }),
   );
 }
 

@@ -27,4 +27,17 @@ export default {
   "Shares delivered": "Parts livrées",
   "held back by the share token at closing, delivered after the issuer allowed it": "retenues par le jeton de part à la clôture, livrées après autorisation de l'émetteur",
   "delivered": "livrées",
+  "the delivery waits for the share token or for the lender's approval for the fund; the shares are recorded for the lender and can be released once both allow it":
+    "la livraison attend le jeton de part ou l'agrément du prêteur pour le fonds ; les parts sont enregistrées pour le prêteur et pourront être libérées dès que l'un et l'autre le permettent",
+  "held back at closing until the share token and the lender's approval allowed it, then delivered":
+    "retenues à la clôture jusqu'à ce que le jeton de part et l'agrément du prêteur le permettent, puis livrées",
+  "{shares} held: waiting for the share token or the lender's approval": "{shares} retenues : en attente du jeton de part ou de l'agrément du prêteur",
+  "Repo #{id} repurchased: {shares} are recorded for you, since the share token refused the transfer; release them once it allows.":
+    "Repo #{id} racheté : {shares} sont enregistrées pour vous, le jeton de part ayant refusé le transfert ; libérez-les dès qu'il le permet.",
+  "Repo #{id} repurchased.": "Repo #{id} racheté.",
+  "Repo #{id} closed: {shares} are recorded for you and wait for the share token or for your approval as lender.":
+    "Repo #{id} clôturé : {shares} sont enregistrées pour vous et attendent le jeton de part ou votre agrément de prêteur.",
+  "Repo #{id} closed.": "Repo #{id} clôturé.",
+  "Repo #{id}: the delivery still waits for the share token or for your approval as lender. The shares stay reserved for you; try again later.":
+    "Repo #{id} : la livraison attend encore le jeton de part ou votre agrément de prêteur. Les parts restent réservées pour vous ; réessayez plus tard.",
 };

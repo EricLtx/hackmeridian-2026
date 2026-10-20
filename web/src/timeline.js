@@ -95,6 +95,9 @@ export function timelineOf(repo, { now, opening = null, events = [], pendingRele
     state: "done",
     detail: repurchased ? t("principal and interest returned to the offer") : t("the borrower did not repurchase by the term"),
   });
+  // Shares of a repurchase wait only for the share token; seized shares also
+  // wait for the lender's approval (since rc5 a seizure settles for a lender
+  // whose approval was revoked, and the shares wait until it is restored).
   if (pendingRelease) {
     steps.push({
       key: "release",
@@ -102,7 +105,9 @@ export function timelineOf(repo, { now, opening = null, events = [], pendingRele
       at: deferred ? unix(deferred.closedAt) : null,
       tx: deferred?.txHash ?? null,
       state: "late",
-      detail: t("the share token refused the transfer; the shares are recorded for the beneficiary and can be released once the issuer allows"),
+      detail: repurchased
+        ? t("the share token refused the transfer; the shares are recorded for the beneficiary and can be released once the issuer allows")
+        : t("the delivery waits for the share token or for the lender's approval for the fund; the shares are recorded for the lender and can be released once both allow it"),
     });
   } else if (deferred || released) {
     steps.push({
@@ -111,8 +116,42 @@ export function timelineOf(repo, { now, opening = null, events = [], pendingRele
       at: released ? unix(released.closedAt) : null,
       tx: released?.txHash ?? null,
       state: "done",
-      detail: deferred ? t("held back by the share token at closing, delivered after the issuer allowed it") : t("delivered"),
+      detail: !deferred
+        ? t("delivered")
+        : repurchased
+          ? t("held back by the share token at closing, delivered after the issuer allowed it")
+          : t("held back at closing until the share token and the lender's approval allowed it, then delivered"),
     });
   }
   return steps;
+}
+
+/** The note beside a closed repo whose shares wait in the contract. */
+export function heldNote(status, shares) {
+  return status === "Repurchased"
+    ? t("{shares} held: the issuer blocks the transfer", { shares })
+    : t("{shares} held: waiting for the share token or the lender's approval", { shares });
+}
+
+/**
+ * The line that reports a repurchase or a seizure by where its shares went:
+ * to the wallet (`deferred` false), recorded in the contract for later
+ * delivery (true), or unknown when the read after it failed (null).
+ */
+export function closingLine(kind, { id, shares, deferred }) {
+  if (kind === "repurchase") {
+    if (deferred === true) return t("Repo #{id} repurchased: {shares} are recorded for you, since the share token refused the transfer; release them once it allows.", { id, shares });
+    if (deferred === false) return t("Repo #{id} repurchased: {shares} back in your wallet.", { id, shares });
+    return t("Repo #{id} repurchased.", { id });
+  }
+  if (deferred === true) return t("Repo #{id} closed: {shares} are recorded for you and wait for the share token or for your approval as lender.", { id, shares });
+  if (deferred === false) return t("Repo #{id} closed: {shares} sent to your wallet.", { id, shares });
+  return t("Repo #{id} closed.", { id });
+}
+
+/** The line after a delivery retry that moved nothing, by the repo's status. */
+export function stillHeldLine(status, id) {
+  return status === "Repurchased"
+    ? t("Repo #{id}: the issuer still blocks the transfer. The shares stay reserved for you; try again later.", { id })
+    : t("Repo #{id}: the delivery still waits for the share token or for your approval as lender. The shares stay reserved for you; try again later.", { id });
 }

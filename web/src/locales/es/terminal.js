@@ -162,4 +162,6 @@ export default {
   "RPC endpoint in use ({index} of {count}) and the time of its last answer": "Punto de acceso RPC en uso ({index} de {count}) y tiempo de su última respuesta",
   "{reason} The ticket is closed: check the transaction before preparing it again.":
     "{reason} El ticket se cerró: compruebe la transacción antes de prepararlo de nuevo.",
+  "Repo #{id}: the delivery still waits for the share token or the lender's approval; the shares stay recorded.":
+    "Repo #{id}: la entrega sigue esperando al token de participación o a la aprobación del prestamista; las participaciones siguen registradas.",
 };

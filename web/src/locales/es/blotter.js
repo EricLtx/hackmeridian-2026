@@ -19,7 +19,6 @@ export default {
   "#{id} {principal} + {interest} interest": "#{id} {principal} + {interest} de intereses",
   "SEIZE": "EJEC",
   "#{id} {shares} shares to the lender {to}": "#{id} {shares} participaciones al prestamista {to}",
-  "#{id} {shares} shares owed to {to}: the share token refused the transfer": "#{id} {shares} participaciones adeudadas a {to}: el token de participación rechazó la transferencia",
   "REDIR": "REDIR",
   "#{id} delivery redirected to {to}": "#{id} entrega redirigida a {to}",
   "DLVR": "ENTR",
@@ -173,7 +172,6 @@ export default {
   "To": "Destinatario",
   "Shares are waiting for delivery": "Hay participaciones pendientes de entrega",
   "No shares are waiting on repo #{id}": "No hay participaciones pendientes en el repo #{id}",
-  "Anyone may retry; the shares only go to the recorded beneficiary. If the issuer still blocks the token, nothing moves and the record stays.": "Cualquiera puede reintentarlo; las participaciones solo van al beneficiario registrado. Si el emisor sigue bloqueando el token, nada se mueve y el registro se mantiene.",
   "DELIVER · repo #{id}": "ENTREGAR · repo #{id}",
   "Shares": "Participaciones",
   "Price": "Precio",
@@ -197,4 +195,8 @@ export default {
   "none pending": "nada pendiente",
   "{n} pending": "{n} pend.",
   "Governance changes waiting for their time delay": "Cambios de gobernanza a la espera de su plazo",
+  "#{id} {shares} shares owed to {to}: the delivery waits for the share token or for the lender's approval":
+    "#{id} {shares} participaciones adeudadas a {to}: la entrega espera al token de participación o a la aprobación del prestamista",
+  "Anyone may retry; the shares only go to the recorded beneficiary. While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves and the record stays.":
+    "Cualquiera puede reintentarlo; las participaciones solo van al beneficiario registrado. Mientras el token de participación las rechace, o un prestamista beneficiario no esté aprobado para el fondo, nada se mueve y el registro se mantiene.",
 };

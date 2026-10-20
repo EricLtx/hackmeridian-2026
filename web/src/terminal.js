@@ -30,6 +30,7 @@ import { describeError } from "./errors.js";
 import { UNSHOWABLE, formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
 import { LANG_NAMES, lang, numberStyle, setLang, t, tc, tk, tn } from "./i18n.js";
 import { HOUR, nextInterestStep } from "./terms.js";
+import { closingLine } from "./timeline.js";
 import { replay } from "./motion.js";
 
 const SLOW_EVERY = 4; // pending changes and layout version: one refresh in four, about a minute
@@ -872,7 +873,7 @@ export function createTerminal(ctx) {
       send(
         errorContext(),
         (onStatus) => S.chain.repurchase(S.wallet, repoId, onStatus),
-        () => t("Repo #{id} repurchased: {shares} back in your wallet.", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)) }),
+        (result) => closingLine("repurchase", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)), deferred: result.deferred }),
       ),
       build,
     );
@@ -929,7 +930,7 @@ export function createTerminal(ctx) {
       send(
         errorContext({ action: "seize" }),
         (onStatus) => S.chain.seize(S.wallet, repoId, onStatus),
-        () => t("Repo #{id} closed: {shares} sent to your wallet.", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)) }),
+        (result) => closingLine("seize", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)), deferred: result.deferred }),
       ),
       build,
     );
@@ -948,7 +949,9 @@ export function createTerminal(ctx) {
         (result) =>
           result.value
             ? t("Repo #{id}: shares delivered.", { id: repoId })
-            : t("Repo #{id}: the issuer still blocks the transfer; the shares stay recorded.", { id: repoId }),
+            : repo?.status === "Repurchased"
+              ? t("Repo #{id}: the issuer still blocks the transfer; the shares stay recorded.", { id: repoId })
+              : t("Repo #{id}: the delivery still waits for the share token or the lender's approval; the shares stay recorded.", { id: repoId }),
       ),
       build,
     );

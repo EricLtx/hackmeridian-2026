@@ -27,4 +27,18 @@ export default {
   "Shares delivered": "Participaciones entregadas",
   "held back by the share token at closing, delivered after the issuer allowed it": "retenidas por el token de participación al cierre y entregadas cuando el emisor lo permitió",
   "delivered": "entregadas",
+  "the delivery waits for the share token or for the lender's approval for the fund; the shares are recorded for the lender and can be released once both allow it":
+    "la entrega espera al token de participación o a la aprobación del prestamista para el fondo; las participaciones quedan registradas para el prestamista y podrán liberarse cuando ambos lo permitan",
+  "held back at closing until the share token and the lender's approval allowed it, then delivered":
+    "retenidas al cierre hasta que el token de participación y la aprobación del prestamista lo permitieron, y luego entregadas",
+  "{shares} held: waiting for the share token or the lender's approval":
+    "{shares} retenidas: a la espera del token de participación o de la aprobación del prestamista",
+  "Repo #{id} repurchased: {shares} are recorded for you, since the share token refused the transfer; release them once it allows.":
+    "Repo #{id} recomprado: {shares} quedan registradas para usted, ya que el token de participación rechazó la transferencia; libérelas cuando lo permita.",
+  "Repo #{id} repurchased.": "Repo #{id} recomprado.",
+  "Repo #{id} closed: {shares} are recorded for you and wait for the share token or for your approval as lender.":
+    "Repo #{id} cerrado: {shares} quedan registradas para usted y esperan al token de participación o a su aprobación como prestamista.",
+  "Repo #{id} closed.": "Repo #{id} cerrado.",
+  "Repo #{id}: the delivery still waits for the share token or for your approval as lender. The shares stay reserved for you; try again later.":
+    "Repo #{id}: la entrega sigue esperando al token de participación o a su aprobación como prestamista. Las participaciones siguen reservadas para usted; vuelva a intentarlo más tarde.",
 };

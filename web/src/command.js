@@ -18,7 +18,7 @@ export const COMMANDS = [
   { name: "L", aliases: ["LEND"], usage: tk("L <amount> <rate> <term>"), help: tk("ticket to create an offer (approved lenders only)") },
   { name: "W", aliases: ["WITHDRAW"], usage: tk("W <offer> [amount|ALL]"), help: tk("ticket to withdraw unlent funds from one of your offers") },
   { name: "S", aliases: ["SEIZE"], usage: tk("S <repo>"), help: tk("ticket to take the shares of an unpaid repo after its term") },
-  { name: "REL", aliases: ["RELEASE"], usage: tk("REL <repo>"), help: tk("ticket to retry the delivery of shares the issuer held back") },
+  { name: "REL", aliases: ["RELEASE"], usage: tk("REL <repo>"), help: tk("ticket to retry a delivery that waits for the share token or a lender's approval") },
   { name: "GO", aliases: ["Y", "YES"], usage: tk("GO, or Enter on an empty line"), help: tk("sign the ticket with the wallet") },
   { name: "CANCEL", aliases: ["N", "NO", "ESC"], usage: tk("CANCEL, or Esc"), help: tk("drop the ticket") },
   { name: "OFF", aliases: ["OFFERS", "BOOK"], usage: tk("OFF"), help: tk("the offer book, best rate first") },
