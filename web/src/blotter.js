@@ -535,7 +535,12 @@ export function seizeTicket({ repo, wallet = null, now = 0, sd = 7, fd = 7, code
   if (wallet) {
     checks.push(check(repo.lender === wallet, repo.lender === wallet ? t("You are its lender") : t("Only its lender {address} takes the shares", { address: shortAddress(repo.lender) })));
   }
-  const note = wallet ? t("The shares go to your address, which the issuer approved; the borrower can still repurchase until this lands.") : noWallet();
+  // Since rc5 the lender of record may seize after its approval was revoked: the repo settles and the shares wait.
+  const note = wallet
+    ? t(
+        "The shares go to your address if the issuer approves you as lender for this fund; if not, the repo still settles and the shares wait in the contract until it approves you again (REL then delivers them). The borrower can still repurchase until this lands.",
+      )
+    : noWallet();
   return ticket("seize", t("TAKE SHARES · repo #{id}", { id: repo.id }), rows, checks, note);
 }
 

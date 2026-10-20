@@ -166,7 +166,8 @@ export default {
   "Past its term, unpaid": "Échéance dépassée, impayé",
   "You are its lender": "Vous en êtes le prêteur",
   "Only its lender {address} takes the shares": "Seul son prêteur {address} peut prendre les parts",
-  "The shares go to your address, which the issuer approved; the borrower can still repurchase until this lands.": "Les parts vont à votre adresse, agréée par l'émetteur ; l'emprunteur peut encore racheter tant que cette transaction n'est pas passée.",
+  "The shares go to your address if the issuer approves you as lender for this fund; if not, the repo still settles and the shares wait in the contract until it approves you again (REL then delivers them). The borrower can still repurchase until this lands.":
+    "Les parts vont à votre adresse si l'émetteur vous agrée comme prêteur pour ce fonds ; sinon, le repo est tout de même dénoué et les parts attendent dans le contrat qu'il vous agrée de nouveau (REL les livre alors). L'emprunteur peut encore racheter tant que cette transaction n'est pas passée.",
   "TAKE SHARES · repo #{id}": "PRENDRE LES PARTS · repo #{id}",
   "Deliver": "Livrer",
   "To": "Destinataire",

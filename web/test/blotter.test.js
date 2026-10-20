@@ -20,6 +20,7 @@ import {
   tapeTime,
   withdrawTicket,
 } from "../src/blotter.js";
+import { setLang } from "../src/i18n.js";
 
 const ONE = 10_000_000n;
 const H = 3600;
@@ -323,6 +324,25 @@ test("a deferred delivery waits for the share token or for the lender's approval
   assert.equal(deferred.text, "#4 1,000.00 shares owed to GLEN…AAAL: the delivery waits for the share token or for the lender's approval");
   const note = releaseTicket({ repoId: 4, pending: { to: ME, shares: 10n * ONE }, wallet: ME, sym: "tMMF" }).note;
   assert.match(note, /While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves/);
+});
+
+test("the seize ticket says the shares wait in the contract when the lender is not approved (WEB-8)", () => {
+  // Since rc5 a lender whose approval was revoked may still seize: the repo settles, the shares wait in the contract.
+  const repo = { id: 7, status: "Open", borrower: OTHER, lender: ME, fund: F1, principal: 500n * ONE, rate_bps: 300, opened_at: T0, maturity: T0 + 64 * H, shares: 600n * ONE };
+  const note = () => seizeTicket({ repo, wallet: ME, now: T0 + 65 * H, code: "tEUR", sym: "tMMF" }).note;
+  assert.doesNotMatch(note(), /which the issuer approved/, "no promise the ticket cannot check");
+  assert.equal(
+    note(),
+    "The shares go to your address if the issuer approves you as lender for this fund; if not, the repo still settles and the shares wait in the contract until it approves you again (REL then delivers them). The borrower can still repurchase until this lands.",
+  );
+  try {
+    setLang("fr");
+    assert.match(note(), /sinon, le repo est tout de même dénoué et les parts attendent dans le contrat/);
+    setLang("es");
+    assert.match(note(), /si no, el repo se liquida igualmente y las participaciones esperan en el contrato/);
+  } finally {
+    setLang("en");
+  }
 });
 
 test("the quote view and the band", () => {
