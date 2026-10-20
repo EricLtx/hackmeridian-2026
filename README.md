@@ -59,7 +59,7 @@ sequenceDiagram
 
 ## Contract interface
 
-The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 4, unchanged since rc4: the rc5 candidate adds one event (`RepoValued`) and changes what some functions check, as the table says.
+The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`, `src/test_math.rs` (properties of the arithmetic) and `src/test_perf.rs` (the real-time profile on the release WASM). Interface version 4, unchanged since rc4: the rc5 candidate adds one event (`RepoValued`) and changes what some functions check, as the table says.
 
 **Governance.** Upgrades, feed changes, re-anchoring, a new guardian, a longer maximum term, a looser risk envelope, looser fund limits and higher currency caps wait for a time delay (48 hours by default, settable until the first fund is admitted or the first offer is created, then only able to grow), can be cancelled during that window, and expire seven days after they fall due. A stablecoin registration after the first admission waits for the delay too, and the governor handover waits for it with a guardian veto. Some changes stay immediate by design: tightening, `unpause`, the removal of a stablecoin, lender approvals, unfreezing a fund, the guardian handing its role over to its registered backup. Anyone may apply a change once it is due: the signatures were given when it was proposed. The exception, since rc5, is a stablecoin registration, which the governor in office applies.
 
