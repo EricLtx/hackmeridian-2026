@@ -2,7 +2,7 @@
 // outside price feed cannot slip markup, an odd id or a huge exponent into
 // the page where a number or an address is expected.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Account, Asset, Networks, Operation, SorobanDataBuilder, TransactionBuilder, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
@@ -22,6 +22,7 @@ import {
 } from "../src/chain.js";
 
 const G = "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN";
+const OTHER = "GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI";
 const markup = "\"><img src=x onerror=alert(1)>";
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 
@@ -230,16 +231,49 @@ test("an offer, a repo or a quote missing any field is refused at the boundary, 
   for (const key of Object.keys(offerFields())) {
     await assert.rejects(chainAnswering(first("get_offer", scMap(without(offerFields(), key)))).offers(), new RegExp(`missing offer\\.${key} `), key);
   }
-  for (const key of Object.keys(repoFields())) {
-    const chain = chainAnswering(first("get_repo", scMap(without(repoFields(), key))));
-    await assert.rejects(chain.repos(1), new RegExp(`missing repo\\.${key} `), key);
-    await assert.rejects(chain.repo(1), new RegExp(`missing repo\\.${key} `), key);
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    for (const key of Object.keys(repoFields())) {
+      const chain = chainAnswering(first("get_repo", scMap(without(repoFields(), key))));
+      assert.deepEqual(await chain.readRepos(1), { repos: [], unreadable: [1] }, key);
+      await assert.rejects(chain.repo(1), new RegExp(`missing repo\\.${key} `), key);
+    }
+  } finally {
+    warn.mock.restore();
   }
   for (const key of ["haircut_bps", "max_principal", "price", "price_decimals"]) {
     await assert.rejects(chainAnswering(() => scMap(without(quoteFields(), key))).quote(1n), new RegExp(`missing quote\\.${key} `), key);
   }
   // The designation is a boolean, as the contract's Offer has it.
   await assert.rejects(chainAnswering(first("get_offer", scMap({ ...offerFields(), sponsor: nativeToScVal(1, { type: "u32" }) }))).offers(), /unexpected offer\.sponsor/);
+});
+
+test("one malformed repo, of any account, is skipped and counted: the scan goes on, the readable repos come back, and a single read keeps every check (WEB-5)", async () => {
+  // Repo 1 is the wallet's and complete; repo 2 belongs to someone else and lacks its principal; repo 3 is complete.
+  const theirs = without(repoFields(), "principal");
+  theirs.borrower = scAddress(OTHER);
+  const values = { 1: scMap(repoFields()), 2: scMap(theirs), 3: scMap(repoFields()) };
+  const chain = chainAnswering((fn, [id]) => (fn === "get_repo" ? (values[Number(id)] ?? null) : null));
+  const warnings = [];
+  const warn = mock.method(console, "warn", (...args) => warnings.push(args.join(" ")));
+  try {
+    // The whole scan no longer rejects on another account's repo.
+    assert.equal((await chain.repos(1)).length, 2);
+    const { repos, unreadable } = await chain.readRepos(1);
+    assert.deepEqual(
+      repos.map((r) => r.id),
+      [1, 3],
+    );
+    assert.equal(repos[0].principal, 9_000_000_000n);
+    assert.deepEqual(unreadable, [2]);
+    assert.deepEqual(await chain.readRepos(3), { repos: [repos[1]], unreadable: [] });
+    assert.equal(warnings.length, 1, "warned once, not on every pass");
+    assert.match(warnings[0], /repo #2 skipped: missing repo\.principal/);
+    // A repo read on its own is refused as before: the wallet's own position never shows with a field missing.
+    await assert.rejects(chain.repo(2), /missing repo\.principal/);
+  } finally {
+    warn.mock.restore();
+  }
 });
 
 test("an offer missing a field is the offer table's error; the board pass goes on (WEB-5)", async () => {

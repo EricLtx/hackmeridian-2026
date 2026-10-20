@@ -38,7 +38,7 @@ import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
-import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
+import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t, tn } from "./i18n.js";
 import { flashChanges, initMotion, setLoading, snapshot, toast, transition } from "./motion.js";
 
 const REFRESH_MS = 15_000;
@@ -65,6 +65,8 @@ const S = {
   mine: new Map(), // repos I borrowed, by id
   lent: new Map(), // repos on my offers, by id
   nextRepo: 1, // first repo id not scanned yet
+  unreadable: new Set(), // repo ids the scan could not read (a field missing from the chain's answer)
+  positionsError: null, // what stopped the last read of the positions, shown in the panel
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
   releases: new Map(), // closed repo id -> shares held back (the token refused them, or the lender awaits approval)
@@ -605,6 +607,8 @@ function adoptWallet(wallet) {
   S.mine = new Map();
   S.lent = new Map();
   S.nextRepo = 1;
+  S.unreadable = new Set();
+  S.positionsError = null;
   S.dues = new Map();
   S.openings = new Map();
   S.releases = new Map();
@@ -635,6 +639,8 @@ function disconnect(reason = null) {
   S.balances = null;
   S.mine = new Map();
   S.lent = new Map();
+  S.unreadable = new Set();
+  S.positionsError = null;
   try {
     localStorage.removeItem(REMEMBER_KEY);
   } catch {
@@ -854,10 +860,17 @@ function submitBorrow(event) {
 // Positions
 // ---------------------------------------------------------------------------
 
+/**
+ * Reads the wallet's repos: the scan from the first id not scanned yet, then
+ * the tracked open ones again. A repo the boundary refuses is skipped and
+ * counted (`S.unreadable`, shown in the panel), never shown with a field
+ * missing; the scan goes on past it, and `refreshWallet` keeps one failure
+ * here from stopping the rest of the pass (WEB-5).
+ */
 async function refreshPositions() {
   const address = S.wallet?.address;
   if (!address) return;
-  const fresh = await S.chain.repos(S.nextRepo);
+  const { repos: fresh, unreadable } = await S.chain.readRepos(S.nextRepo);
   if (S.wallet?.address !== address) return;
   const keep = (repo) => {
     if (repo.borrower === address) S.mine.set(repo.id, repo);
@@ -865,15 +878,26 @@ async function refreshPositions() {
   };
   for (const repo of fresh) {
     keep(repo);
+    S.unreadable.delete(repo.id);
     S.nextRepo = Math.max(S.nextRepo, repo.id + 1);
   }
-  // Closed repos never change; open ones close by repurchase or seizure.
+  // An unreadable id stays before `nextRepo` when it is the last one: it is read again on the next pass.
+  for (const id of unreadable) S.unreadable.add(id);
+  // Closed repos never change; open ones close by repurchase or seizure. One that cannot be read now keeps its last reading.
   const freshIds = new Set(fresh.map((r) => r.id));
   const tracked = new Map([...S.mine, ...S.lent]);
   const recheck = [...tracked.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
-  for (const repo of await Promise.all(recheck.map((r) => S.chain.repo(r.id)))) {
-    if (repo) keep(repo);
+  const again = await Promise.all(recheck.map((r) => S.chain.repo(r.id).then((repo) => ({ id: r.id, repo }), (error) => ({ id: r.id, error }))));
+  for (const { id, repo, error } of again) {
+    if (error) {
+      console.warn(`repo #${id} could not be read again: ${error?.message ?? error}`);
+      S.unreadable.add(id);
+    } else if (repo) {
+      keep(repo);
+      S.unreadable.delete(id);
+    }
   }
+  S.positionsError = null;
   const open = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status === "Open");
   await Promise.all(
     open.map(async (r) => {
@@ -922,7 +946,11 @@ function renderPositions() {
   const repos = [...S.mine.values()].sort((a, b) => b.id - a.id);
   const open = repos.filter((r) => r.status === "Open");
   const closed = repos.filter((r) => r.status !== "Open");
-  meta.textContent = repos.length ? t("{open} open, {closed} closed", { open: open.length, closed: closed.length }) : "";
+  const notes = [];
+  if (repos.length) notes.push(t("{open} open, {closed} closed", { open: open.length, closed: closed.length }));
+  if (S.unreadable.size) notes.push(tn("{n} repo could not be read", "{n} repos could not be read", S.unreadable.size));
+  if (S.positionsError) notes.push(S.positionsError);
+  meta.textContent = notes.join(" · ");
   if (!repos.length) {
     setHTML(body, `<p class="muted">${esc(t("No positions yet. Borrow above to open one."))}</p>`);
     return;
@@ -1260,7 +1288,15 @@ async function refreshWallet() {
   renderBorrow();
   renderLend();
   // The terminal keeps its own view of every repo; the guided view's positions catch up when it returns.
-  if (S.face !== "terminal") await refreshPositions();
+  if (S.face === "terminal") return;
+  try {
+    await refreshPositions();
+  } catch (error) {
+    // A failed read of the positions is told in their panel: it never skips the terminal's refresh nor the "Updated" line (WEB-5).
+    console.warn("positions", error);
+    S.positionsError = describeError(error).text;
+    renderPositions();
+  }
 }
 
 /**

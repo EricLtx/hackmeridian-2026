@@ -56,7 +56,7 @@ export function createTerminal(ctx) {
     feeds: new Map(),
     pending: null,
     schema: null,
-    market: { repos: new Map(), next: 1, dues: new Map(), releases: new Map(), toCheck: new Set(), loaded: false },
+    market: { repos: new Map(), next: 1, unreadable: new Set(), dues: new Map(), releases: new Map(), toCheck: new Set(), loaded: false },
     tape: { events: [], nextLedger: null, error: null },
     scope: "auto",
     ticket: null,
@@ -162,12 +162,15 @@ export function createTerminal(ctx) {
 
   async function refreshMarket() {
     const m = T.market;
-    const fresh = await S.chain.repos(m.next);
+    // A repo the boundary refuses is skipped and counted: the scan goes on past it (WEB-5).
+    const { repos: fresh, unreadable } = await S.chain.readRepos(m.next);
     for (const r of fresh) {
       m.repos.set(r.id, r);
+      m.unreadable.delete(r.id);
       m.next = Math.max(m.next, r.id + 1);
       if (r.status !== "Open") m.toCheck.add(r.id);
     }
+    for (const id of unreadable) m.unreadable.add(id);
     const freshIds = new Set(fresh.map((r) => r.id));
     const stale = [...m.repos.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
     for (const r of await Promise.all(stale.map((x) => S.chain.repo(x.id).catch(() => null)))) {
@@ -460,7 +463,10 @@ export function createTerminal(ctx) {
     const open = rows.filter((r) => r.state === "OPEN" || r.state === "LATE");
     const closed = rows.filter((r) => !(r.state === "OPEN" || r.state === "LATE")).slice(0, CLOSED_ROWS);
     const totals = positionTotals(rows);
-    $("t-pos-meta").textContent = `${scopeLabel()} · ${t("{n} open", { n: totals.open })}${totals.late ? `, ${t("{n} past term", { n: totals.late })}` : ""}`;
+    const unreadable = T.market.unreadable.size;
+    $("t-pos-meta").textContent = `${scopeLabel()} · ${t("{n} open", { n: totals.open })}${totals.late ? `, ${t("{n} past term", { n: totals.late })}` : ""}${
+      unreadable ? ` · ${tn("{n} repo could not be read", "{n} repos could not be read", unreadable)}` : ""
+    }`;
     if (!T.market.loaded) {
       setHTML($("t-pos"), `<p class="t-empty">${esc(t("Reading the repos…"))}</p>`);
       return;

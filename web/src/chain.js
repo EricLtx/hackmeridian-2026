@@ -897,11 +897,36 @@ export class Chain {
     return offers;
   }
 
-  /** Repos from `from` on, until the first id with no repo. */
-  async repos(from = 1) {
-    const repos = (await this.scan("get_repo", from)).map(({ id, value }) => normalizeRepo(id, value));
+  /**
+   * Repos from `from` on, until the first id with no repo: `{ repos,
+   * unreadable }`, the ones that pass the boundary and the ids of those a
+   * field was missing from, each warned once on the console. One malformed
+   * repo, of any account, thus stops neither the scan nor the pass that
+   * asked for it (WEB-5): it is skipped and counted, and the page says so.
+   * A repo read on its own (`repo`) still needs every field.
+   */
+  async readRepos(from = 1) {
+    const repos = [];
+    const unreadable = [];
+    for (const { id, value } of await this.scan("get_repo", from)) {
+      try {
+        repos.push(normalizeRepo(id, value));
+      } catch (error) {
+        unreadable.push(id);
+        this.warnedRepos ??= new Set();
+        if (!this.warnedRepos.has(id)) {
+          this.warnedRepos.add(id);
+          console.warn(`repo #${id} skipped: ${error?.message ?? error}`);
+        }
+      }
+    }
     await this.learnCoins(repos.map((r) => r.stablecoin));
-    return repos;
+    return { repos, unreadable };
+  }
+
+  /** The readable repos from `from` on (`readRepos`). */
+  async repos(from = 1) {
+    return (await this.readRepos(from)).repos;
   }
 
   async repo(id) {
