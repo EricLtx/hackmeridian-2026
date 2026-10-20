@@ -5,7 +5,7 @@
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
 import { Chain, rpcChangeText } from "./chain.js";
-import { checkDeployment } from "./deployment.js";
+import { checkDeployment, privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
 import { describeError } from "./errors.js";
 import {
@@ -1422,19 +1422,22 @@ async function loadHistory() {
   }
 }
 
-/** The footer: the contracts behind the page, each linked to the explorer. */
+/** The footer: the contracts behind the page, each linked to the explorer, the endpoint in use and who sees the visitor's reads. */
 function renderFoot() {
   const C = S.dep.contracts;
-  $("foot").innerHTML = t(
-    "Open Window contract {contract} on Stellar {network}. Fund shares {shares}, {code} {stablecoin}. Every figure is read from the chain; nothing here has real value. Apache-2.0.",
-    {
-      contract: link(S.chain.explorerAccount(C.openWindow), shortAddress(C.openWindow)),
-      network: esc(S.dep.network),
-      shares: link(S.chain.explorerAccount(C.fundShares), shortAddress(C.fundShares)),
-      code: esc(code()),
-      stablecoin: link(S.chain.explorerAccount(C.stablecoin), shortAddress(C.stablecoin)),
-    },
-  ) + ` <span class="rpc-note">${esc(t("Chain read through {host}.", { host: S.chain.rpcInfo().host }))}</span>`;
+  $("foot").innerHTML =
+    t(
+      "Open Window contract {contract} on Stellar {network}. Fund shares {shares}, {code} {stablecoin}. Every figure is read from the chain; nothing here has real value. Apache-2.0.",
+      {
+        contract: link(S.chain.explorerAccount(C.openWindow), shortAddress(C.openWindow)),
+        network: esc(S.dep.network),
+        shares: link(S.chain.explorerAccount(C.fundShares), shortAddress(C.fundShares)),
+        code: esc(code()),
+        stablecoin: link(S.chain.explorerAccount(C.stablecoin), shortAddress(C.stablecoin)),
+      },
+    ) +
+    ` <span class="rpc-note">${esc(t("Chain read through {host}.", { host: S.chain.rpcInfo().host }))}</span>` +
+    `<span class="rpc-note">${esc(privacyLine(S.dep, "market"))}</span>`;
 }
 
 /**

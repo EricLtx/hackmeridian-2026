@@ -6,7 +6,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Networks } from "@stellar/stellar-sdk";
-import { checkDeployment, httpsUrl, isDecimals, isTicker } from "../src/deployment.js";
+import { checkDeployment, httpsUrl, isDecimals, isTicker, privacyLine, providersText, rpcProviders } from "../src/deployment.js";
+import { setLang } from "../src/i18n.js";
 import { addr, contractLink, explorerOf, exportDecimals, txLink, when } from "../src/journal.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
@@ -56,6 +57,29 @@ test("the small checks the two pages share", () => {
   assert.ok(isTicker("tEUR") && !isTicker("t EUR") && !isTicker(7) && !isTicker("ABCDEFGHIJKLM"));
   assert.equal(httpsUrl("https://stellar.expert/explorer/testnet"), "https://stellar.expert/explorer/testnet");
   for (const url of ["javascript:alert(1)", "http://stellar.expert", "https://x.example/\"><script>", "https://a b", 5, null]) assert.equal(httpsUrl(url), null, String(url));
+});
+
+test("the footer names the RPC providers that see a visitor's IP address and the addresses read", () => {
+  assert.deepEqual(rpcProviders(dep), ["Stellar Development Foundation (soroban-testnet.stellar.org)", "Gateway.fm (soroban-rpc.testnet.stellar.gateway.fm)"]);
+  // A provider this page does not know by name is shown by its host; a repeated or broken URL adds nothing.
+  assert.deepEqual(rpcProviders({ rpcUrl: "https://rpc.example.org/x", rpcFallbacks: ["https://rpc.example.org/y", "not a url"] }), ["rpc.example.org"]);
+  assert.deepEqual(rpcProviders({ rpcUrl: "https://evilstellar.org" }), ["evilstellar.org"], "a look-alike domain is not the Foundation");
+  assert.deepEqual(rpcProviders(null), []);
+  assert.equal(
+    privacyLine(dep, "market"),
+    "Privacy: this page reads the chain through Stellar Development Foundation (soroban-testnet.stellar.org) and Gateway.fm (soroban-rpc.testnet.stellar.gateway.fm), which see your IP address and the addresses it reads, your wallet's included.",
+  );
+  assert.match(privacyLine(dep, "history"), /^Privacy: this page reads no chain data; the market page reads it through Stellar Development Foundation \(soroban-testnet\.stellar\.org\) and Gateway\.fm/);
+  assert.equal(privacyLine(null, "history"), "Privacy: this page reads no chain data.");
+  try {
+    setLang("fr");
+    assert.match(providersText(dep), / et Gateway\.fm/);
+    assert.match(privacyLine(dep, "market"), /^Confidentialité : cette page lit la chaîne via Stellar Development Foundation/);
+    setLang("es");
+    assert.match(privacyLine(dep, "history"), /^Privacidad: esta página no lee datos de la cadena; la página Mercado los lee a través de .+ y Gateway\.fm/);
+  } finally {
+    setLang("en");
+  }
 });
 
 test("the History page bounds the decimals it reads and links only to an https explorer", () => {

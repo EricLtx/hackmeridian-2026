@@ -8,6 +8,7 @@
 import "@fontsource-variable/inter";
 import { tapeLine } from "./blotter.js";
 import { formatAmount, formatOrDash, formatRate, shortAddress } from "./format.js";
+import { privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
 import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
 import { addr, contractLink, esc, explorerOf, exportDecimals, txLink, when } from "./journal.js";
@@ -27,8 +28,8 @@ const STATUS_LABEL = {
   release_pending: [tk("Release pending"), "pill-warn"],
 };
 
-/** What the page shows: the export once loaded, or the reason it could not be loaded. */
-const view = { history: null, error: null };
+/** What the page shows: the export once loaded, or the reason it could not be loaded, and the deployment file when it loads. */
+const view = { history: null, error: null, deployment: null };
 
 // An amount or a rate of the export, or a dash when the cell is empty or not an integer: a malformed export never stops the page.
 const units = (raw, d) => formatOrDash(raw, (value) => formatAmount(value, d));
@@ -171,6 +172,8 @@ function renderLoadError(error) {
 
 /** Renders the page in the language in use, from what is already loaded. */
 function render() {
+  // Who sees a visitor's IP address: shown whether or not the export loaded.
+  $("foot-privacy").textContent = privacyLine(view.deployment, "history");
   if (view.error) {
     renderLoadError(view.error);
     return;
@@ -213,16 +216,15 @@ async function main() {
   initMotion();
   setLoading(true);
   wireLanguage();
-  let dep = null;
   try {
-    dep = await loadJson("deployment.testnet.json");
-    decimals = exportDecimals(dep);
+    view.deployment = await loadJson("deployment.testnet.json");
+    decimals = exportDecimals(view.deployment);
   } catch {
     // The deployment file is optional here: defaults apply.
   }
   try {
     view.history = await loadJson("history.json");
-    explorer = explorerOf(view.history, dep);
+    explorer = explorerOf(view.history, view.deployment);
   } catch (error) {
     view.error = error;
   }
