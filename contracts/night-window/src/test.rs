@@ -4972,14 +4972,15 @@ fn reanchor_cover(f: &Fixture, config: &FundConfig) -> i128 {
 /// 101 bps) exceeded the cover: a second wrong reading three days later at
 /// the top of the new corridor lent more than 10,500 EURC against 10,000
 /// shares worth that much. Such a re-anchor is now refused at its proposal
-/// until the steward widens the haircut to two floors plus that growth (166
-/// and 210 bps), and refused at its apply when the delay grew meanwhile.
-/// Under the widened haircut the same two readings lend less than the
-/// value; the honest NAV still fails closed after the first one, as any NAV
-/// under its corridor does, until `reset_reference`.
+/// until the steward widens the haircut to two floors plus the growth over
+/// the delay, the grace and two NAV ages (174 and 218 bps), and refused at
+/// its apply when the delay grew meanwhile. Under the widened haircut the
+/// same two readings lend less than the value, also in the strict case the
+/// bound is sized for; the honest NAV still fails closed after the first
+/// one, as any NAV under its corridor does, until `reset_reference`.
 #[test]
 fn a_reanchor_needs_a_haircut_that_covers_one_wrong_reading_at_its_apply() {
-    for (delay, bound) in [(14 * DAY, 166), (MAX_TIMELOCK_SECS, 210)] {
+    for (delay, bound) in [(14 * DAY, 174), (MAX_TIMELOCK_SECS, 218)] {
         let f = bare();
         f.client.set_timelock_delay(&delay);
         let config = loosest_config(&f);
@@ -5062,13 +5063,13 @@ fn a_reanchor_needs_a_haircut_that_covers_one_wrong_reading_at_its_apply() {
     let f = bare();
     f.client.set_timelock_delay(&(14 * DAY));
     let config = FundConfig {
-        haircut_bps: 166,
+        haircut_bps: 174,
         ..loosest_config(&f)
     };
     let (f, _) = ready_with(f, config.clone());
     f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
     f.client.set_timelock_delay(&MAX_TIMELOCK_SECS);
-    assert_eq!(reanchor_cover(&f, &config), 210);
+    assert_eq!(reanchor_cover(&f, &config), 218);
     advance(&f, 14 * DAY);
     publish_nav(&f, NAV_EUR);
     assert_eq!(
@@ -5077,18 +5078,84 @@ fn a_reanchor_needs_a_haircut_that_covers_one_wrong_reading_at_its_apply() {
     );
     f.client.set_fund_limits(
         &f.shares,
-        &210,
+        &218,
         &config.max_principal_per_repo,
         &config.max_outstanding,
     );
     f.client.apply_reanchor(&f.shares);
     assert_eq!(f.client.pending_reanchor(&f.shares), None);
+
+    // The strict case the bound is sized for: the proposal reads a NAV
+    // already one NAV age old, which the true NAV sits a floor under; the
+    // keeper reads that true NAV daily; the apply comes at the end of the
+    // grace on a wrong reading, and a second one follows one NAV age later
+    // at the top of the new corridor. At the bound the loan stays below the
+    // shares' value.
+    for (delay, bound) in [(14 * DAY, 174u32), (MAX_TIMELOCK_SECS, 218)] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let config = FundConfig {
+            haircut_bps: bound,
+            ..loosest_config(&f)
+        };
+        let (f, offer_id) = ready_with(f, config.clone());
+        let shares = 10_000 * ONE;
+        let bottom = NAV_EUR * (10_000 - i128::from(config.corridor_floor_bps)) / 10_000;
+        let true_value = shares * bottom / 10i128.pow(NAV_DECIMALS);
+        advance(&f, config.nav_max_age_secs);
+        f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+        assert_eq!(f.client.pending_reanchor(&f.shares).unwrap().nav_time, T0);
+        for _ in 0..(delay + PROPOSAL_GRACE_SECS) / DAY {
+            advance(&f, DAY);
+            publish_nav(&f, bottom);
+            f.client.refresh_reference(&f.shares);
+            assert!(f.client.try_quote(&f.shares, &shares, &f.eurc).is_ok());
+        }
+        let applied_at = f.env.ledger().timestamp();
+        assert_eq!(
+            applied_at,
+            T0 + config.nav_max_age_secs + delay + PROPOSAL_GRACE_SECS
+        );
+        publish_nav(&f, corridor_top(&config, NAV_EUR, T0, applied_at, u64::MAX));
+        f.client.apply_reanchor(&f.shares);
+        let path =
+            math::model_path(NAV_EUR, T0, applied_at, config.max_yield_bps, u64::MAX).unwrap();
+        assert_eq!(
+            f.client.get_fund_state(&f.shares).unwrap().reference_nav,
+            path
+        );
+        advance(&f, config.nav_max_age_secs);
+        let later = f.env.ledger().timestamp();
+        let top = corridor_top(&config, path, applied_at, later, config.nav_max_age_secs);
+        publish_nav(&f, top);
+        let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+        let value_read = shares * top / 10i128.pow(NAV_DECIMALS);
+        assert_eq!(
+            quote.max_principal,
+            value_read * (10_000 - i128::from(bound)) / 10_000
+        );
+        std::println!(
+            "strict case, delay {} d: loan {} against shares worth {}",
+            delay / DAY,
+            quote.max_principal,
+            true_value
+        );
+        assert!(quote.max_principal < true_value);
+        f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &shares,
+            &quote.max_principal,
+            &DAY,
+        );
+    }
 }
 
 /// Review finding VAL-1, second round: at the 48-hour default and the
-/// fixtures' settings (10 / 500 / 26 h) the re-anchor needs 34 bps and the
-/// 200 bps haircut covers it; under the one-minute to five-minute delay of
-/// a demonstration, 32. One wrong reading at the apply still lifts the
+/// fixtures' settings (10 / 500 / 26 h) the re-anchor needs 36 bps and the
+/// 200 bps haircut covers it; under the five-minute delay of a
+/// demonstration, 33. One wrong reading at the apply still lifts the
 /// reference by the model path over the delay and the grace, 12.3 bps,
 /// above the 10 bps floor: the honest flat NAV then fails closed, which the
 /// cover makes safe and the steward undoes with `reset_reference`.
@@ -5096,11 +5163,11 @@ fn a_reanchor_needs_a_haircut_that_covers_one_wrong_reading_at_its_apply() {
 fn at_the_default_delay_one_wrong_reading_at_the_apply_fails_the_honest_nav_closed() {
     let f = bare();
     f.client.set_timelock_delay(&300);
-    assert_eq!(reanchor_cover(&f, &fund_config(&f)), 32);
+    assert_eq!(reanchor_cover(&f, &fund_config(&f)), 33);
 
     let (f, _) = ready();
     let config = fund_config(&f);
-    assert_eq!(reanchor_cover(&f, &config), 34);
+    assert_eq!(reanchor_cover(&f, &config), 36);
     f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
     for _ in 0..9 {
         advance(&f, DAY);

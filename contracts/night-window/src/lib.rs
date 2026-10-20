@@ -3197,12 +3197,17 @@ fn corridor_haircut_bps(config: &FundConfig) -> Result<i128, Error> {
 /// reading over the real elapsed time (`apply_reanchor`): one wrong reading
 /// at that moment lifts the reference by the growth over the reading's age,
 /// the delay and the grace, where a refresh grants one NAV age of growth per
-/// reading (review finding VAL-1, second round, 20 October 2026). Two floors
-/// plus that growth, rounded up, with the delay as set at the call; the
-/// fixtures' 200 / 10 / 500 / 26 h need 34 under the default delay.
+/// reading (review finding VAL-1, second round, 20 October 2026). The worst
+/// span, from a true NAV a floor under the proposal's reading to a second
+/// wrong reading at the top of the new corridor, is two floors plus the
+/// growth over the delay, the grace and two NAV ages: the proposal's reading
+/// may already be one NAV age old, and the second reading comes one NAV age
+/// after the apply. Rounded up, with the delay as set at the call; the
+/// fixtures' 200 / 10 / 500 / 26 h need 36 under the default delay.
 fn reanchor_haircut_bps(env: &Env, config: &FundConfig) -> Result<i128, Error> {
     let span = storage::timelock_delay(env, DEFAULT_TIMELOCK_SECS)
         .checked_add(PROPOSAL_GRACE_SECS)
+        .and_then(|secs| secs.checked_add(config.nav_max_age_secs))
         .and_then(|secs| secs.checked_add(config.nav_max_age_secs))
         .ok_or(Error::ArithmeticOverflow)?;
     let growth = math::mul_div_ceil(
