@@ -190,6 +190,57 @@ function fundsOf() {
   if (C.shares3) list.push({ label: "fund 3", shares: C.shares3, navOracle: C.navOracle3, stablecoin: C.euro });
   return list;
 }
+/** The first line of an error's message, for an alert. */
+const firstLine = (error) => String(error?.message ?? error).split("\n")[0].slice(0, 160);
+
+/**
+ * One fund's reads, each caught on its own (oracle-3): a reverting feed or a
+ * failing read becomes `errors.<read>` for this fund, and the other reads,
+ * funds and detectors go on. A fund whose `get_fund` is None was removed:
+ * `remove_fund` deletes its settings only, so its state, its shares held and
+ * its positions are still read.
+ */
+async function readFund(f) {
+  const fund = sv.address(f.shares);
+  const errors = {};
+  const attempt = async (what, call) => {
+    try {
+      return await call();
+    } catch (error) {
+      errors[what] = firstLine(error);
+      return undefined;
+    }
+  };
+  const config = await attempt("get_fund", () => read(state, C.openWindow, "get_fund", [fund]));
+  const [fundState, held] = await Promise.all([
+    attempt("get_fund_state", () => read(state, C.openWindow, "get_fund_state", [fund])),
+    attempt("balance", () => read(state, f.shares, "balance", [sv.address(C.openWindow)])),
+  ]);
+  const base = { ...f, config, fundState, held, errors, currency: fundState ? String(fundState.currency) : null };
+  if (config === null) return { ...base, removed: true };
+  if (config === undefined) return base;
+  const [nav, stewardBackup] = await Promise.all([
+    attempt("lastprice", () => read(state, f.navOracle, "lastprice", [asset.stellar(f.shares)])),
+    // Version 4: without a registered backup, a lost steward key can never be replaced.
+    read(state, C.openWindow, "steward_backup", [fund]).catch(() => undefined),
+  ]);
+  // Simulated from the null account: reading needs no role key on this host.
+  // Any failure of the simulation is the contract's answer, a feed's revert
+  // included; only a failure to reach the RPC leaves the price unknown.
+  let priceError = null;
+  try {
+    priceError = await probe(state, null, C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(f.stablecoin)]);
+  } catch (error) {
+    if (error.simulation) priceError = { name: "HostError", contract: "host", detail: firstLine(error) };
+    else errors.quote = firstLine(error);
+  }
+  // The FX leg, when the fund's price is crossed through an FX feed.
+  const fxLeg = Array.isArray(config.source) && config.source[0] === "Cross" ? config.source[1] : null;
+  const fxAsset = fxLeg ? (fxLeg.asset[0] === "Other" ? asset.other(String(fxLeg.asset[1])) : asset.stellar(String(fxLeg.asset[1]))) : null;
+  const fx = fxLeg ? await attempt("FX lastprice", () => read(state, fxLeg.oracle, "lastprice", [fxAsset])) : null;
+  return { ...base, nav, stewardBackup, priceError, fxLeg, fx: fx ?? null };
+}
+
 async function snapshot(monitor) {
   const now = await ledgerTime();
   const [paused, repos, offers] = await Promise.all([
@@ -198,42 +249,27 @@ async function snapshot(monitor) {
     scan("get_offer"),
   ]);
   // One block per admitted fund: settings, state, NAV, shares held, quote probe, steward backup, FX leg.
-  const funds = await Promise.all(
-    fundsOf().map(async (f) => {
-      const fund = sv.address(f.shares);
-      const [config, fundState, nav, held, stewardBackup] = await Promise.all([
-        read(state, C.openWindow, "get_fund", [fund]),
-        read(state, C.openWindow, "get_fund_state", [fund]),
-        read(state, f.navOracle, "lastprice", [asset.stellar(f.shares)]),
-        read(state, f.shares, "balance", [sv.address(C.openWindow)]),
-        // Version 4: without a registered backup, a lost steward key can never be replaced.
-        read(state, C.openWindow, "steward_backup", [fund]).catch(() => undefined),
-      ]);
-      // Simulated from the null account: reading needs no role key on this host.
-      const priceError = await probe(state, null, C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(f.stablecoin)]);
-      // The FX leg, when the fund's price is crossed through an FX feed.
-      const fxLeg = Array.isArray(config.source) && config.source[0] === "Cross" ? config.source[1] : null;
-      const fxAsset = fxLeg ? (fxLeg.asset[0] === "Other" ? asset.other(String(fxLeg.asset[1])) : asset.stellar(String(fxLeg.asset[1]))) : null;
-      const fx = fxLeg ? await read(state, fxLeg.oracle, "lastprice", [fxAsset]).catch(() => null) : null;
-      return { ...f, config, fundState, nav, held, stewardBackup, priceError, fxLeg, fx, currency: String(fundState.currency) };
-    }),
-  );
+  const funds = await Promise.all(fundsOf().map(readFund));
   // Caps are per currency: two stablecoins of one currency share one cap.
   const caps = Object.fromEntries(
     await Promise.all(
-      [...new Set(funds.map((f) => f.currency))].map(async (currency) => {
-        const [outstanding, cap] = await Promise.all([
-          read(state, C.openWindow, "currency_outstanding", [sv.symbol(currency)]),
-          read(state, C.openWindow, "currency_cap", [sv.symbol(currency)]),
-        ]);
-        return [currency, { outstanding, cap }];
+      [...new Set(funds.map((f) => f.currency).filter(Boolean))].map(async (currency) => {
+        try {
+          const [outstanding, cap] = await Promise.all([
+            read(state, C.openWindow, "currency_outstanding", [sv.symbol(currency)]),
+            read(state, C.openWindow, "currency_cap", [sv.symbol(currency)]),
+          ]);
+          return [currency, { outstanding, cap }];
+        } catch (error) {
+          return [currency, { error: firstLine(error) }];
+        }
       }),
     ),
   );
   // The first fund's fields stay at the top level: the drills and older readers use them.
   const [first] = funds;
   const { config, fundState, nav, held, stewardBackup, priceError, fxLeg, fx, currency } = first;
-  const { outstanding, cap } = caps[currency];
+  const { outstanding, cap } = caps[currency] ?? {};
   // The keeper pays the rent: its float must cover the coming month. A host
   // without the keeper's key (a witness) reports it unreadable.
   const keeperPub = publicKeyOf(state, keeperRole());
@@ -251,7 +287,8 @@ async function snapshot(monitor) {
   const keyed = [
     ["contract instance", storageKey(C.openWindow)],
     ...funds.flatMap((f) => [
-      [`${f.label} config`, storageKey(C.openWindow, sv.variant("Fund", sv.address(f.shares)))],
+      // remove_fund deletes the settings by design: a removed fund's state is still watched.
+      ...(f.removed ? [] : [[`${f.label} config`, storageKey(C.openWindow, sv.variant("Fund", sv.address(f.shares)))]]),
       [`${f.label} state`, storageKey(C.openWindow, sv.variant("FundState", sv.address(f.shares)))],
     ]),
     ...openRepos.map((r) => [`repo #${r.id}`, storageKey(C.openWindow, sv.variant("Repo", sv.u64(r.id)))]),

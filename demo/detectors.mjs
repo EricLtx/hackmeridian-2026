@@ -86,12 +86,42 @@ export function lenderPairs(liveOffers, openRepos) {
 // state, `ctx` carries the thresholds (`limits`) and the journal memory.
 
 export const DETECTORS = {
+  funds(s) {
+    // oracle-3: one fund's failing read (a reverting feed, an RPC error) is
+    // that fund's critical alert; the other funds and detectors keep running.
+    // A fund the contract no longer lists was removed (`remove_fund`, governor,
+    // immediate): its positions can still be repurchased and seized, and its
+    // state and shares are still watched.
+    const out = [];
+    for (const f of s.funds) {
+      if (f.removed) {
+        const open = s.openRepos.filter((r) => String(r.fund) === f.shares).length;
+        out.push({ level: "critical", threat: "Elev.2", message: `fund_removed: the contract no longer lists the fund (get_fund is None)${open ? `, ${open} repo(s) still open` : ""}${tag(s, f)}`, action: "verify the delisting with the governor; exits stay open; drop the fund from this deployment's state once intended", fund: f.shares });
+      }
+      const failed = Object.entries(f.errors ?? {});
+      if (failed.length) {
+        out.push({ level: "critical", threat: "DoS.10", message: `fund unreadable: ${failed.map(([what, why]) => `${what} failed (${why})`).join("; ")}${tag(s, f)}`, action: "check the feed and the endpoint; the other funds and detectors keep running", fund: f.shares });
+      }
+    }
+    return out.map((a) => ({ detector: "funds", ...a }));
+  },
   price(s, _monitor, { limits }) {
     const out = [];
     for (const f of s.funds) {
-      if (f.priceError && PRICE_REFUSALS.includes(f.priceError.name)) {
-        out.push({ level: "critical", message: `the contract refuses the fund price: ${f.priceError.name}${tag(s, f)}`, action: "pause" });
+      if (!f.config) continue; // removed or unreadable: the funds detector reports it
+      if (f.priceError) {
+        // Open Window names its own codes bare; another contract's code is
+        // `kind:Name` and a trap is HostError: inside `quote` both come from
+        // the price feed, which the contract cannot read (oracle-3).
+        const { name } = f.priceError;
+        const fromFeed = name.includes(":") || name === "HostError";
+        if (fromFeed || PRICE_REFUSALS.includes(name)) {
+          out.push({ level: "critical", message: `the contract refuses the fund price: ${name}${fromFeed ? " (raised inside the valuation: the price feed fails)" : ""}${tag(s, f)}`, action: "pause" });
+        } else {
+          out.push({ level: "critical", message: `the price probe is refused with ${name}, which is not a price refusal${tag(s, f)}`, action: "check the fund's settings and the stablecoin registry: the probe quotes in the fund's stablecoin" });
+        }
       }
+      if (f.nav === undefined) continue; // unread: the funds detector reports it
       const ageHours = f.nav ? (s.now - Number(f.nav.timestamp)) / 3600 : Infinity;
       // Warn two hours before the fund's own bound, whatever it is.
       const warnHours = Math.min(limits.navWarnHours, Number(f.config.nav_max_age_secs) / 3600 - 2);
@@ -135,6 +165,7 @@ export const DETECTORS = {
     // the model; the keeper refreshes it when the NAV is newer.
     const out = [];
     for (const f of s.funds) {
+      if (!f.config || !f.fundState) continue;
       const referenceTime = Number(f.fundState.reference_time);
       const bound = Number(f.config.nav_max_age_secs);
       const age = s.now - referenceTime;
@@ -155,7 +186,6 @@ export const DETECTORS = {
     for (const f of s.funds) {
       const locked = s.openRepos.filter((r) => String(r.fund) === f.shares).reduce((sum, r) => sum + BigInt(r.shares), 0n);
       const awaiting = s.releases.filter((r) => String(r.fund) === f.shares).reduce((sum, r) => sum + BigInt(r.shares), 0n);
-      const held = BigInt(f.held);
       for (const r of s.releases.filter((x) => String(x.fund) === f.shares)) {
         out.push({
           detector: "reconciliation", threat: "DoS.5", level: "critical",
@@ -163,6 +193,8 @@ export const DETECTORS = {
           action: "contact the issuer, then release",
         });
       }
+      if (f.held === undefined || f.held === null) continue; // unread: the funds detector reports it
+      const held = BigInt(f.held);
       if (held !== locked + awaiting) {
         out.push({ detector: "reconciliation", threat: "DoS.5", level: "critical", message: `contract holds ${units(held, 7, 7)} shares, open repos and releases account for ${units(locked + awaiting, 7, 7)}: ${held - locked - awaiting} units apart (invariant I2)${tag(s, f)}`, action: "pause" });
       }
@@ -246,10 +278,15 @@ export const DETECTORS = {
     const out = [];
     const ratio = (a, b) => (BigInt(b) > 0n ? Number((BigInt(a) * 1000n) / BigInt(b)) / 1000 : 0);
     for (const f of s.funds) {
+      if (!f.config || !f.fundState) continue;
       const fundRatio = ratio(f.fundState.outstanding, f.config.max_outstanding);
       if (fundRatio >= limits.capWarnRatio) out.push({ level: "warning", message: `fund outstanding at ${(fundRatio * 100).toFixed(0)} % of its cap${tag(s, f)}`, action: "review limits" });
     }
     for (const [currency, c] of Object.entries(s.caps)) {
+      if (c.error) {
+        out.push({ level: "warning", message: `${currency} cap and outstanding unreadable: ${c.error}`, action: "check the endpoint" });
+        continue;
+      }
       const currencyRatio = ratio(c.outstanding, c.cap);
       if (currencyRatio >= limits.capWarnRatio) out.push({ level: "warning", message: `${currency} outstanding at ${(currencyRatio * 100).toFixed(0)} % of its cap`, action: "review limits" });
     }

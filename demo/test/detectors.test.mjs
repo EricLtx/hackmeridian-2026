@@ -77,6 +77,36 @@ test("price: the NAV age warns two hours before the fund's own bound, at most at
   assert.equal(at(8, 10).length, 1);
 });
 
+test("funds: a removed fund raises fund_removed, and the other funds are still checked", () => {
+  const removed = fund("fund 1", "CF1", { config: null, removed: true, stewardBackup: undefined, nav: undefined, priceError: undefined });
+  const other = fund("fund 2", "CF2", { priceError: { name: "StalePrice" } });
+  const alerts = detect(snap({ funds: [removed, other], openRepos: [repo(1, "CF1", 5)] }), {}, ctx());
+  const [gone] = alerts.filter((a) => a.detector === "funds");
+  assert.equal(gone.level, "critical");
+  assert.match(gone.message, /^fund_removed: .*1 repo\(s\) still open \[fund 1\]$/);
+  assert.ok(alerts.some((a) => a.detector === "price" && /StalePrice \[fund 2\]$/.test(a.message)));
+});
+
+test("funds: one fund's failing read is that fund's critical alert, and nothing else breaks", () => {
+  const broken = fund("fund 1", "CF1", { nav: undefined, errors: { lastprice: "HostError: Error(WasmVm, InvalidAction)" } });
+  const alerts = detect(snap({ funds: [broken, fund("fund 2", "CF2")] }), {}, ctx());
+  assert.deepEqual(alerts.map((a) => [a.detector, a.level]), [["funds", "critical"]]);
+  assert.match(alerts[0].message, /^fund unreadable: lastprice failed \(HostError.*\) \[fund 1\]$/);
+  // A fund whose settings could not be read at all is skipped by the others.
+  const blind = fund("fund 1", "CF1", { config: undefined, fundState: undefined, held: undefined, nav: undefined, errors: { get_fund: "timeout" } });
+  assert.deepEqual(detect(snap({ funds: [blind] }), {}, ctx()).map((a) => a.detector), ["funds"]);
+});
+
+test("price: a feed failing inside the valuation pauses like a refusal; another code alerts without pausing", () => {
+  const first = (name) => run("price", snap({ funds: [fund("fund 1", "CF1", { priceError: { name } })] }))[0];
+  for (const name of ["nav-oracle:InvalidPrice", "unknown:Error", "HostError", "PriceDivergence"]) {
+    assert.deepEqual([first(name).level, first(name).action], ["critical", "pause"], name);
+  }
+  const other = first("StablecoinNotAccepted");
+  assert.equal(other.level, "critical");
+  assert.notEqual(other.action, "pause");
+});
+
 test("reference-age: quiet at the bound, a refresh beyond it when the NAV is newer", () => {
   const f = (label, shares, refAge, navAge) => fund(label, shares, {
     fundState: { reference_time: BigInt(NOW - refAge), outstanding: 0n, currency: "EUR" },

@@ -165,10 +165,15 @@ export class ContractError extends Error {
 /**
  * Decodes the contract error of a failed simulation. The diagnostic log lists
  * events newest first; the oldest error event names the contract where the
- * error started (a token refusing a transfer inside `open_repo`, say).
+ * error started (a token refusing a transfer inside `open_repo`, say). The
+ * error carries `simulation: true`: the call ran and failed, which a caller
+ * tells apart from an RPC it could not reach.
  */
 function simulationError(sim) {
-  const text = sim.error ?? "";
+  return Object.assign(decodeSimulationError(sim.error ?? ""), { simulation: true });
+}
+
+function decodeSimulationError(text) {
   // The surfaced code heads the message. Error events are listed newest first:
   // the oldest event carrying that same code names the contract it came from.
   // An error a contract caught (a refused `try_transfer`) carries another code
