@@ -1,8 +1,9 @@
 // Governed upgrade of the Open Window demo instance on testnet (decision S7,
-// S15, S29): upload the built WASM, propose it with the governor and the
-// trustee, announce it to the monitor, wait for the time delay, upgrade, then
+// S15, S29): upload the built WASM, announce it to the monitor, propose it
+// with the governor and the trustee, wait for the time delay, upgrade, then
 // run `migrate` when the stored layout is behind the code, and check the
-// executable hash the ledger holds.
+// executable hash the ledger holds. A running monitor watch merges the
+// announcement and the new code baseline itself: no restart is needed.
 //
 //   npm run upgrade                  propose, wait for the delay, upgrade, migrate
 //   npm run upgrade -- --propose     propose and announce only
@@ -32,6 +33,7 @@ import {
   storageKey,
   sv,
 } from "./lib.mjs";
+import { acknowledgeUpgrade, announceUpgrade } from "./monitor-state.mjs";
 
 const args = process.argv.slice(2);
 const PROPOSE_ONLY = args.includes("--propose");
@@ -45,30 +47,15 @@ if (!ow) {
   process.exit(1);
 }
 
-/** The monitor reports an announced upgrade as a warning, an unannounced one as an attack. */
-function announce(hash) {
-  let monitor = {};
-  try {
-    monitor = JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
-  } catch {
-    // No monitor state yet: it starts with this announcement.
-  }
-  monitor.announced = [...new Set([...(monitor.announced ?? []), hash.toLowerCase()])];
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.writeFileSync(MONITOR_FILE, JSON.stringify(monitor, null, 2));
-}
+/**
+ * The monitor reports an announced upgrade as a warning, an unannounced one
+ * as an attack it cancels. The announcement is written before the proposal
+ * lands, and a running watch merges it before it decides (TOOL-3).
+ */
+const announce = (hash) => announceUpgrade(MONITOR_FILE, hash);
 
-/** After a verified upgrade the monitor's code baseline moves to the executable the ledger holds, so Elev.2 stops reporting the change we made. */
-function acknowledge(hash) {
-  let monitor = {};
-  try {
-    monitor = JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
-  } catch {
-    return;
-  }
-  monitor.wasmHash = hash.toLowerCase();
-  fs.writeFileSync(MONITOR_FILE, JSON.stringify(monitor, null, 2));
-}
+/** After a verified upgrade the monitor's code baseline moves to the executable the ledger holds, so Elev.2 stops reporting the change we made; a running watch takes it up at its next pass. */
+const acknowledge = (hash) => acknowledgeUpgrade(MONITOR_FILE, hash);
 
 /** The WASM hash the ledger holds as the instance's executable. */
 async function executableHash() {
@@ -89,14 +76,16 @@ async function propose() {
   }
   // The upload needs a funded account, not a role: the operator pays it.
   await send(state, "operator", Operation.uploadContractWasm({ wasm }), "upload night_window.wasm", { maxResourceFee: UPLOAD_MAX_FEE });
+  // Announced before it is proposed: a running watch must never read the
+  // proposal before the announcement and cancel it (TOOL-3).
+  announce(hex);
   // The proposal takes the governor and, when named, the trustee: both keys
   // are in the demo state, so the authorization entries are signed here.
   // The trustee is declared: a key signs only what its call expects (rpc-1).
   const r = await invoke(state, "governor", ow, "propose_upgrade", [sv.bytes(hash)], { cosigners: ["trustee"] });
-  announce(hex);
   const pending = await read(state, ow, "pending_upgrade");
   const eta = Number(pending.eta);
-  console.log(`proposed in ${r.seconds.toFixed(1)} s, announced to the monitor; applies at ${new Date(eta * 1000).toISOString()}  ${explorer(r.hash)}`);
+  console.log(`announced to the monitor, then proposed in ${r.seconds.toFixed(1)} s; applies at ${new Date(eta * 1000).toISOString()}  ${explorer(r.hash)}`);
   return { hex, hash, eta };
 }
 
@@ -117,7 +106,7 @@ async function apply(hash) {
   console.log(`ledger executable ${held}`);
   if (held !== Buffer.from(wasmHash).toString("hex")) throw new Error("the ledger holds another executable: stop and investigate");
   acknowledge(held);
-  console.log("monitor baseline moved to the new executable (restart a running watch to pick it up)");
+  console.log("monitor baseline moved to the new executable; a running watch takes it up at its next pass");
   // Pre-rc4 code has no schema_version: read it through the new code, after the upgrade.
   const version = Number(await read(state, ow, "schema_version"));
   const expected = await expectedSchema();

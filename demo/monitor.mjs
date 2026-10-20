@@ -72,6 +72,7 @@ import {
 import { FUND_SETTINGS, navAt } from "./config.mjs";
 import { plain } from "../indexer/lib/plain.mjs";
 import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, statusOf } from "./detectors.mjs";
+import { loadMonitor as loadMonitorFile, refreshMonitor as refreshMonitorFile, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
 
 const args = process.argv.slice(2);
 /** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
@@ -123,20 +124,16 @@ if (!C?.openWindow) {
   process.exit(1);
 }
 
-/** Monitoring state of the deployed contract; a new deployment starts afresh. */
-function loadMonitor() {
-  let m = {};
-  try {
-    m = JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
-  } catch {
-    // first run
-  }
-  return m.contract === C.openWindow ? m : { contract: C.openWindow, announced: m.announced ?? [] };
-}
-function saveMonitor(m) {
-  // Fields starting with "_" are this process's memory (the journal check's), never saved.
-  fs.writeFileSync(MONITOR_FILE, JSON.stringify(m, (key, value) => (key.startsWith("_") ? undefined : value), 2));
-}
+/**
+ * Monitoring state of the deployed contract; a new deployment starts afresh.
+ * Other processes write to the same file (`npm run upgrade`, the
+ * `--announce-...=` flags): every pass and every decision merges what they
+ * wrote first, and every save writes that merge (monitor-state.mjs, TOOL-3).
+ * Fields starting with "_" are this process's memory, never saved.
+ */
+const loadMonitor = () => loadMonitorFile(MONITOR_FILE, C.openWindow);
+const saveMonitor = (m) => saveMonitorFile(MONITOR_FILE, m);
+const refreshMonitor = (m) => refreshMonitorFile(MONITOR_FILE, m);
 
 // ---------------------------------------------------------------------------
 // The indexer's journal, read incrementally (Repud.2 cross-check)
@@ -534,7 +531,12 @@ async function secondFacts(latest) {
 }
 
 async function pass(monitor, { quiet = false } = {}) {
+  // What other processes wrote to the state file (an announcement, a code
+  // baseline moved by `npm run upgrade`) counts from this pass on, and so
+  // does what they wrote while the chain was being read (TOOL-3).
+  refreshMonitor(monitor);
   const s = await snapshot(monitor);
+  refreshMonitor(monitor);
   const alerts = detect(s, monitor, { limits: LIMITS });
   // The next pass reads events after the last ledger this one covered.
   monitor.cursor = (s.eventsReached ?? s.latest) + 1;
@@ -742,10 +744,13 @@ async function perform(action, s) {
  * the snapshot. With a second endpoint configured, each one waits for that
  * endpoint to read the same facts; otherwise, or when it fails, it becomes a
  * critical alert and the next action still runs (auth-6, rpc-2). Returns
- * the words the rehearsal records.
+ * the words the rehearsal records. An announcement written since the pass
+ * read the state file is merged first: a planned change is never answered
+ * as an attack (TOOL-3).
  */
 async function act(alerts, s, monitor = {}) {
   const ctx = { actor: actorRole(s), keys: { trustee: Boolean(state.keys.trustee), guardian: Boolean(state.keys.guardian) }, limits: LIMITS };
+  refreshMonitor(monitor);
   const plan = decideActions(alerts, s, monitor, ctx);
   const raised = [...plan.alerts];
   const done = [];
