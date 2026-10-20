@@ -527,6 +527,28 @@ fn edge_values_give_typed_errors_not_panics() {
             }
         }
     }
+    // The wide floor takes non-negative operands and a positive divisor on
+    // both of its paths: a negative triple whose product fits the direct
+    // one is refused, not truncated towards zero, and so is a zero divisor.
+    let overflow = Err(Error::ArithmeticOverflow);
+    for (a, b, c) in [
+        (-1, -1, -1),
+        (-1, 1, 1),
+        (1, -1, 1),
+        (1, 1, -1),
+        (-7, 3, 2),
+        (7, -3, 2),
+        (7, 3, -2),
+        (i128::MIN + 1, 1, 1),
+        (1, 1, 0),
+        (i128::MAX, 2, 0),
+        (-1, i128::MAX, i128::MAX),
+    ] {
+        assert!(a.checked_mul(b).is_some() || c == 0, "{a} {b} {c}");
+        assert_eq!(math::mul_div_floor_wide(a, b, c), overflow, "{a} {b} {c}");
+    }
+    assert_eq!(math::mul_div_floor_wide(7, 3, 2), Ok(10));
+    assert_eq!(math::mul_div_floor_wide(0, i128::MAX, 1), Ok(0));
     for &t in &times {
         assert!(ok(math::ceil_to_hour(t).map(i128::from)));
     }

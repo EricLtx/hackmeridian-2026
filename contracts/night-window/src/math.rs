@@ -115,8 +115,12 @@ const TOP: u128 = 1 << 127;
 /// positive, through a 256-bit product where the direct one does not fit
 /// (review finding VAL-3, second round, 20 October 2026): the only overflow
 /// left is a quotient that does not fit in i128. A negative input or a zero
-/// `c` is an overflow too, never a trap.
+/// `c` is an overflow too, never a trap, on either path: the direct
+/// division would otherwise truncate a negative quotient towards zero.
 pub fn mul_div_floor_wide(a: i128, b: i128, c: i128) -> Result<i128, Error> {
+    if a < 0 || b < 0 || c <= 0 {
+        return Err(OVERFLOW);
+    }
     if let Some(product) = a.checked_mul(b) {
         return product.checked_div(c).ok_or(OVERFLOW);
     }
@@ -124,7 +128,7 @@ pub fn mul_div_floor_wide(a: i128, b: i128, c: i128) -> Result<i128, Error> {
     let (a, b, c) = (unsigned(a)?, unsigned(b)?, unsigned(c)?);
     let (high, low) = wide_product(a, b)?;
     // The quotient fits in 128 bits exactly when the high half is below
-    // the divisor; a zero divisor fails here.
+    // the divisor.
     if high >= c {
         return Err(OVERFLOW);
     }
