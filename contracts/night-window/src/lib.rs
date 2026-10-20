@@ -1203,16 +1203,18 @@ impl OpenWindow {
         let config = pricing_config(&env, &fund)?;
         let (nav, fx) = read_anchor(&env, &fund, &config)?;
         let nav_value = nav.price.mantissa();
+        let eta = eta(&env)?;
         // Values the apply will compute with must not overflow there: try
-        // the same arithmetic on them now.
+        // the same arithmetic on them now, with the growth the apply may
+        // count at the latest, at the end of the grace period.
         math::within_band(nav_value, nav_value, config.corridor_floor_bps)?;
         math::corridor(
             nav_value,
             nav.timestamp,
-            nav.timestamp,
+            eta.saturating_add(PROPOSAL_GRACE_SECS),
             config.corridor_floor_bps,
             config.max_yield_bps,
-            config.nav_max_age_secs,
+            u64::MAX,
         )?;
         if !math::within_band(nav_value, expected_nav, config.corridor_floor_bps)? {
             return Err(Error::PriceOutOfBand);
@@ -1236,7 +1238,6 @@ impl OpenWindow {
             _ if expected_fx != 0 => return Err(Error::PriceOutOfBand),
             _ => AnchorFx::Direct,
         };
-        let eta = eta(&env)?;
         let pending = PendingReanchor {
             nav_oracle: config.oracle.clone(),
             nav_asset: config.oracle_asset.clone(),
@@ -1286,16 +1287,19 @@ impl OpenWindow {
         {
             return Err(Error::CurrencyMismatch);
         }
-        // The growth since the proposal counts over at most the NAV age
-        // bound, as for any valuation: the installed reference keeps the
-        // proposal's time, and the corridor around it grants no more.
+        // The NAV must have followed the model since the proposal, its
+        // growth counted over the real elapsed time, which the proposal's
+        // life bounds: the delay, its grace period and the NAV age of the
+        // proposal's reading. Counted over at most the NAV age bound, as a
+        // valuation counts it, an honest accruing NAV could never pass under
+        // a delay of a week or more (review finding VAL-1, 20 October 2026).
         let (low, high) = math::corridor(
             pending.nav,
             pending.nav_time,
             nav.timestamp,
             config.corridor_floor_bps,
             config.max_yield_bps,
-            config.nav_max_age_secs,
+            u64::MAX,
         )?;
         let value = nav.price.mantissa();
         if value < low || value > high {
@@ -1308,9 +1312,23 @@ impl OpenWindow {
                 return Err(Error::PriceOutOfBand);
             }
         }
+        // The NAV reference is carried from the proposal's reading to this
+        // one along the model, in one step: never below the NAV the two
+        // signers proposed, never above the model path from it at the
+        // maximum yield over the real elapsed time. A reference may never
+        // advance faster than that path, which successive refreshes already
+        // allow; the two signers fix the floor of the anchor and its FX
+        // rate, and whoever applies picks neither.
+        let ceiling = math::model_path(
+            pending.nav,
+            pending.nav_time,
+            nav.timestamp,
+            config.max_yield_bps,
+            u64::MAX,
+        )?;
         let mut state = storage::fund_state(&env, &fund)?;
-        state.reference_nav = pending.nav;
-        state.reference_time = pending.nav_time;
+        state.reference_nav = value.min(ceiling).max(pending.nav);
+        state.reference_time = nav.timestamp.max(pending.nav_time);
         state.nav_decimals = pending.nav_decimals;
         state.reference_fx = pending.fx.rate().map_or(0, |anchor| anchor.rate);
         state.fx_decimals = pending.fx.rate().map_or(0, |anchor| anchor.decimals);
@@ -1319,8 +1337,8 @@ impl OpenWindow {
         storage::bump_instance(&env);
         Reanchored {
             fund,
-            nav: pending.nav,
-            nav_time: pending.nav_time,
+            nav: state.reference_nav,
+            nav_time: state.reference_time,
             fx: state.reference_fx,
         }
         .publish(&env);

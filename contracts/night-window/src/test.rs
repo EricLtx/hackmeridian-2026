@@ -4238,8 +4238,11 @@ fn a_new_steward_drops_the_fallback_the_previous_one_signed() {
 /// Second review, M3: after a legitimate drop, the governor and the steward
 /// re-anchor the fund on the readings of the proposal; whoever applies can
 /// neither choose the anchor nor apply it against a feed that moved away.
+/// From rc5 on the apply carries the reference from the proposal's reading
+/// to its own along the model path (review finding VAL-1, 20 October 2026):
+/// never below the proposal, never above the path.
 #[test]
-fn reanchor_installs_the_readings_of_the_proposal() {
+fn reanchor_carries_the_readings_of_the_proposal_along_the_model() {
     let (f, offer_id) = ready();
     let dropped = NAV_EUR * 98 / 100;
     publish_nav(&f, dropped);
@@ -4296,14 +4299,15 @@ fn reanchor_installs_the_readings_of_the_proposal() {
     advance(&f, DEFAULT_TIMELOCK_SECS);
     // Review of the re-anchor round, item 3: the apply follows the model
     // from the proposed NAV. 0.2 % up in two days is faster than the
-    // corridor (0.1 % floor plus 5 % a year), 0.15 % down is below its
-    // floor: both refused. So is 0.12 % up from rc5 on: the growth counts
-    // over at most the NAV age bound, 26 hours, not the two days of the
-    // delay (review finding arith-2).
+    // corridor (0.1 % floor plus 5 % a year over the two days of the delay,
+    // 12.74 bps), 0.15 % down is below its floor: both refused. So is
+    // 0.13 % up. The growth counts over the real elapsed time (review
+    // finding VAL-1): over at most the NAV age bound, 26 hours, as rc5
+    // first counted it, 0.12 % up was refused too.
     for moved in [
         dropped * 1_002 / 1_000,
         dropped * 9_985 / 10_000,
-        dropped * 10_012 / 10_000,
+        dropped * 10_013 / 10_000,
     ] {
         publish_nav(&f, moved);
         assert_eq!(
@@ -4312,25 +4316,29 @@ fn reanchor_installs_the_readings_of_the_proposal() {
         );
     }
     assert!(f.client.pending_reanchor(&f.shares).is_some());
-    // 0.11 % up: more than the 0.1 % floor, but on the model path, which a
-    // symmetric band would wrongly refuse. The proposal's readings are
-    // installed, not the spot.
+    // 0.11 % up: more than the 0.1 % floor, but on the model, which a
+    // symmetric band would wrongly refuse. The spot is not installed: the
+    // reference is carried from the proposal along the model path, at most
+    // 5 % a year over the two days, 2.74 bps.
     publish_nav(&f, dropped * 10_011 / 10_000);
     f.env.set_auths(&[]);
     f.client.apply_reanchor(&f.shares);
     assert!(f.env.auths().is_empty());
+    let now = T0 + DEFAULT_TIMELOCK_SECS;
+    let path = math::model_path(dropped, T0, now, 500, u64::MAX).unwrap();
+    assert!(dropped < path && path < dropped * 10_011 / 10_000);
     assert_eq!(
         own_events(&f),
         std::vec![Reanchored {
             fund: f.shares.clone(),
-            nav: dropped,
-            nav_time: T0,
+            nav: path,
+            nav_time: now,
             fx: 0
         }
         .to_xdr(&f.env, &f.contract_id)]
     );
     let state = f.client.get_fund_state(&f.shares).unwrap();
-    assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
+    assert_eq!((state.reference_nav, state.reference_time), (path, now));
     assert_eq!(f.client.pending_reanchor(&f.shares), None);
     f.env.mock_all_auths();
     f.client.open_repo(
@@ -4393,9 +4401,236 @@ fn readmission_off_the_path_goes_through_a_reanchor() {
     );
     f.client.apply_reanchor(&f.shares);
     f.client.apply_fund_change(&f.shares);
+    // The NAV did not move since the proposal: the anchor is the proposed
+    // NAV, at the time of the apply's reading (review finding VAL-1).
     let state = f.client.get_fund_state(&f.shares).unwrap();
-    assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
+    assert_eq!(
+        (state.reference_nav, state.reference_time),
+        (dropped, T0 + DEFAULT_TIMELOCK_SECS)
+    );
     assert!(f.client.get_fund(&f.shares).is_some());
+}
+
+/// A NAV accruing `bps` a year from `base` at T0, as the demo's feeds
+/// publish (4 % a year).
+fn accruing(base: i128, bps: i128, at: u64) -> i128 {
+    base + base * bps * i128::from(at - T0) / (10_000 * 31_536_000)
+}
+
+/// Review finding VAL-1 (20 October 2026): the apply of a re-anchor counted
+/// the NAV's growth since the proposal over at most the NAV age bound,
+/// while the proposal's reading is at least one delay old. Under a delay of
+/// about ten days or more, an honest NAV accruing 4 % a year never passed,
+/// and a fund that had failed closed stayed unpriced: the delay cannot come
+/// down after the first admission. The growth now counts over the real
+/// elapsed time, and the reference is carried to the apply's reading. Under
+/// 14- and 30-day delays, a fund that failed closed after twelve quiet days
+/// is re-anchored three days into the grace period, and prices again.
+#[test]
+fn a_reanchor_applies_under_the_longest_delays() {
+    for delay in [14 * DAY, MAX_TIMELOCK_SECS] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let (f, _) = ready_from(f);
+        let config = fund_config(&f);
+        advance(&f, 12 * DAY);
+        let proposed_at = f.env.ledger().timestamp();
+        let proposed = accruing(NAV_EUR, 400, proposed_at);
+        publish_nav(&f, proposed);
+        assert_eq!(
+            f.client.try_quote(&f.shares, &ONE, &f.eurc),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+        f.client.propose_reanchor(&f.shares, &proposed, &0);
+        advance(&f, delay + 3 * DAY);
+        let now = f.env.ledger().timestamp();
+        let honest = accruing(NAV_EUR, 400, now);
+        publish_nav(&f, honest);
+        f.client.apply_reanchor(&f.shares);
+        let state = f.client.get_fund_state(&f.shares).unwrap();
+        assert_eq!((state.reference_nav, state.reference_time), (honest, now));
+        assert!(
+            honest
+                <= math::model_path(proposed, proposed_at, now, config.max_yield_bps, u64::MAX)
+                    .unwrap()
+        );
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+    }
+}
+
+/// Review finding VAL-1: whoever applies a re-anchor picks the moment, not
+/// the anchor. Under a 14-day delay, a reading at the top of the corridor
+/// around the proposal installs the model path from the proposal, one unit
+/// more is refused, and a reading below the proposal installs the proposal:
+/// the apply can neither lift the anchor above the path nor lower it.
+#[test]
+fn the_reading_at_the_apply_is_clamped_to_the_model_path() {
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let (f, _) = ready_from(f);
+    let config = fund_config(&f);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    advance(&f, 14 * DAY);
+    let now = f.env.ledger().timestamp();
+    let path = math::model_path(NAV_EUR, T0, now, config.max_yield_bps, u64::MAX).unwrap();
+    let top = corridor_top(&config, NAV_EUR, T0, now, u64::MAX);
+    assert!(NAV_EUR < path && path < top);
+    publish_nav(&f, top + 1);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish_nav(&f, top);
+    f.client.apply_reanchor(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![Reanchored {
+            fund: f.shares.clone(),
+            nav: path,
+            nav_time: now,
+            fx: 0
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (path, now));
+
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let (f, _) = ready_from(f);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    advance(&f, 14 * DAY);
+    let now = f.env.ledger().timestamp();
+    publish_nav(&f, NAV_EUR * 9_995 / 10_000);
+    f.client.apply_reanchor(&f.shares);
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (NAV_EUR, now));
+}
+
+/// Review finding VAL-1, the reviewer's case: a 14-day delay chosen before
+/// the first admission, which never comes down, and a NAV accruing 4 % a
+/// year that a keeper refreshes daily. The re-anchor applies at its eta
+/// (rc5 as first written refused it on every day of its grace). After
+/// twelve quiet days the fund fails closed, and the re-anchor, the way out,
+/// applies under the same delay.
+#[test]
+fn a_reanchor_applies_under_a_two_week_delay() {
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let (f, offer_id) = ready_from(f);
+    let publish = |f: &Fixture| {
+        let nav = accruing(NAV_EUR, 400, f.env.ledger().timestamp());
+        publish_nav(f, nav);
+        nav
+    };
+    advance(&f, DAY);
+    let nav = publish(&f);
+    f.client.refresh_reference(&f.shares);
+    f.client.propose_reanchor(&f.shares, &nav, &0);
+    for _ in 0..14 {
+        advance(&f, DAY);
+        publish(&f);
+        f.client.refresh_reference(&f.shares);
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+    }
+    f.client.apply_reanchor(&f.shares);
+    f.client.quote(&f.shares, &ONE, &f.eurc);
+    assert_eq!(
+        f.client.try_set_timelock_delay(&(2 * DAY)),
+        Err(Ok(Error::DelayCannotDecrease))
+    );
+
+    for _ in 0..12 {
+        advance(&f, DAY);
+        publish(&f);
+    }
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let nav = publish(&f);
+    f.client.propose_reanchor(&f.shares, &nav, &0);
+    advance(&f, 14 * DAY);
+    publish(&f);
+    f.client.apply_reanchor(&f.shares);
+    f.client
+        .open_repo(&f.borrower, &offer_id, &f.shares, &ONE, &ONE, &DAY);
+}
+
+/// A cross fund admitted under `delay`, its USD NAV accruing `growth_bps` a
+/// year, refreshed daily by a keeper. EUR/USD moves 2.5 % up, beyond the
+/// 2 % band: the fund stops pricing until a re-anchor on the new rate
+/// applies, one delay later. Returns the result of that apply.
+fn cross_reanchor_after(delay: u64, growth_bps: i128) -> Result<(), Error> {
+    let f = bare();
+    f.client.set_timelock_delay(&delay);
+    let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    let publish = |f: &Fixture, rate: i128| {
+        let now = f.env.ledger().timestamp();
+        let nav = accruing(NAV_USD, growth_bps, now);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &now);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+        nav
+    };
+    publish(&f, EUR_USD);
+    let mut config = fund_config(&f);
+    config.oracle = nav_oracle;
+    config.source = PriceSource::Cross(FxLeg {
+        oracle: fx_oracle,
+        asset: Asset::Other(eur(&f.env)),
+        haircut_bps: 200,
+        max_age_secs: 3 * DAY,
+        band_bps: 200,
+    });
+    let (f, _) = ready_with(f, config);
+    let moved = EUR_USD * 10_250 / 10_000;
+    advance(&f, DAY);
+    publish(&f, moved);
+    f.client.refresh_reference(&f.shares);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let nav = publish(&f, moved);
+    f.client.propose_reanchor(&f.shares, &nav, &moved);
+    let mut waited = 0;
+    while waited < delay {
+        let step = DAY.min(delay - waited);
+        advance(&f, step);
+        waited += step;
+        publish(&f, moved);
+        f.client.refresh_reference(&f.shares);
+    }
+    match f.client.try_apply_reanchor(&f.shares) {
+        Ok(Ok(())) => {}
+        Err(Ok(error)) => return Err(error),
+        _ => panic!("unexpected result"),
+    }
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().reference_fx,
+        moved
+    );
+    f.client.quote(&f.shares, &ONE, &f.eurc);
+    Ok(())
+}
+
+/// Review finding VAL-1, cross fund: its FX reference moves only by a
+/// re-anchor, so a fund whose rate left the band waits for one. Under a
+/// 14-day delay and a NAV accruing 4 % a year, the re-anchor on the new
+/// rate was refused by its NAV check (from 11 days on, for this fund); it
+/// now applies under any delay, up to the 30-day ceiling.
+#[test]
+fn a_cross_fund_follows_the_fx_market_under_a_long_delay() {
+    assert_eq!(cross_reanchor_after(DEFAULT_TIMELOCK_SECS, 400), Ok(()));
+    assert_eq!(cross_reanchor_after(14 * DAY, 0), Ok(()));
+    assert_eq!(cross_reanchor_after(11 * DAY, 400), Ok(()));
+    assert_eq!(cross_reanchor_after(14 * DAY, 400), Ok(()));
+    assert_eq!(cross_reanchor_after(MAX_TIMELOCK_SECS, 400), Ok(()));
 }
 
 /// Re-anchor round, item 1: the signers sign the values. Readings away from
