@@ -37,6 +37,7 @@ import {
   extendTtl,
   invoke,
   keypair,
+  publicKeyOf,
   latestLedgers,
   ledgerEntries,
   ledgerTime,
@@ -207,7 +208,8 @@ async function snapshot(monitor) {
         // Version 4: without a registered backup, a lost steward key can never be replaced.
         read(state, C.openWindow, "steward_backup", [fund]).catch(() => undefined),
       ]);
-      const priceError = await probe(state, "governor", C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(f.stablecoin)]);
+      // Simulated from the null account: reading needs no role key on this host.
+      const priceError = await probe(state, null, C.openWindow, "quote", [fund, sv.i128(ONE), sv.address(f.stablecoin)]);
       // The FX leg, when the fund's price is crossed through an FX feed.
       const fxLeg = Array.isArray(config.source) && config.source[0] === "Cross" ? config.source[1] : null;
       const fxAsset = fxLeg ? (fxLeg.asset[0] === "Other" ? asset.other(String(fxLeg.asset[1])) : asset.stellar(String(fxLeg.asset[1]))) : null;
@@ -231,10 +233,11 @@ async function snapshot(monitor) {
   const [first] = funds;
   const { config, fundState, nav, held, stewardBackup, priceError, fxLeg, fx, currency } = first;
   const { outstanding, cap } = caps[currency];
-  // The keeper pays the rent: its float must cover the coming month.
-  const keeperPub = keypair(state, keeperRole()).publicKey();
-  const keeperKey = xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(keeperPub).xdrAccountId() }));
-  const keeperEntry = await ledgerEntries([keeperKey]).catch(() => null);
+  // The keeper pays the rent: its float must cover the coming month. A host
+  // without the keeper's key (a witness) reports it unreadable.
+  const keeperPub = publicKeyOf(state, keeperRole());
+  const keeperKey = keeperPub ? xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(keeperPub).xdrAccountId() })) : null;
+  const keeperEntry = keeperKey ? await ledgerEntries([keeperKey]).catch(() => null) : null;
   const keeperXlm = keeperEntry?.entries[0]?.value?.account?.balance != null ? Number(keeperEntry.entries[0].value.account.balance) / 1e7 : null;
 
   const openRepos = repos.filter((r) => statusOf(r) === "Open");

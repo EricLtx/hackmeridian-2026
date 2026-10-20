@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  Account,
   Address,
   Asset,
   Keypair,
@@ -329,6 +330,11 @@ export function keypair(state, role) {
   return Keypair.fromSecret(secret);
 }
 
+/** The public key of a role, or null when this host holds no key for it. */
+export function publicKeyOf(state, role) {
+  return state.keys?.[role] ? keypair(state, role).publicKey() : null;
+}
+
 /**
  * The keys that sign for a role. A role turned into a native multisig
  * account (`state.multisig[role]`, set by `setup -- --multisig`) needs every
@@ -516,16 +522,34 @@ export function invoke(state, sourceRole, contractId, fn, args = []) {
   return send(state, sourceRole, operation, `${sourceRole} ${fn}`);
 }
 
-/** Simulates a contract call and returns the decoded value, or throws. */
-export async function read(state, contractId, fn, args = [], sourceRole = "governor") {
-  const source = keypair(state, sourceRole);
-  const tx = await build(source.publicKey(), Operation.invokeContractFunction({ contract: contractId, function: fn, args }));
-  const sim = await net(() => server.simulateTransaction(tx), "read");
+/**
+ * The source of a simulation that needs no account: an all-zero key nobody
+ * holds, as web/src/chain.js uses. A read then needs no role key on the host
+ * (the monitoring host keeps no governor secret) and no `getAccount` call.
+ */
+export const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/** A call to simulate, from `sourcePublicKey` or the null account; never signed, never sent. */
+function simulationTx(sourcePublicKey, contractId, fn, args) {
+  return new TransactionBuilder(new Account(sourcePublicKey ?? NULL_ACCOUNT, "0"), { fee: "100", networkPassphrase: PASSPHRASE })
+    .addOperation(Operation.invokeContractFunction({ contract: contractId, function: fn, args }))
+    .setTimeout(0)
+    .build();
+}
+
+/**
+ * Simulates a contract call and returns the decoded value, or throws. The
+ * source is the null account unless a role is named: no key is needed to
+ * read, and the answer does not depend on who asks.
+ */
+export async function read(state, contractId, fn, args = [], sourceRole = null) {
+  const source = sourceRole ? keypair(state, sourceRole).publicKey() : null;
+  const sim = await net(() => server.simulateTransaction(simulationTx(source, contractId, fn, args)), "read");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   return scValToNative(sim.result.retval);
 }
 
-/** Simulates a call from `sourceRole` and reports the contract error it would hit, if any. */
+/** Simulates a call (from `sourceRole`, or the null account when it is null) and reports the contract error it would hit, if any. */
 export async function probe(state, sourceRole, contractId, fn, args = []) {
   try {
     await read(state, contractId, fn, args, sourceRole);
@@ -597,12 +621,29 @@ export function codeKey(hash) {
   return xdr.LedgerKey.contractCode(new xdr.LedgerKeyContractCode({ hash: bytes }));
 }
 
-/** Reads ledger entries: `{ latest, entries: [{ liveUntil, value }] }`, null for a missing entry. */
-export async function ledgerEntries(keys) {
-  const response = await net(() => server.getLedgerEntries(...keys), "ledger entries");
-  const byKey = new Map(response.entries.map((e) => [e.key.toXDR("base64"), e]));
+/** The most keys one `getLedgerEntries` call takes: the RPC refuses the 201st (live check, 20 October 2026). */
+export const LEDGER_KEYS_PER_CALL = 200;
+
+/**
+ * Reads ledger entries: `{ latest, entries: [{ liveUntil, value }] }`, null
+ * for a missing entry, in the order of `keys`. The keys go out in calls of at
+ * most 200, so a growing number of positions never makes the read fail
+ * (econ-3); `latest` is the highest ledger the calls answered at, which
+ * errs towards a shorter time to live. `client` defaults to the failover
+ * client; `endpointClient` passes one endpoint's.
+ */
+export async function ledgerEntries(keys, client = server) {
+  const byKey = new Map();
+  let latest = null;
+  for (let start = 0; start < keys.length; start += LEDGER_KEYS_PER_CALL) {
+    const chunk = keys.slice(start, start + LEDGER_KEYS_PER_CALL);
+    const response = await net(() => client.getLedgerEntries(...chunk), "ledger entries");
+    latest = Math.max(latest ?? 0, Number(response.latestLedger));
+    for (const e of response.entries) byKey.set(e.key.toXDR("base64"), e);
+  }
+  if (latest === null) latest = Number((await net(() => client.getLatestLedger(), "ledger")).sequence);
   return {
-    latest: response.latestLedger,
+    latest,
     entries: keys.map((k) => {
       const e = byKey.get(k.toXDR("base64"));
       return e ? { liveUntil: e.liveUntilLedgerSeq, value: e.val } : null;
