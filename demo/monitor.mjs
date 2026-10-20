@@ -1045,7 +1045,15 @@ async function rehearse() {
     while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
     await invoke(state, "operator", C.openWindow, "apply_reanchor", [fund]);
     const fs1 = await read(state, C.openWindow, "get_fund_state", [fund]);
-    record("privileged", "S21", "two-key re-anchor of the price reference", fired, "applied after the delay by a third party", BigInt(fs1.reference_nav) === nav && BigInt(fs1.reference_fx) === fx);
+    // rc5 (VAL-1): the apply carries the reference from the proposal's NAV to
+    // the reading at the apply, along the model path: never below the NAV the
+    // two signed, never above that reading. The FX reference is the rate they
+    // signed. With no publication during the delay, both NAVs are the same.
+    const atApply = BigInt((await read(state, C.navOracle, "lastprice", [fundAsset])).price);
+    const installed = BigInt(fs1.reference_nav);
+    const carried = installed >= nav && installed <= (atApply > nav ? atApply : nav);
+    console.log(`  reference installed at ${(Number(installed) / 1e14).toFixed(6)} (proposed ${(Number(nav) / 1e14).toFixed(6)}, read at the apply ${(Number(atApply) / 1e14).toFixed(6)}), EUR/USD ${(Number(fs1.reference_fx) / 1e14).toFixed(4)}`);
+    record("privileged", "S21", "two-key re-anchor of the price reference", fired, "applied after the delay by a third party", carried && BigInt(fs1.reference_fx) === fx);
   }
 
   if (runStep(13)) {
