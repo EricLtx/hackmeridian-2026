@@ -35,6 +35,7 @@ import {
   REFLECTOR_FX_TESTNET as REFLECTOR_FX,
   explorer,
   extendTtl,
+  CODE_SLICE_MAX_FEE,
   invoke,
   keypair,
   publicKeyOf,
@@ -361,7 +362,8 @@ async function perform(action, s) {
       return "extend";
     }
     case "extend_code": {
-      const r = await extendTtl(state, keeperRole(), [action.key], Math.floor(action.targetDays * 17_280));
+      // Its rent is the largest fee the monitor pays: capped at one slice (lib.mjs).
+      const r = await extendTtl(state, keeperRole(), [action.key], Math.floor(action.targetDays * 17_280), { maxResourceFee: CODE_SLICE_MAX_FEE });
       const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
       console.log(`  ACTION   extended the contract code to about ${action.targetDays.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
       return "extend code";
@@ -518,7 +520,7 @@ async function rehearse() {
     console.log("\n8. Key compromise drill (Elev.2): the governor keys propose an unannounced upgrade");
     // The hash of another contract's code stands for a hostile WASM: it is never executed.
     const hostile = crypto.createHash("sha256").update(fs.readFileSync(path.join(WASM_DIR, "fund_token.wasm"))).digest();
-    const proposed = await invoke(state, "governor", C.openWindow, "propose_upgrade", [sv.bytes(hostile)]);
+    const proposed = await invoke(state, "governor", C.openWindow, "propose_upgrade", [sv.bytes(hostile)], { cosigners: ["trustee"] });
     const proposedAt = Date.now();
     const pending = await read(state, C.openWindow, "pending_upgrade");
     const early = await probe(state, "governor", C.openWindow, "upgrade", [sv.bytes(hostile)]);
@@ -585,7 +587,7 @@ async function rehearse() {
     let active = await read(state, C.openWindow, "get_fallback", [fund]);
     if (!active) {
       const feed = sv.struct({ oracle: sv.address(C.backupFeed), asset: fundAsset, max_age_secs: sv.u64(26 * 3600), max_divergence_bps: sv.u32(20) });
-      await invoke(state, "governor", C.openWindow, "propose_fallback", [fund, feed]);
+      await invoke(state, "governor", C.openWindow, "propose_fallback", [fund, feed], { cosigners: ["steward"] });
       const pending = await read(state, C.openWindow, "pending_fallback", [fund]);
       console.log(`  backup feed proposed by governor and steward; applies after the delay (${Number(pending.eta) - (await ledgerTime())} s)`);
       while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
@@ -614,7 +616,7 @@ async function rehearse() {
     const nav = BigInt((await read(state, C.navOracle, "lastprice", [fundAsset])).price);
     const fxOracle = state.fxSource === "local" ? C.navOracle : REFLECTOR_FX;
     const fx = BigInt((await read(state, fxOracle, "lastprice", [asset.other("EUR")])).price);
-    await invoke(state, "governor", C.openWindow, "propose_reanchor", [fund, sv.i128(nav), sv.i128(fx)]);
+    await invoke(state, "governor", C.openWindow, "propose_reanchor", [fund, sv.i128(nav), sv.i128(fx)], { cosigners: ["steward"] });
     const pending = await read(state, C.openWindow, "pending_reanchor", [fund]);
     const { alerts } = await pass(monitor);
     const fired = alerts.some((a) => /reanchor_proposed/.test(a.message));
@@ -632,7 +634,7 @@ async function rehearse() {
       console.log("  no trustee on this deployment (needs a `setup -- --fresh` on a contract with the trustee role); skipped");
     } else {
       const guardian0 = await read(state, C.openWindow, "guardian");
-      const proposed = await invoke(state, "governor", C.openWindow, "force_guardian_change", [sv.address(pub("operator"))]);
+      const proposed = await invoke(state, "governor", C.openWindow, "force_guardian_change", [sv.address(pub("operator"))], { cosigners: ["trustee"] });
       const proposedAt = Date.now();
       const { s, alerts } = await pass(monitor);
       const fired = alerts.some((a) => a.detector === "privileged" && a.level === "critical" && /forced guardian change/.test(a.message));

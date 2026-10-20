@@ -23,6 +23,7 @@ import {
   StrKey,
   TransactionBuilder,
   authorizeEntry,
+  hash,
   nativeToScVal,
   rpc,
   scValToNative,
@@ -432,9 +433,29 @@ export const ONE = 10_000_000n;
 // Transactions
 // ---------------------------------------------------------------------------
 
+/** The inclusion fee every transaction bids, in stroops; the resource fee comes on top. */
+const INCLUSION_FEE = "2000000";
+
+/**
+ * The most a simulation may ask in resource fees before anything is signed:
+ * 25 XLM, as the web interface (web/src/chain.js). Legitimate calls cost
+ * about 1 XLM on testnet; the caps below are for the two writes that pay
+ * rent on a large entry.
+ */
+export const MAX_RESOURCE_FEE = 250_000_000n;
+/**
+ * One 30-day slice of the contract code entry: about 215 XLM of rent at the
+ * testnet rate measured on 20 October 2026 (7.15 XLM a day for the 1.88 MB
+ * the network counts for the code). 300 XLM leaves 40 % for the rate to
+ * rise and stays under the 429 XLM a transaction fee can carry.
+ */
+export const CODE_SLICE_MAX_FEE = 3_000_000_000n;
+/** An upload creates the code entry with the network's minimum time to live: about 50 XLM for night_window.wasm on testnet. */
+export const UPLOAD_MAX_FEE = 1_000_000_000n;
+
 async function build(sourcePublicKey, operation) {
   const account = await net(() => server.getAccount(sourcePublicKey), "account");
-  return new TransactionBuilder(account, { fee: "2000000", networkPassphrase: PASSPHRASE })
+  return new TransactionBuilder(account, { fee: INCLUSION_FEE, networkPassphrase: PASSPHRASE })
     .addOperation(operation)
     .setTimeout(TX_VALIDITY_SECS)
     .build();
@@ -466,6 +487,181 @@ function credentialAddress(entry) {
   return Address.fromScAddress(ADDRESS_ARMS[credentials.type](credentials).address).toString();
 }
 
+// ---------------------------------------------------------------------------
+// What a simulation may ask before anything is signed (rpc-1)
+// ---------------------------------------------------------------------------
+//
+// The RPC answers the simulation, and the simulation decides what is signed:
+// the authorization entries, the footprint (with the entries to restore) and
+// the resource fee. A hostile or compromised endpoint could slip in an entry
+// for another call, signed with a role key and replayed elsewhere, or a
+// footprint and a fee that drain the paying account. Each is checked against
+// what the operation itself is; anything else is refused before a signature.
+
+/** The value of an XDR union's arm, whatever its name. */
+const armOf = (union) => union[Object.keys(union).find((key) => key !== "type")];
+
+/** The authorized function that stands for each host function. */
+const AUTHORIZED_FOR = {
+  hostFunctionTypeInvokeContract: "sorobanAuthorizedFunctionTypeContractFn",
+  hostFunctionTypeCreateContract: "sorobanAuthorizedFunctionTypeCreateContractHostFn",
+  hostFunctionTypeCreateContractV2: "sorobanAuthorizedFunctionTypeCreateContractV2HostFn",
+};
+
+/** Whether an authorized function is exactly the operation's own call, arguments included. */
+function isOwnCall(authorized, func) {
+  return AUTHORIZED_FOR[func.type] === authorized.type && armOf(authorized).toXDR("base64") === armOf(func).toXDR("base64");
+}
+
+/** A short name of an authorized function, for messages. */
+function describeCall(authorized) {
+  const call = armOf(authorized);
+  if (authorized.type === "sorobanAuthorizedFunctionTypeContractFn") return `${Address.fromScAddress(call.contractAddress).toString().slice(0, 8)}….${String(call.functionName)}`;
+  return "a contract creation";
+}
+
+/** Every address an ScVal carries, at any depth. */
+function addressesIn(value, out = new Set()) {
+  if (!value) return out;
+  if (value.type === "scvAddress") out.add(Address.fromScAddress(value.address).toString());
+  else if (value.type === "scvVec") for (const item of value.vec ?? []) addressesIn(item, out);
+  else if (value.type === "scvMap") for (const entry of value.map ?? []) addressesIn(entry.val, addressesIn(entry.key, out));
+  return out;
+}
+
+/** The contract a creation makes: sha256 of its id preimage on this network. */
+function createdContract(call) {
+  const preimage = xdr.HashIdPreimage.envelopeTypeContractId(new xdr.HashIdPreimageContractId({ networkId: hash(Buffer.from(PASSPHRASE)), contractIdPreimage: call.contractIdPreimage }));
+  return StrKey.encodeContract(hash(preimage.toXDR()));
+}
+
+/** The addresses an operation names: the contract it calls or creates, its arguments, its deployer. */
+function operationAddresses(func) {
+  const out = new Set();
+  const call = armOf(func);
+  if (func.type === "hostFunctionTypeInvokeContract") {
+    out.add(Address.fromScAddress(call.contractAddress).toString());
+    for (const arg of call.args) addressesIn(arg, out);
+  } else if (func.type === "hostFunctionTypeCreateContract" || func.type === "hostFunctionTypeCreateContractV2") {
+    out.add(createdContract(call));
+    for (const arg of call.constructorArgs ?? []) addressesIn(arg, out);
+    if (call.contractIdPreimage.type === "contractIdPreimageFromAddress") out.add(Address.fromScAddress(call.contractIdPreimage.fromAddress.address).toString());
+  }
+  return out;
+}
+
+/** The role a local key holds for an address, for messages. */
+function roleOf(state, address) {
+  const role = Object.keys(state.keys ?? {}).find((r) => publicKeyOf(state, r) === address);
+  return role ? `${role} (${address.slice(0, 6)}…)` : address;
+}
+
+/**
+ * The addresses expected to authorize an operation: its source, the
+ * addresses it names, and the co-signers the caller declares (a role the
+ * contract has on record, such as the steward for `propose_fallback`).
+ */
+export function expectedSigners(state, sourceRole, func, cosigners = []) {
+  const expected = operationAddresses(func);
+  expected.add(keypair(state, sourceRole).publicKey());
+  for (const role of cosigners) {
+    const address = publicKeyOf(state, role);
+    if (address) expected.add(address);
+  }
+  return expected;
+}
+
+/**
+ * Refuses an authorization entry that is not for the operation's own call,
+ * or an address-credential entry for an address the operation does not
+ * expect. A signature over another call could be replayed in a transaction
+ * the RPC builds (rpc-1); one from an unexpected role is never needed.
+ */
+export function checkAuthEntries(state, entries, func, expected, label) {
+  for (const entry of entries) {
+    const root = entry.rootInvocation.function;
+    if (!isOwnCall(root, func)) {
+      throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; nothing signed (rpc-1)`);
+    }
+    if (isAddressCredential(entry)) {
+      const address = credentialAddress(entry);
+      if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; nothing signed (rpc-1)`);
+    }
+  }
+}
+
+/** The Soroban data of an assembled transaction: footprint, resources, resource fee. */
+function sorobanDataOf(tx) {
+  const ext = tx.toEnvelope().value.tx.ext;
+  if (ext.type !== "sorobanData") throw new Error("not a Soroban transaction");
+  return ext.value;
+}
+
+/** What a footprint key names, or null when it is an entry `known` allows to write. */
+function foreignWrite(key, known) {
+  if (key.type === "contractCode") return known.code?.has(Buffer.from(key.contractCode.hash.toXDR()).toString("hex")) ? null : "a contract's code";
+  if (key.type === "contractData") {
+    const owner = Address.fromScAddress(key.contractData.contract).toString();
+    return known.addresses.has(owner) ? null : `data of ${owner}`;
+  }
+  if (key.type === "account" || key.type === "trustline") {
+    const accountId = key.type === "account" ? key.account.accountId : key.trustLine.accountId;
+    const owner = Address.fromScAddress(xdr.ScAddress.scAddressTypeAccount(accountId)).toString();
+    return known.addresses.has(owner) ? null : `the ${key.type} of ${owner}`;
+  }
+  return `a ${key.type} entry`;
+}
+
+/**
+ * Refuses a footprint that writes, or restores, an entry the operation does
+ * not touch: an invocation writes only the data of this deployment's
+ * contracts, of the contracts and accounts it names and of the local roles
+ * (balances, trustlines, signature nonces), never contract code; an upload
+ * writes only the code it uploads. Restoring a stranger's archived entry is
+ * how a simulation makes the payer buy rent it never needed.
+ */
+export function checkFootprint(state, ready, func, expected, label) {
+  const known = { addresses: new Set(expected) };
+  for (const id of Object.values(state.contracts ?? {})) if (typeof id === "string" && id.startsWith("C")) known.addresses.add(id);
+  for (const role of Object.keys(state.keys ?? {})) known.addresses.add(publicKeyOf(state, role));
+  if (func.type === "hostFunctionTypeUploadContractWasm") known.code = new Set([hash(Buffer.from(func.wasm)).toString("hex")]);
+  for (const key of sorobanDataOf(ready).resources.footprint.readWrite) {
+    const why = foreignWrite(key, known);
+    if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; nothing signed (rpc-1)`);
+  }
+}
+
+/**
+ * Refuses an extension whose footprint is not exactly the requested keys,
+ * read-only, with nothing to restore: the simulation chooses which entries
+ * the keeper pays to extend, and a swapped footprint (another contract's
+ * code, say) is rent the keeper never meant to pay (rpc-1).
+ */
+export function checkExtendFootprint(ready, keys, label) {
+  const data = sorobanDataOf(ready);
+  const asked = new Set(keys.map((k) => k.toXDR("base64")));
+  const { readOnly, readWrite } = data.resources.footprint;
+  const got = new Set(readOnly.map((k) => k.toXDR("base64")));
+  const restores = data.ext.type === "v0" ? [] : armOf(data.ext).archivedSorobanEntries ?? [];
+  if (readWrite.length || restores.length || got.size !== asked.size || [...got].some((k) => !asked.has(k))) {
+    throw new Error(`${label}: the simulation extends other entries than the ${keys.length} asked; nothing signed (rpc-1)`);
+  }
+}
+
+/**
+ * Refuses a transaction whose resource fee is above `cap`, or whose total fee
+ * is anything but the inclusion bid plus that resource fee: the fee signed is
+ * the fee checked.
+ */
+export function checkFee(ready, cap, label) {
+  const resourceFee = BigInt(sorobanDataOf(ready).resourceFee.toString());
+  const beyondInclusion = BigInt(ready.fee) - BigInt(INCLUSION_FEE);
+  if (resourceFee > cap || beyondInclusion > cap || beyondInclusion !== resourceFee) {
+    const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
+    throw new Error(`${label}: the simulation asks ${xlm(beyondInclusion > resourceFee ? beyondInclusion : resourceFee)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; nothing signed (rpc-1)`);
+  }
+}
+
 /** Signs every address-credential entry with the matching local key. */
 async function signAuth(state, entries) {
   const { sequence } = await net(() => server.getLatestLedger(), "ledger");
@@ -486,40 +682,57 @@ async function signAuth(state, entries) {
  * Returns `{ value, raw, hash, seconds, total, fee }`: the decoded return
  * value, the transaction hash, the seconds from submission to confirmation,
  * the seconds including simulation and signing, and the fee in stroops.
+ *
+ * Before anything is signed, the simulation must authorize only this call,
+ * by its source, the addresses it names and the declared `cosigners`; write
+ * only entries the call touches; and ask at most `maxResourceFee` (25 XLM by
+ * default). Otherwise it throws and nothing leaves this machine.
  */
-export async function send(state, sourceRole, operation, label = sourceRole) {
+export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE } = {}) {
   const begun = Date.now();
   const source = keypair(state, sourceRole);
   let tx = await build(source.publicKey(), operation);
+  const func = tx.operations[0].func;
+  const expected = expectedSigners(state, sourceRole, func, cosigners);
   let sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
 
   const recorded = normalizeAuth(sim.result?.auth);
+  checkAuthEntries(state, recorded, func, expected, label);
   if (recorded.some(isAddressCredential)) {
     const signed = await signAuth(state, recorded);
-    const func = tx.operations[0].func;
     tx = await build(source.publicKey(), Operation.invokeHostFunction({ func, auth: signed }));
     sim = await net(() => server.simulateTransaction(tx), "simulate");
     if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   }
 
   const ready = rpc.assembleTransaction(tx, sim).build();
+  // The assembled transaction keeps our entries when we signed some, else it
+  // takes the simulation's: check what is actually there.
+  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label);
+  checkFootprint(state, ready, func, expected, label);
+  checkFee(ready, maxResourceFee, label);
   signTx(state, sourceRole, ready);
-  const { result, hash, seconds, fee } = await submit(ready, label);
+  const { result, hash: txHash, seconds, fee } = await submit(ready, label);
   return {
     value: result.returnValue ? scValToNative(result.returnValue) : undefined,
     raw: result.returnValue,
-    hash,
+    hash: txHash,
     seconds,
     total: (Date.now() - begun) / 1000,
     fee,
   };
 }
 
-/** Calls a contract function in a transaction. */
-export function invoke(state, sourceRole, contractId, fn, args = []) {
+/**
+ * Calls a contract function in a transaction. `options.cosigners` names the
+ * roles the contract requires besides the source and the addresses in
+ * `args` (the steward on record for `propose_fallback`, the trustee for
+ * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap.
+ */
+export function invoke(state, sourceRole, contractId, fn, args = [], options = {}) {
   const operation = Operation.invokeContractFunction({ contract: contractId, function: fn, args });
-  return send(state, sourceRole, operation, `${sourceRole} ${fn}`);
+  return send(state, sourceRole, operation, `${sourceRole} ${fn}`, options);
 }
 
 /**
@@ -571,7 +784,7 @@ export async function classic(state, sourceRole, operation) {
 /** Uploads a WASM file and deploys it with constructor arguments. */
 export async function deploy(state, sourceRole, wasmFile, constructorArgs) {
   const wasm = fs.readFileSync(path.join(WASM_DIR, wasmFile));
-  const upload = await send(state, sourceRole, Operation.uploadContractWasm({ wasm }), `upload ${wasmFile}`);
+  const upload = await send(state, sourceRole, Operation.uploadContractWasm({ wasm }), `upload ${wasmFile}`, { maxResourceFee: UPLOAD_MAX_FEE });
   const wasmHash = Buffer.from(upload.value);
   const created = await send(
     state,
@@ -651,11 +864,16 @@ export async function ledgerEntries(keys, client = server) {
   };
 }
 
-/** Extends the time to live of persistent entries to `ledgers` from now. Anyone may pay for it. */
-export async function extendTtl(state, sourceRole, keys, ledgers) {
+/**
+ * Extends the time to live of persistent entries to `ledgers` from now.
+ * Anyone may pay for it. The simulation must keep exactly these keys and ask
+ * at most `maxResourceFee` (25 XLM; `CODE_SLICE_MAX_FEE` for the code entry).
+ */
+export async function extendTtl(state, sourceRole, keys, ledgers, { maxResourceFee = MAX_RESOURCE_FEE } = {}) {
+  const label = `${sourceRole} extend TTL`;
   const source = keypair(state, sourceRole);
   const account = await net(() => server.getAccount(source.publicKey()), "account");
-  const tx = new TransactionBuilder(account, { fee: "2000000", networkPassphrase: PASSPHRASE })
+  const tx = new TransactionBuilder(account, { fee: INCLUSION_FEE, networkPassphrase: PASSPHRASE })
     .addOperation(Operation.extendFootprintTtl({ extendTo: ledgers }))
     .setSorobanData(new SorobanDataBuilder().setReadOnly(keys).build())
     .setTimeout(TX_VALIDITY_SECS)
@@ -663,9 +881,11 @@ export async function extendTtl(state, sourceRole, keys, ledgers) {
   const sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   const ready = rpc.assembleTransaction(tx, sim).build();
+  checkExtendFootprint(ready, keys, label);
+  checkFee(ready, maxResourceFee, label);
   signTx(state, sourceRole, ready);
-  const { hash, seconds, fee } = await submit(ready, `${sourceRole} extend TTL`);
-  return { hash, seconds, fee };
+  const { hash: txHash, seconds, fee } = await submit(ready, label);
+  return { hash: txHash, seconds, fee };
 }
 
 /**
