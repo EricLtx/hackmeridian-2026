@@ -555,6 +555,8 @@ export function createTerminal(ctx) {
       code: code(),
       now: now(),
       symbolOf,
+      // The NAV decimals of a fund the board has read (its state); a price of an unread fund is not shown.
+      navDecimalsOf: (fund) => (S.board?.funds ?? []).find((f) => f.shares === fund)?.state?.value?.nav_decimals ?? null,
       codeOfOffer: (id) => (offers.get(id) ? codeOf(offers.get(id).stablecoin) : null),
       codeOfRepo: (id) => (T.market.repos.get(id) ? codeOf(T.market.repos.get(id).stablecoin) : null),
     };

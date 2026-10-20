@@ -91,20 +91,39 @@ function fmtUnits(units) {
   return `${whole}.${frac}`;
 }
 
-/** Republishes the NAV when it is over an hour old, as the run's heartbeat does. */
+/**
+ * Republishes the NAV when it is over an hour old, as the run's heartbeat
+ * does, then steps the fund's NAV reference when it is older than the fund's
+ * NAV age bound: since rc5 the corridor grows from the reference over at most
+ * that bound, and an opening on a reference left alone for about ten days is
+ * refused (anyone may call `refresh_reference`).
+ */
 async function refreshNav(state) {
   const feed = state.contracts.navOracle;
   const fund = asset.stellar(state.contracts.shares);
   const now = await ledgerTime();
   const last = await read(state, feed, "lastprice", [fund]);
-  if (last && now - Number(last.timestamp) < 3600) return;
-  const nav = navAt(state.navPublishedAt ?? now, now);
-  await invoke(state, "operator", feed, "publish", [
-    fund,
-    sv.i128(nav),
-    sv.u64(Math.max(now - 1, Number(last?.timestamp ?? 0))),
-  ]);
-  console.log(`  NAV republished  ${(Number(nav) / 1e14).toFixed(4)} USD`);
+  if (!last || now - Number(last.timestamp) >= 3600) {
+    const nav = navAt(state.navPublishedAt ?? now, now);
+    await invoke(state, "operator", feed, "publish", [
+      fund,
+      sv.i128(nav),
+      sv.u64(Math.max(now - 1, Number(last?.timestamp ?? 0))),
+    ]);
+    console.log(`  NAV republished  ${(Number(nav) / 1e14).toFixed(4)} USD`);
+  }
+  const ow = state.contracts.openWindow;
+  const shares = sv.address(state.contracts.shares);
+  const [config, fundState] = await Promise.all([read(state, ow, "get_fund", [shares]), read(state, ow, "get_fund_state", [shares])]);
+  if (config && fundState && now - Number(fundState.reference_time) > Number(config.nav_max_age_secs)) {
+    try {
+      await invoke(state, "operator", ow, "refresh_reference", [shares]);
+      console.log("  NAV reference stepped along the model");
+    } catch (error) {
+      // The NAV left the corridor: only a two-key re-anchor restores the fund.
+      console.log(`  NAV reference not stepped: ${error.message}; re-anchor with two keys (npm run monitor -- --rehearse --steps=12)`);
+    }
+  }
 }
 
 async function main() {

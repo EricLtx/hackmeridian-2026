@@ -4,15 +4,18 @@
 //   npm run monitor                  one pass, prints alerts
 //   npm run monitor -- --watch       a pass every 30 s
 //   npm run monitor -- --watch --act takes the safe actions itself:
-//                                    pause on a critical alert, extend TTLs
+//                                    pause on a critical alert, extend TTLs,
+//                                    refresh an old price reference
 //   npm run monitor -- --rehearse    fires each detector with a real trigger
 //                                    on testnet, takes the action, restores
 //   npm run monitor -- --witness     a second watch from another machine:
 //                                    alerts, never acts; own files, own heartbeat
 //
 // A detector never moves funds. The only actions are the guardian's pause,
-// which blocks new entries and never exits, and a TTL extension, which
-// anyone may pay for. Unpausing stays a human decision for the governor.
+// which blocks new entries and never exits, a TTL extension, which anyone
+// may pay for, and a step of a fund's price reference along its model
+// (`refresh_reference`), which anyone may call. Unpausing stays a human
+// decision for the governor.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -71,6 +74,10 @@ const runStep = (n) => !STEPS || STEPS.includes(n);
 /** Thresholds of the monitoring plan. */
 const LIMITS = {
   ttlDays: 14, // an open entry with less time to live is extended
+  // The contract code entry is extended long before archival: on mainnet its
+  // restore may not fit in one transaction, which would block every exit
+  // (threat model DoS.9). Extended in 30-day slices up to 120 days.
+  codeTtlDays: 90,
   navWarnHours: 24, // warn two hours before the contract refuses a 26-hour-old NAV
   capWarnRatio: 0.8, // warn when outstanding passes 80 % of a cap
   opensPerHour: 20, // an unusual rate of new repos
@@ -374,6 +381,29 @@ const DETECTORS = {
     }
     return out;
   },
+  "reference-age"(s) {
+    // Tamper.7 (rc5): the NAV corridor grows from the fund's price reference
+    // over at most one NAV age bound. A reference older than that bound no
+    // longer follows an honest NAV, which the contract refuses once it has
+    // outgrown the floor plus that window. Only an opening or
+    // `refresh_reference`, which anyone may call, moves the reference along
+    // the model; the keeper refreshes it when the NAV is newer.
+    const out = [];
+    for (const f of s.funds) {
+      const referenceTime = Number(f.fundState.reference_time);
+      const bound = Number(f.config.nav_max_age_secs);
+      const age = s.now - referenceTime;
+      if (age <= bound) continue;
+      const newer = Boolean(f.nav) && Number(f.nav.timestamp) > referenceTime;
+      out.push({
+        detector: "reference-age", threat: "Tamper.7", level: "warning",
+        message: `price reference is ${(age / 3600).toFixed(1)} h old, beyond the ${(bound / 3600).toFixed(0)} h NAV age bound: the corridor no longer grows with the NAV, and an honest NAV that outgrows it is refused${tag(s, f)}`,
+        action: newer ? "refresh_reference" : "no NAV newer than the reference: have the operator publish, then refresh_reference",
+        fund: f.shares,
+      });
+    }
+    return out;
+  },
   reconciliation(s) {
     // Invariant I2 (v3), per fund: shares held = shares of open repos + shares awaiting release.
     const out = [];
@@ -455,7 +485,7 @@ const DETECTORS = {
   },
   ttl(s) {
     return s.ttl
-      .filter((t) => t.days === null || t.days < LIMITS.ttlDays)
+      .filter((t) => t.days === null || t.days < (t.kind === "code" ? LIMITS.codeTtlDays : LIMITS.ttlDays))
       .map((t) => ({
         detector: "ttl",
         threat: "DoS.2",
@@ -655,6 +685,20 @@ async function act(alerts, s, monitor = {}) {
     console.log(`  ACTION   extended the contract code to about ${target.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
     done.push("extend code");
   }
+  // rc5: an old price reference is stepped along the model by the keeper
+  // (refresh_reference is open to anyone). A refusal, a NAV out of the
+  // corridor or stale, is logged and leaves the other actions alone: the
+  // price detector reports its cause.
+  for (const a of alerts.filter((x) => x.action === "refresh_reference" && x.fund)) {
+    const label = s.funds?.length > 1 ? ` of ${labelOf(s.funds, a.fund)}` : "";
+    try {
+      const r = await invoke(state, keeperRole(), C.openWindow, "refresh_reference", [sv.address(a.fund)]);
+      console.log(`  ACTION   ${keeperRole()} refreshed the price reference${label} in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      done.push("refresh reference");
+    } catch (error) {
+      console.log(`  ACTION   refresh_reference${label} refused: ${error.message}`);
+    }
+  }
   return done;
 }
 
@@ -759,9 +803,9 @@ async function rehearse() {
     LIMITS.ttlDays = 130;
     const { s, alerts } = await pass(monitor);
     const fired = firedBy(alerts, "ttl");
-    // The forced threshold would also flag the code entry; its rent is real
-    // money, so the drill extends the small entries and leaves the code to
-    // its normal 14-day rule.
+    // The code entry keeps its own threshold (`codeTtlDays`, 90 days), which
+    // the drill does not force: its rent is real money, so the drill extends
+    // the small entries and leaves the code to its normal rule.
     const done = await act(alerts.filter((x) => x.kind !== "code"), s);
     const after = await clean();
     LIMITS.ttlDays = saved;

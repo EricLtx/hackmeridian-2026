@@ -10,10 +10,28 @@
 // rule keeps running, but its next `set_fund_limits` or replacement is refused
 // until a compliant configuration is applied through the time delay (18
 // October 2026, S22 on the first demo fund). The tool names those funds first.
+// The rules of rc5 (20 October 2026) are checked too: the haircut covers the
+// NAV corridor, the stablecoins of the fund's currency have 7 decimals, and
+// its feeds publish with 6 decimals or more.
 
 import fs from "node:fs";
 import path from "node:path";
 import { asset, codeKey, fmt, ledgerEntries, ledgerTime, loadState, read, storageKey, STATE_DIR, sv } from "./lib.mjs";
+
+/** Admission rules of rc5, as contracts/night-window/src/lib.rs checks them. */
+const RC5 = {
+  stablecoinDecimals: 7, // STABLECOIN_DECIMALS
+  minFeedDecimals: 6, // MIN_FEED_DECIMALS: NAV, FX and fallback feeds
+  yearSecs: 31_536_000n, // math::YEAR_SECS
+};
+/**
+ * Smallest haircut, in basis points, that covers a fund's NAV corridor (the
+ * rc5 cross-invariant, `corridor_haircut_bps` in lib.rs): a true NAV at the
+ * corridor's bottom and a wrong reading at its top lie two floors plus one
+ * NAV age bound of growth apart, the growth rounded up.
+ */
+const corridorHaircutBps = (cfg) =>
+  2n * BigInt(cfg.corridor_floor_bps) + (BigInt(cfg.max_yield_bps) * BigInt(cfg.nav_max_age_secs) + RC5.yearSecs - 1n) / RC5.yearSecs;
 
 const JSON_OUT = process.argv.includes("--json");
 const state = loadState();
@@ -78,20 +96,28 @@ async function main() {
     if (!cfg) continue;
     const cap = await read(state, ow, "currency_cap", [sv.symbol(String(cfg.currency))]);
     const outstanding = await read(state, ow, "currency_outstanding", [sv.symbol(String(cfg.currency))]);
-    stablecoins.push({ token, currency: String(cfg.currency), decimals: Number(cfg.decimals), currencyCap: String(cap), currencyOutstanding: String(outstanding) });
+    // What the token answers now, besides what the registry recorded: rc5 checks it again when a proposal applies.
+    const liveDecimals = await read(state, token, "decimals").then(Number, () => null);
+    stablecoins.push({ token, currency: String(cfg.currency), decimals: Number(cfg.decimals), liveDecimals, currencyCap: String(cap), currencyOutstanding: String(outstanding) });
   }
+  /** A registered coin rc5 would refuse: decimals other than 7, recorded or answered now. */
+  const offPrecision = (s) => s.decimals !== RC5.stablecoinDecimals || (s.liveDecimals !== null && s.liveDecimals !== RC5.stablecoinDecimals);
   console.log("\nStablecoins");
-  for (const s of stablecoins) console.log(`  ${s.token}  ${s.currency}, ${s.decimals} decimals; currency outstanding ${fmt(BigInt(s.currencyOutstanding))} / cap ${fmt(BigInt(s.currencyCap))}`);
+  for (const s of stablecoins) {
+    const live = s.liveDecimals === null ? ", decimals() unreadable" : s.liveDecimals !== s.decimals ? `, the token now answers ${s.liveDecimals}` : "";
+    console.log(`  ${s.token}  ${s.currency}, ${s.decimals} decimals${live}; currency outstanding ${fmt(BigInt(s.currencyOutstanding))} / cap ${fmt(BigInt(s.currencyCap))}${offPrecision(s) ? `; NOT ${RC5.stablecoinDecimals} decimals (rc5)` : ""}`);
+  }
 
   console.log("\nFunds");
   const register = [];
   let findings = 0;
   for (const f of fundsOf()) {
-    const [cfg, st, backup, pending] = await Promise.all([
+    const [cfg, st, backup, pending, fallback] = await Promise.all([
       read(state, ow, "get_fund", [sv.address(f.shares)]),
       read(state, ow, "get_fund_state", [sv.address(f.shares)]),
       read(state, ow, "steward_backup", [sv.address(f.shares)]),
       read(state, ow, "pending_fund_change", [sv.address(f.shares)]),
+      read(state, ow, "get_fallback", [sv.address(f.shares)]).catch(() => null),
     ]);
     if (!cfg) {
       console.log(`  ${f.label} ${short(f.shares)}: not admitted`);
@@ -102,6 +128,8 @@ async function main() {
     const nav = await read(state, f.navOracle, "lastprice", [asset.stellar(f.shares)]).catch(() => null);
     const navAge = nav ? now - Number(nav.timestamp) : null;
     const approved = soleLender ? await read(state, ow, "is_lender_approved", [sv.address(f.shares), sv.address(soleLender)]) : null;
+    const fallbackDecimals = fallback ? await read(state, String(fallback.oracle), "decimals").then(Number, () => null) : null;
+    const corridorBps = corridorHaircutBps(cfg);
     const issues = [];
     // Envelope: what `set_fund` and `set_fund_limits` check today.
     if (Number(cfg.haircut_bps) < Number(envelope.min_haircut_bps)) issues.push(`haircut ${pct(cfg.haircut_bps)} below the envelope minimum ${pct(envelope.min_haircut_bps)}`);
@@ -115,6 +143,22 @@ async function main() {
       // S22 (rc4): the band may not exceed the FX haircut; checked at admission and when limits are tuned.
       if (Number(fx.band_bps) > Number(fx.haircut_bps)) issues.push(`S22: FX band ${pct(fx.band_bps)} exceeds the FX haircut ${pct(fx.haircut_bps)}; the next set_fund_limits is refused until a compliant configuration is applied through the delay`);
     }
+    // rc5 (20 October 2026): the cross-invariant is checked at admission, at
+    // a replacement and at set_fund_limits; a feed's decimals at admission,
+    // at a replacement and when a fallback is proposed or applied; a
+    // stablecoin's when it is registered. A fund admitted before keeps
+    // running until then.
+    if (BigInt(cfg.haircut_bps) < corridorBps) issues.push(`rc5: haircut ${pct(cfg.haircut_bps)} below the ${pct(corridorBps)} its NAV corridor needs (two floors plus one NAV age bound of yield); the next set_fund_limits or replacement is refused until a compliant configuration is applied through the delay`);
+    const feeds = [["NAV feed", Number(st.nav_decimals)]];
+    if (fx) feeds.push(["FX feed", Number(st.fx_decimals)]);
+    if (fallback) feeds.push(["fallback feed", fallbackDecimals]);
+    for (const [feed, decimals] of feeds) {
+      if (decimals === null) issues.push(`rc5: the ${feed} does not answer decimals(); it must publish with ${RC5.minFeedDecimals} decimals or more`);
+      else if (decimals < RC5.minFeedDecimals) issues.push(`rc5: the ${feed} publishes with ${decimals} decimals, under ${RC5.minFeedDecimals}: its bounds round inward to whole units of the feed, and a replacement or a fallback naming it is refused`);
+    }
+    for (const coin of stablecoins.filter((c) => c.currency === String(cfg.currency) && offPrecision(c))) {
+      issues.push(`rc5: the ${coin.currency} stablecoin ${short(coin.token)} has ${coin.liveDecimals ?? coin.decimals} decimals, not ${RC5.stablecoinDecimals}: this fund's caps add raw units across the coins of its currency, and rc5 registers only ${RC5.stablecoinDecimals}-decimal coins`);
+    }
     if (!backup) issues.push("no steward backup registered: a lost steward key could not be recovered (D4)");
     if (soleLender && approved === false) issues.push("the sole lender is not approved on this fund: no offer can list it");
     if (navAge !== null && navAge > Number(cfg.nav_max_age_secs)) issues.push(`NAV is ${hours(navAge)} old, beyond the ${hours(cfg.nav_max_age_secs)} bound: entries on this fund are refused until a fresh publication`);
@@ -122,7 +166,8 @@ async function main() {
     findings += issues.length;
     console.log(`  ${f.label} ${f.symbol} ${f.shares} (${f.tokenCode})`);
     console.log(`    steward ${cfg.steward}, backup ${backup ?? "none"}; currency ${cfg.currency}; source ${sourceName}; haircut ${pct(cfg.haircut_bps)}${fx ? `, FX haircut ${pct(fx.haircut_bps)}, FX band ${pct(fx.band_bps)}, FX age ≤ ${hours(fx.max_age_secs)}` : ""}`);
-    console.log(`    corridor floor ${pct(cfg.corridor_floor_bps)}, yield ≤ ${pct(cfg.max_yield_bps)}, NAV age ≤ ${hours(cfg.nav_max_age_secs)}${navAge !== null ? ` (now ${hours(navAge)} old)` : " (no NAV read)"}`);
+    console.log(`    corridor floor ${pct(cfg.corridor_floor_bps)}, yield ≤ ${pct(cfg.max_yield_bps)}, NAV age ≤ ${hours(cfg.nav_max_age_secs)}${navAge !== null ? ` (now ${hours(navAge)} old)` : " (no NAV read)"}; the corridor needs a haircut ≥ ${pct(corridorBps)}`);
+    console.log(`    feed decimals: NAV ${st.nav_decimals}${fx ? `, FX ${st.fx_decimals}` : ""}${fallback ? `, fallback ${fallbackDecimals ?? "?"}` : ""}`);
     console.log(`    outstanding ${fmt(BigInt(st.outstanding))} / cap ${fmt(BigInt(cfg.max_outstanding))}, per repo ≤ ${fmt(BigInt(cfg.max_principal_per_repo))}${pending ? `; CHANGE PENDING until ${new Date(Number(pending.eta) * 1000).toISOString()}` : ""}${soleLender ? `; sole lender ${approved ? "approved" : "NOT approved"}` : ""}`);
     for (const i of issues) console.log(`    ! ${i}`);
     if (!issues.length) console.log("    ok: within the envelope and the admission rules");
@@ -137,10 +182,13 @@ async function main() {
       currency: String(cfg.currency),
       source: sourceName,
       haircutBps: Number(cfg.haircut_bps),
-      fx: fx ? { oracle: fx.oracle, haircutBps: Number(fx.haircut_bps), bandBps: Number(fx.band_bps), maxAgeSecs: Number(fx.max_age_secs) } : null,
+      fx: fx ? { oracle: fx.oracle, haircutBps: Number(fx.haircut_bps), bandBps: Number(fx.band_bps), maxAgeSecs: Number(fx.max_age_secs), decimals: Number(st.fx_decimals) } : null,
+      fallback: fallback ? { oracle: String(fallback.oracle), maxAgeSecs: Number(fallback.max_age_secs), maxDivergenceBps: Number(fallback.max_divergence_bps), decimals: fallbackDecimals } : null,
+      navDecimals: Number(st.nav_decimals),
       corridorFloorBps: Number(cfg.corridor_floor_bps),
       maxYieldBps: Number(cfg.max_yield_bps),
       navMaxAgeSecs: Number(cfg.nav_max_age_secs),
+      corridorHaircutBps: Number(corridorBps),
       maxPrincipalPerRepo: String(cfg.max_principal_per_repo),
       maxOutstanding: String(cfg.max_outstanding),
       outstanding: String(st.outstanding),

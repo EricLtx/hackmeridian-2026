@@ -167,6 +167,39 @@ test("tape lines read both the indexer's export and decoded RPC events", () => {
   assert.equal(tapeLine({ event: "something_new", topics: [], data: {} }, ctx).code, "GOV");
 });
 
+test("the valuation behind an opening has its own tape line: price per share and haircut (rc5)", () => {
+  const valued = {
+    event: "repo_valued",
+    topics: ["12", F1],
+    data: { nav: "108500000000000", nav_time: "1792000000", fx: "111880000000000", fx_applied: "111980000000000", fx_time: "1792000000", price: "96892302196820", haircut_bps: 400 },
+    closedAt: new Date(T0 * 1000).toISOString(),
+    txHash: "feedface01",
+  };
+  const ctx = { sd: 7, fd: 7, code: "tEUR", now: T0, symbolOf: (a) => (a === F1 ? "tMMF" : "?"), navDecimalsOf: (a) => (a === F1 ? 14 : null) };
+  const line = tapeLine(valued, ctx);
+  assert.deepEqual([line.code, line.tone, line.repoId, line.known], ["VALUE", "dim", 12, true]);
+  assert.equal(line.text, "#12 tMMF valued at 0.9689 tEUR per share, haircut 4.00 %");
+  // The repo's own stablecoin names the price, as for the other amounts of the repo.
+  assert.equal(tapeLine(valued, { ...ctx, codeOfRepo: (id) => (id === 12 ? "tEURB" : null) }).text, "#12 tMMF valued at 0.9689 tEURB per share, haircut 4.00 %");
+  // Without the fund's NAV decimals (a fund the board has not read), no price rather than a wrong one.
+  for (const navDecimalsOf of [undefined, () => null, () => 99, () => "x"]) {
+    assert.equal(tapeLine(valued, { ...ctx, navDecimalsOf }).text, "#12 tMMF valued, haircut 4.00 %");
+  }
+  // A coarse feed shows its own digits; a malformed value never throws.
+  assert.equal(tapeLine({ ...valued, data: { ...valued.data, price: "97" } }, { ...ctx, navDecimalsOf: () => 2 }).text, "#12 tMMF valued at 0.97 tEUR per share, haircut 4.00 %");
+  assert.equal(tapeLine({ ...valued, data: { price: "oops", haircut_bps: "oops" } }, ctx).text, "#12 tMMF valued at 0.0000 tEUR per share, haircut 0.00 %");
+});
+
+test("an event the tape does not name is marked unknown, whatever its name", () => {
+  for (const event of ["something_new", "constructor", "toString", "__proto__", ""]) {
+    const line = tapeLine({ event, topics: [], data: {} }, {});
+    assert.equal(line.known, false, event);
+    assert.equal(line.code, "GOV", event);
+  }
+  assert.equal(tapeLine({ event: "fallback_proposed", topics: [], data: {} }, {}).known, false);
+  assert.equal(tapeLine({ event: "repo_seized", topics: ["1"], data: { shares: "10", to: LENDER } }, {}).known, true);
+});
+
 test("merging the export with live events keeps one copy of each, in ledger order", () => {
   const a = { ledger: 10, event: "repo_opened", topics: ["1"], data: { x: "1" }, txHash: "t1", closedAt: "2026-10-18T00:00:00Z" };
   const b = { ledger: 12, event: "repo_repurchased", topics: ["1"], data: { x: "2" }, txHash: "t2", closedAt: "2026-10-18T00:01:00Z" };

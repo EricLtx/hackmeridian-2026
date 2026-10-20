@@ -6,6 +6,7 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
+import { tapeLine } from "./blotter.js";
 import { formatAmount, formatRate, shortAddress } from "./format.js";
 import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
 import { initMotion, setLoading, transition } from "./motion.js";
@@ -32,6 +33,21 @@ const txLink = (explorer, hash) =>
   hash ? `<a href="${esc(explorer)}/tx/${esc(hash)}" target="_blank" rel="noopener noreferrer" title="${esc(hash)}">${esc(hash.slice(0, 8))}…</a>` : "—";
 const addr = (a) => (a ? `<span title="${esc(a)}">${esc(shortAddress(a))}</span>` : "—");
 const units = (raw, d) => (raw === "" || raw === null || raw === undefined ? "—" : formatAmount(BigInt(raw), d));
+
+/**
+ * The short code the terminal's tape gives an event (OPEN, VALUE, SEIZE...),
+ * in the interface language, or null for an event the tape does not name:
+ * that one keeps only its contract name. A malformed exported event gets no
+ * code rather than stopping the page.
+ */
+function eventCode(e) {
+  try {
+    const line = tapeLine(e, { sd: decimals.stablecoin, fd: decimals.shares, code: decimals.code });
+    return line.known ? line.code : null;
+  } catch {
+    return null;
+  }
+}
 
 function tile(label, value, sub = "") {
   return `<div class="tile"><div class="tile-label">${esc(label)}</div><div class="tile-value">${value}</div>${sub ? `<div class="tile-sub">${sub}</div>` : ""}</div>`;
@@ -118,11 +134,12 @@ function renderEvents(h) {
   }
   const col = { time: esc(t("Time")), event: esc(t("Event")), topics: esc(t("Topics")), data: esc(t("Data")) };
   const body = events
+    .map((e) => ({ e, label: eventCode(e) }))
     .map(
-      (e) => `<tr>
+      ({ e, label }) => `<tr>
         <td data-label="#" class="num">${esc(e.seq)}</td>
         <td data-label="${col.time}">${when(e.closedAt)}</td>
-        <td data-label="${col.event}"><code>${esc(e.event)}</code></td>
+        <td data-label="${col.event}">${label ? `<span class="badge badge-muted">${esc(label)}</span> ` : ""}<code>${esc(e.event)}</code></td>
         <td data-label="${col.topics}">${esc((e.topics ?? []).map((topic) => (typeof topic === "string" && /^[GC][A-Z2-7]{55}$/.test(topic) ? shortAddress(topic) : topic)).join(", ")) || "—"}</td>
         <td data-label="${col.data}"><code class="small">${esc(JSON.stringify(e.data))}</code></td>
         <td data-label="Tx">${txLink(h.explorer, e.txHash)}</td>

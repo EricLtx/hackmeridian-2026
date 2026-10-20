@@ -205,8 +205,10 @@ const human = (name) => String(name ?? "").replace(/_/g, " ");
  * One tape line from a contract event, as the indexer exports it or as the
  * RPC returns it once decoded: `{ event, topics (name excluded), data,
  * closedAt, txHash }`. `ctx`: `{ sd, fd, code, sym, symbolOf(fund),
- * codeOfOffer(id), codeOfRepo(id), now }`. Returns `{ time, code, text,
- * tone, repoId, txHash }`, `code` and `text` in the interface language.
+ * navDecimalsOf(fund), codeOfOffer(id), codeOfRepo(id), now }`. Returns
+ * `{ time, code, text, tone, repoId, txHash, known }`, `code` and `text` in
+ * the interface language; `known` is false for an event this table does not
+ * name, shown with a generic code.
  */
 export function tapeLine(e, ctx = {}) {
   const sd = ctx.sd ?? 7;
@@ -222,6 +224,13 @@ export function tapeLine(e, ctx = {}) {
   const repoCode = (id) => ctx.codeOfRepo?.(Number(id)) ?? ctx.code ?? "";
   const offerCode = (id) => ctx.codeOfOffer?.(Number(id)) ?? ctx.code ?? "";
   const hash = () => String(d.wasm_hash).slice(0, 8);
+  // A NAV-scaled amount needs the fund's NAV decimals, which only the fund's state carries.
+  const navDecimals = (fund) => {
+    const decimals = ctx.navDecimalsOf?.(fund);
+    if (decimals === null || decimals === undefined || decimals === "") return null;
+    const n = Number(decimals);
+    return Number.isSafeInteger(n) && n >= 0 && n <= 38 ? n : null;
+  };
   const rows = {
     repo_opened: () => ({
       code: t("OPEN"),
@@ -237,6 +246,18 @@ export function tapeLine(e, ctx = {}) {
         borrower: short(tp[1]),
       }),
     }),
+    // rc5: the valuation behind an opening, published right after it. The
+    // price is per share in the loan currency, with the fund's NAV decimals.
+    repo_valued: () => {
+      const decimals = navDecimals(tp[1]);
+      const haircut = formatRate(big(d.haircut_bps));
+      if (decimals === null) {
+        return { code: t("VALUE"), tone: "dim", repoId: tp[0], text: t("#{id} {fund} valued, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), haircut }) };
+      }
+      const unit = repoCode(tp[0]);
+      const price = `${formatUnits(big(d.price), decimals, { digits: Math.min(4, decimals) })}${unit ? ` ${unit}` : ""}`;
+      return { code: t("VALUE"), tone: "dim", repoId: tp[0], text: t("#{id} {fund} valued at {price} per share, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), price, haircut }) };
+    },
     repo_repurchased: () => ({ code: t("REPAY"), tone: "ok", repoId: tp[0], text: t("#{id} {principal} + {interest} interest", { id: tp[0], principal: money(d.principal, repoCode(tp[0])), interest: exact(d.interest, "") }) }),
     repo_seized: () => ({ code: t("SEIZE"), tone: "bad", repoId: tp[0], text: t("#{id} {shares} shares to the lender {to}", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
     release_deferred: () => ({ code: t("HELD"), tone: "warn", repoId: tp[0], text: t("#{id} {shares} shares owed to {to}: the share token refused the transfer", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
@@ -291,7 +312,8 @@ export function tapeLine(e, ctx = {}) {
     sole_lender_set: () => ({ code: t("SOLE"), tone: "id", text: t("sole lender {address}", { address: short(d.lender) }) }),
   };
   const name = String(e.event ?? "");
-  let row = rows[name]?.();
+  const known = Object.prototype.hasOwnProperty.call(rows, name);
+  let row = known ? rows[name]() : null;
   if (!row) {
     // Events this table does not know: the event name, as the contract spells it.
     const event = human(name);
@@ -299,7 +321,7 @@ export function tapeLine(e, ctx = {}) {
     else if (name.endsWith("_cancelled")) row = { code: t("CANCEL"), tone: "ok", text: d?.by ? t("{event} by {by}", { event, by: short(d.by) }) : event };
     else row = { code: t("GOV"), tone: "dim", text: event };
   }
-  return { time: tapeTime(e.closedAt, ctx.now ?? 0), txHash: e.txHash ?? null, repoId: row.repoId !== undefined ? Number(row.repoId) : null, code: row.code, tone: row.tone, text: row.text };
+  return { time: tapeTime(e.closedAt, ctx.now ?? 0), txHash: e.txHash ?? null, repoId: row.repoId !== undefined ? Number(row.repoId) : null, code: row.code, tone: row.tone, text: row.text, known };
 }
 
 /** A stable key for an event, to merge the indexer's export with the RPC's events. */

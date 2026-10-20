@@ -178,8 +178,9 @@ async function fundSettings() {
 /**
  * Operator heartbeat: publishes the day's NAV when the last one is over an
  * hour old or differs from the expected NAV by more than 0.1 % (a wrong NAV
- * left by an interrupted scene). With the local FX fallback, re-stamps the
- * last EUR/USD rate as a real operator would.
+ * left by an interrupted scene), then steps the fund's NAV reference when it
+ * is older than the fund's NAV age bound. With the local FX fallback,
+ * re-stamps the last EUR/USD rate as a real operator would.
  */
 async function heartbeat() {
   const now = await ledgerTime();
@@ -193,6 +194,7 @@ async function heartbeat() {
       sv.u64(Math.max(now - 1, Number(nav?.timestamp ?? 0))),
     ]);
   }
+  await stepReference(now);
   if (state.fxSource !== "local") return;
   const fx = await read(state, C.navOracle, "lastprice", [asset.other("EUR")]);
   if (!fx) throw new Error("local FX feed is empty: rerun `npm run setup -- --fx=local`");
@@ -202,6 +204,28 @@ async function heartbeat() {
     sv.i128(fx.price),
     sv.u64(Math.max(now - 1, Number(fx.timestamp))),
   ]);
+}
+
+/**
+ * Since rc5 the NAV corridor grows from the fund's reference over at most one
+ * NAV age bound, and only an opening or `refresh_reference`, which anyone may
+ * call, moves the reference. The NAV this demo publishes grows 4 % a year: on
+ * a reference left alone for about ten days it leaves the corridor, and only
+ * a two-key re-anchor restores the fund. A keeper (the monitor with --act)
+ * steps the reference; the demo does the same when it runs.
+ */
+async function stepReference(now) {
+  const [{ config }, fundState] = await Promise.all([fundSettings(), read(state, C.openWindow, "get_fund_state", [sv.address(C.shares)])]);
+  const referenceAge = fundState ? now - Number(fundState.reference_time) : 0;
+  if (!config || referenceAge <= Number(config.nav_max_age_secs)) return;
+  try {
+    await tx("Anyone steps the NAV reference along the model", "operator", C.openWindow, "refresh_reference", [sv.address(C.shares)]);
+  } catch (error) {
+    alarm(
+      `The NAV left the corridor of a reference ${age(referenceAge)} old (${error.message}).`,
+      "re-anchor with two keys: `npm run monitor -- --rehearse --steps=12` proposes the current NAV and rate, then applies them after the delay",
+    );
+  }
 }
 
 /**
