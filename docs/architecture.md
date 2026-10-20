@@ -315,5 +315,5 @@ flowchart LR
 
 - Key custody: the testnet roles sit on one machine; the target (hardware signers, separate people, a managed key store for the sentinel and the keeper) is the critical path to any deployment that holds value ([security.md](security.md), section 6.4).
 - Legal qualification of the transaction and of the operator: being qualified with counsel.
-- External audit and bug bounty: after the Stellar Community Fund application.
+- External audit and bug bounty: before mainnet, with the other steps of [security.md](security.md), section 7 ("Before mainnet").
 - A fund issued by another organisation: the third fund proves the token code is not ours, not that the issuer is.
