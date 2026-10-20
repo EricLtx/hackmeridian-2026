@@ -16,4 +16,6 @@ export default {
   "Still waiting. It can land until {until}; it is not failed before then.":
     "Toujours en attente. La transaction peut être inscrite jusqu'à {until} ; elle n'a pas échoué d'ici là.",
   "The network asked for an unusually high fee ({fee} XLM). Nothing was signed.": "Le réseau a demandé des frais inhabituellement élevés ({fee} XLM). Rien n'a été signé.",
+  "The fee of the prepared transaction does not match the network's estimate. Nothing was signed.":
+    "Les frais de la transaction préparée ne correspondent pas à l'estimation du réseau. Rien n'a été signé.",
 };

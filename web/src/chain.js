@@ -192,8 +192,46 @@ const settledDecimals = (what) => (settled) => {
   }
 };
 
-/** The most a simulation may ask in resource fees before anything is signed: legitimate calls cost about 1 XLM on testnet. */
+/** The most a transaction may carry in resource fees before anything is signed: legitimate calls cost about 1 XLM on testnet. */
 export const MAX_RESOURCE_FEE = 250_000_000n;
+
+/** The resource fee a built Soroban transaction declares in its envelope, or null for a classic one. */
+export function resourceFeeOf(tx) {
+  const envelope = tx.toEnvelope();
+  const ext = envelope.type === "envelopeTypeTx" ? envelope.value.tx.ext : null;
+  return ext?.type === "sorobanData" ? BigInt(ext.value.resourceFee.toString()) : null;
+}
+
+/**
+ * Checks the fee of the assembled transaction, the one the wallet is asked to
+ * sign, rather than the simulation's summary of it: the resource fee in its
+ * envelope and its total fee beyond the inclusion bid each stay under
+ * MAX_RESOURCE_FEE, they are the same amount, and they match the simulation's
+ * own estimate when it gives one. An RPC that inflates the fee, or reports
+ * one figure and sets another, is refused before anything is signed. Returns
+ * the resource fee.
+ */
+export function checkFee(tx, { inclusionFee = BigInt(INCLUSION_FEE), cap = MAX_RESOURCE_FEE, estimate = null } = {}) {
+  const resource = resourceFeeOf(tx);
+  const beyond = BigInt(tx.fee) - BigInt(inclusionFee);
+  const highest = resource !== null && resource > beyond ? resource : beyond;
+  if (highest > cap) {
+    throw new TransactionError("TxRefused", t("The network asked for an unusually high fee ({fee} XLM). Nothing was signed.", { fee: formatUnits(highest, 7, { digits: 2 }) }));
+  }
+  if (resource === null || resource !== beyond || (estimate !== null && BigInt(estimate) !== resource)) {
+    throw new TransactionError("TxRefused", t("The fee of the prepared transaction does not match the network's estimate. Nothing was signed."));
+  }
+  return resource;
+}
+
+/** A simulation's fee estimate as an integer, or null when it gives none it can be held to. */
+function estimateOf(sim) {
+  try {
+    return sim?.minResourceFee === undefined || sim.minResourceFee === null ? null : BigInt(sim.minResourceFee);
+  } catch {
+    return -1n; // an estimate that is not a number matches no fee
+  }
+}
 
 const REPO_INTS = ["offer_id", "shares", "principal", "rate_bps", "opened_at", "maturity"];
 const REPO_ADDRESSES = ["borrower", "lender", "fund", "stablecoin"];
@@ -611,12 +649,10 @@ export class Chain {
       .build();
     const sim = await this.net(() => this.server.simulateTransaction(tx));
     if (rpc.Api.isSimulationError(sim)) throw decodeSimulationError(sim.error, this.kinds);
-    // The simulation sets the resource fee the wallet is asked to sign: an RPC that inflates it is refused here.
-    const asked = BigInt(sim.minResourceFee ?? 0);
-    if (asked > MAX_RESOURCE_FEE) {
-      throw new TransactionError("TxRefused", t("The network asked for an unusually high fee ({fee} XLM). Nothing was signed.", { fee: formatUnits(asked, 7, { digits: 2 }) }));
-    }
+    // The simulation sets the resource fee the wallet is asked to sign: the assembled transaction is
+    // checked, since its fee comes from the simulation's transaction data, not from its summary.
     const ready = rpc.assembleTransaction(tx, sim).build();
+    checkFee(ready, { estimate: estimateOf(sim) });
     const signed = await this.signWith(signer, ready, onStatus);
     const { result, hash, seconds, fee } = await this.submit(signed, onStatus);
     return { value: result.returnValue ? scValToNative(result.returnValue) : undefined, hash, seconds, fee };

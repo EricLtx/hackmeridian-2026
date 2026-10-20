@@ -16,4 +16,6 @@ export default {
   "Still waiting. It can land until {until}; it is not failed before then.":
     "Seguimos esperando. Puede registrarse hasta las {until}; no ha fallado antes de esa hora.",
   "The network asked for an unusually high fee ({fee} XLM). Nothing was signed.": "La red pidió una comisión inusualmente alta ({fee} XLM). No se firmó nada.",
+  "The fee of the prepared transaction does not match the network's estimate. Nothing was signed.":
+    "La comisión de la transacción preparada no coincide con la estimación de la red. No se firmó nada.",
 };
