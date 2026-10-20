@@ -1,6 +1,6 @@
 # Interface reference
 
-The long-form description of every entry point, type and error of the Open Window contract (`contracts/night-window/src/`). The doc comments in the source are kept to one sentence each, because `#[contractimpl]`, `#[contracttype]`, `#[contracterror]` and `#[contractevent]` compile them into the `contractspecv0` section of the WASM, which counts against the network's size cap; this file holds the explanations that used to sit there. Who may call what and the one-line summary of each function are in the [README](../README.md#contract-interface); the decisions referred to as S7, S8, S9 and the custody gaps I12 to I14 are in [security.md](security.md).
+The long-form description of every entry point, type and error of the Open Window contract (`contracts/night-window/src/`). The doc comments in the source are kept to one sentence each, because `#[contractimpl]`, `#[contracttype]`, `#[contracterror]` and `#[contractevent]` compile them into the `contractspecv0` section of the WASM, which counts against the network's size cap; this file holds the explanations that used to sit there. Who may call what and the one-line summary of each function are in the [README](../README.md#contract-interface); the decisions referred to as S7, S8, S9 and the others, and the custody gaps I12 to I14, are in [security.md](security.md). The text describes the rc5 candidate: the entry points, their types and the error codes are those of rc4, and the changes rc5 makes to what they check are marked "since rc5".
 
 Conventions used below:
 
@@ -13,11 +13,11 @@ Conventions used below:
 
 ### `set_admin(new_admin)`
 
-Proposes `new_admin` as governor. Nothing changes until the proposed address accepts (decision S7: a typo cannot lose the role). Before the first admission it may accept at once. Afterwards it may accept only once the delay has elapsed, within the grace period, and the guardian can veto the handover meanwhile (custody gap I12): a stolen governor quorum can no longer take the role inside one window. Replaces an earlier proposal.
+Proposes `new_admin` as governor. Nothing changes until the proposed address accepts (decision S7: a typo cannot lose the role). Before the first admission it may accept at once; a handover still pending then is dropped at the first admission. Afterwards it may accept only once the delay has elapsed, within the grace period, and the guardian can veto the handover meanwhile (custody gap I12): a stolen governor quorum can no longer take the role inside one window. Replaces an earlier proposal. The proposed governor may be neither the trustee (`TrusteeNotIndependent`) nor, since rc5, the sentinel (`SentinelNotIndependent`).
 
 ### `accept_admin()`
 
-Completes a governor handover, from its eta to the end of its grace period. Requires the proposed address. The proposals the previous governor made alone (upgrade, guardian, term ceiling, envelope, currency caps) are dropped: a handover is often the answer to a compromised key, and the new governor re-proposes what it wants. Fund replacements, fallbacks and fund limits carry a steward's signature and stay.
+Completes a governor handover, from its eta to the end of its grace period. Requires the proposed address. The proposals the previous governor made alone (upgrade, guardian, term ceiling, envelope, currency caps) are dropped: a handover is often the answer to a compromised key, and the new governor re-proposes what it wants. Fund replacements, fallbacks and fund limits carry a steward's signature and stay. A stablecoin registration stays too, since these proposals are kept per token and cannot be listed; since rc5 only the governor in office applies one, so the new governor takes it up or cancels it. The independence of the new governor from the trustee and the sentinel is not checked again here: `set_admin` and `set_sentinel` refuse both cases since rc5, so only a proposal made under rc4 could carry one.
 
 ### `cancel_admin()`, `veto_admin(caller)`
 
@@ -36,6 +36,8 @@ Between one minute and thirty days. Until a fund is first admitted nothing is at
 ### `propose_upgrade(wasm_hash)`, `upgrade(new_wasm_hash)`, `cancel_upgrade(caller)`
 
 The proposal names the new code, applicable by `upgrade` once the delay has elapsed; it replaces any earlier proposal and needs the trustee's signature when one is named. `upgrade` replaces the contract code with the proposed WASM, which must already be uploaded; storage and address are kept, and the `Upgraded` event is published just before the switch, by the code being replaced. `cancel_upgrade` takes the governor, the guardian or the trustee as `caller`: their veto is what the delay is for.
+
+Since rc5 an upgrade proposed before the first admission is cancelled by the contract at the first admission (`UpgradeCancelled`), as a governor handover already was: its eta followed a delay the governor could still shorten at will, and from then on every upgrade waits for the delay in force, which only grows. Propose upgrades after the first admission. A contract upgraded from version 2, which left the bootstrap with its first offer, keeps its proposals at its first admission (test `an_admission_on_a_contract_upgraded_with_offers_keeps_its_proposals`).
 
 ## Term ceiling, envelope, currency caps
 
@@ -57,11 +59,11 @@ Caps open principals in a currency. Unset means zero: no lending until the gover
 
 ### `set_guardian(guardian)`
 
-Before the first admission it applies at once. Afterwards it waits for the delay and applies through `apply_guardian_change`, and the current guardian can cancel it: a governor key alone cannot remove the veto inside the window in which that veto is needed (decision S7).
+Before the first admission it applies at once. Afterwards it waits for the delay and applies through `apply_guardian_change`, and the current guardian can cancel it: a governor key alone cannot remove the veto inside the window in which that veto is needed (decision S7). The guardian may be neither the trustee (`TrusteeNotIndependent`) nor, since rc5, the sentinel (`SentinelNotIndependent`); the same holds for `hand_over_guardian`, `set_guardian_backup` and `force_guardian_change`.
 
 ### `apply_guardian_change()`
 
-Appoints the proposed guardian once due. A forced change still waiting is dropped: the guardian it meant to replace is gone, and the ordinary path, which that guardian could veto, has settled the question. Any path that installs a guardian also drops the guardian backup: it was agreed with the guardian leaving office, and after a forced change that guardian may be the hostile one.
+Appoints the proposed guardian once due. Since rc5 it checks again that the proposed guardian is neither the trustee nor the sentinel: a proposal made under rc4 whose guardian was named to one of those roles during the delay fails (`TrusteeNotIndependent` or `SentinelNotIndependent`) and waits until it is cancelled, it expires, or the sentinel is cleared. A forced change still waiting is dropped: the guardian it meant to replace is gone, and the ordinary path, which that guardian could veto, has settled the question. Any path that installs a guardian also drops the guardian backup: it was agreed with the guardian leaving office, and after a forced change that guardian may be the hostile one.
 
 ### `set_guardian_backup(backup)`, `guardian_backup()`
 
@@ -73,37 +75,37 @@ Passes the guardian role at once. Requires the current guardian, and `guardian` 
 
 ### `force_guardian_change(guardian)`
 
-Imposes a guardian without the current one, for a guardian key that is lost or hostile and cancels every ordinary change. It waits for the longest delay, thirty days in public, and only the governor can cancel it (`cancel_forced_guardian_change`): the guardian it replaces has no veto here, or a lost key would freeze governance forever. Replaces an earlier forced change. Requires the governor and the trustee when one is named; the trustee may also veto it (`veto_forced_guardian_change`). `apply_forced_guardian_change` installs it once due; anyone may call it.
+Imposes a guardian without the current one, for a guardian key that is lost or hostile and cancels every ordinary change. It waits for the longest delay, thirty days in public, and only the governor can cancel it (`cancel_forced_guardian_change`): the guardian it replaces has no veto here, or a lost key would freeze governance forever. Replaces an earlier forced change. Requires the governor and the trustee when one is named; the trustee may also veto it (`veto_forced_guardian_change`). `apply_forced_guardian_change` installs it once due; anyone may call it. It does not check the independence again: `force_guardian_change`, `set_sentinel` and the trustee setters refuse the cases since rc5, so only a change proposed under rc4 could carry one.
 
 ## Trustee
 
 ### `set_trustee(trustee)`
 
-Names the trustee, whose signature every upgrade and forced guardian change then needs, and who may cancel them and veto a governor handover. Once, before the first admission and the first offer. Requires the governor and the trustee. Proposals made without the trustee go. The trustee consents independently: it holds no governance role and is not the sole lender, and the independence holds in both directions: no role, backup or governor handover may later name the trustee.
+Names the trustee, whose signature every upgrade and forced guardian change then needs, and who may cancel them and veto a governor handover. Once, before the first admission and the first offer. Requires the governor and the trustee. Proposals made without the trustee go: a pending upgrade and a pending forced guardian change. The trustee consents independently: it may be neither the governor, the guardian, its backup, the sole lender, the proposed governor nor, since rc5, the proposed guardian of an ordinary appointment or the sentinel (`TrusteeNotIndependent`). The independence holds in both directions: no role, backup or proposal may later name the trustee.
 
 ### `hand_over_trustee(trustee)`
 
-Passes the trustee role at once. Requires the current trustee and `trustee`: no other key names or removes a trustee. A pending upgrade or forced guardian change is dropped, since the previous trustee co-signed it.
+Passes the trustee role at once. Requires the current trustee and `trustee`, who must be independent as for `set_trustee`: no other key names or removes a trustee. A pending upgrade or forced guardian change is dropped, since the previous trustee co-signed it.
 
 ## Stablecoins and the sole lender
 
 ### `set_stablecoin(stablecoin, currency)`, `apply_stablecoin_change(stablecoin)`, `cancel_stablecoin_change(stablecoin, caller)`, `pending_stablecoin_change(stablecoin)`, `remove_stablecoin(stablecoin)`
 
-Since rc4 (decision S29), registering a stablecoin, or changing the currency of a registered one, applies at once only before the first admission. Afterwards `set_stablecoin` records a proposal with its eta and publishes `StablecoinChangeProposed`: widening what a lender may be repaid in is a loosening, so it waits for the time delay like the others. Anyone applies it from the eta to the end of the grace period (`apply_stablecoin_change`, which reads the token's decimals then); the governor, the guardian or the sentinel withdraws it (`cancel_stablecoin_change`). `remove_stablecoin` stays immediate, a tightening, and drops any pending proposal for that token. `set_stablecoin` keeps its version 2 signature, so its one failure before the delay (an eta overflow) is raised as a typed error, like `set_admin`.
+Since rc4 (decision S29), registering a stablecoin, or changing the currency of a registered one, applies at once only before the first admission. Afterwards `set_stablecoin` records a proposal with its eta and publishes `StablecoinChangeProposed`: widening what a lender may be repaid in is a loosening, so it waits for the time delay like the others. The governor in office applies it from the eta to the end of the grace period (`apply_stablecoin_change`): since rc5 it needs the governor's signature, where anyone could apply it before, because these proposals are kept per token and a governor handover cannot list and drop them; one made by a replaced governor then applies only if its successor takes it up. The governor, the guardian or the sentinel withdraws it (`cancel_stablecoin_change`). `remove_stablecoin` stays immediate, a tightening; it drops the pending proposal of a registered token (a currency change) and fails with `StablecoinNotAccepted` for a token that is not registered, so a first registration still pending is withdrawn with `cancel_stablecoin_change`. `set_stablecoin` keeps its version 2 signature, so its failures are raised as typed errors, like `set_admin`.
 
-Registers a stablecoin for a currency; its decimals are read from the token. A removal lets open repos and offers keep working for exits.
+Registers a stablecoin for a currency; its decimals are read from the token. Since rc5 they must be 7 (`STABLECOIN_DECIMALS`, decision S31): caps and outstanding totals add base units across the stablecoins of a currency, so these must share one precision, and every Stellar classic asset has 7 through its Stellar Asset Contract. The decimals are checked at a registration before the first admission, at a proposal and again at its apply (`StablecoinNotAccepted`); a refused apply leaves the proposal pending. A removal lets open repos and offers keep working for exits.
 
 ### `set_sole_lender(lender)`
 
-Makes this a single-lender instance (bilateral mode): from now on only `lender` may create offers, which anyone, supervisors included, can check on chain. Allowed once, before the first admission and the first offer, so that no lender already in place is shut out and the mode cannot be switched on or off under existing offers.
+Makes this a single-lender instance (bilateral mode): from now on only `lender` may create offers, which anyone, supervisors included, can check on chain. Allowed once, before the first admission and the first offer, so that no lender already in place is shut out and the mode cannot be switched on or off under existing offers. The sole lender may be neither the trustee (`TrusteeNotIndependent`) nor, since rc5, the sentinel (`SentinelNotIndependent`).
 
 ## Funds
 
 ### `set_fund(fund, config)`
 
-Admits a fund, or proposes a replacement of its configuration. Requires both the governor and the fund's steward: a two-key admission. A replacement also requires the current steward, and cannot change the currency while repos are open. Checks the configuration against the envelope, checks the oracles report in the right currency, reads the decimals and fresh prices.
+Admits a fund, or proposes a replacement of its configuration. Requires both the governor and the fund's steward: a two-key admission. A replacement also requires the current steward, and cannot change the currency while repos are open. Checks the configuration against the envelope, checks the oracles report in the right currency, reads the decimals and fresh prices. Since rc5 it also checks that the haircut covers the fund's NAV corridor from its bottom to its top, `haircut_bps ≥ 2 × corridor_floor_bps + ceil(max_yield_bps × nav_max_age_secs / year)` (decision S30), and that the NAV and FX feeds publish with at least 6 decimals (`MIN_FEED_DECIMALS`, decision S32); either refusal is `OutsideEnvelope`. The same checks run again at `apply_fund_change`.
 
-A first admission applies at once: no offer can list the fund yet, so nobody is exposed to it, and the NAV and FX references are anchored on the fresh readings. A replacement changes the oracle or the haircut under existing offers, so it is stored and applies through `apply_fund_change` once the delay has elapsed (decision S7). A fund that was removed keeps its runtime state, so its re-admission is a replacement too: removing then re-admitting cannot skip the delay, nor the issuer: the steward on record must sign when the new configuration names another. A replacement keeps the NAV and FX references unless it changes the feed, and then the new feed must agree with them (the new reading must lie in the corridor around the current reference, or within the band around the current FX reference); the only way to move them otherwise is `propose_reanchor`. A replacement that gives the fund its first FX leg anchors it on the rate read now (`PendingFundChange.fx_anchor`). For a removed fund, the agreement with the references is checked at the apply only, so that a re-anchor proposed meanwhile can bring them to the new feed. Open repos keep their frozen terms (invariant I9).
+A first admission applies at once: no offer can list the fund yet, so nobody is exposed to it, and the NAV and FX references are anchored on the fresh readings. A replacement changes the oracle or the haircut under existing offers, so it is stored and applies through `apply_fund_change` once the delay has elapsed (decision S7). A fund that was removed keeps its runtime state, so its re-admission is a replacement too: removing then re-admitting cannot skip the delay, nor the issuer: the steward on record must sign when the new configuration names another. A replacement keeps the NAV and FX references unless it changes the feed, and then the new feed must agree with them (the new reading must lie in the corridor around the current reference, or within the band around the current FX reference); the only way to move them otherwise is `propose_reanchor`. Since rc5 that corridor grows over at most one NAV age bound after the reference, as for any valuation: after a long quiet spell or a long removal, a fund whose NAV outgrew it is refreshed or re-anchored first (test `a_new_nav_feed_after_a_quiet_spell_gets_one_nav_age_of_growth`). A replacement that gives the fund its first FX leg anchors it on the rate read now (`PendingFundChange.fx_anchor`). For a removed fund, the agreement with the references is checked at the apply only, so that a re-anchor proposed meanwhile can bring them to the new feed. Open repos keep their frozen terms (invariant I9).
 
 ### `apply_fund_change(fund)`
 
@@ -135,23 +137,23 @@ Installs the steward's backup once the thirty days have elapsed, within the grac
 
 ### `propose_reanchor(fund, expected_nav, expected_fx)`
 
-Proposes to re-anchor a fund's NAV and FX references, the only way to move them other than along the model path or down by the steward: after a legitimate jump, or to re-admit a removed fund whose new feed no longer lies on the old path. The fresh readings of the feed are taken now and stored; they are what the apply installs, so whoever applies cannot choose the anchor. The feed is the fund's current one, or for a removed fund the one of its pending re-admission, and the NAV is read under the pricing rule: the primary feed must be fresh, and a fresh fallback must agree with it.
+Proposes to re-anchor a fund's NAV and FX references, the only way to move them other than along the model path or down by the steward: after a legitimate jump, or to re-admit a removed fund whose new feed no longer lies on the old path. The fresh readings of the feed are taken now and stored; they are what the apply installs, so whoever applies cannot choose the anchor. The feed is the fund's current one, or for a removed fund the one of its pending re-admission, and the NAV is read under the pricing rule: the primary feed must be fresh, and a fresh fallback must agree with it. Since rc5 the NAV and FX feeds must publish with at least 6 decimals, here and again at the apply (`OutsideEnvelope`, decision S32): the references installed take their decimals.
 
 The signers sign numbers, not just a moment: `expected_nav` and `expected_fx` (0 for a fund priced directly) are the values they agreed on, and the readings must lie within the fund's corridor floor (NAV) and the leg's band (FX) of them, or the proposal is refused. Replaces an earlier proposal. Requires the governor and the fund's steward on record.
 
 ### `apply_reanchor(fund)`
 
-Installs a due re-anchor. Anyone may call it. The fund must still be priced by the feeds the proposal read, and they must still agree with it: today's NAV within the corridor that starts at the proposed NAV (the model path, so a fund that accrued during the delay still passes), today's FX rate within the leg's band of the proposed rate. The references become the proposed readings, not today's. `cancel_reanchor` takes the governor, the guardian or the steward on record as `caller`.
+Installs a due re-anchor. Anyone may call it. The fund must still be priced by the feeds the proposal read, and they must still agree with it: today's NAV within the corridor that starts at the proposed NAV (the model path, so a fund that accrued during the delay still passes; since rc5 it grows over at most one NAV age bound), today's FX rate within the leg's band of the proposed rate. The references become the proposed readings, not today's. `cancel_reanchor` takes the governor, the guardian or the steward on record as `caller`.
 
 ## Fallback NAV feed
 
 ### `propose_fallback(fund, feed)`
 
-It is an oracle change, so it needs the same two keys as an admission and waits for the delay. The feed must report in the NAV oracle's base, publish a fresh price for the shares now and agree with the primary feed when that one is fresh. Its age limit stays within the envelope's NAV age and the fund's own limit for its primary feed: a backup older than the primary would be allowed to be is no backup. Its divergence tolerance stays within the envelope's corridor floor: the floor is how far below the model the protocol lets a NAV fall before it calls the price faulty, so two feeds of the same NAV that differ by more than that cannot both be right. Replaces any earlier proposal. At most `MAX_FALLBACKS` funds may have one: each keeps its decimals in instance storage, which every invocation loads, so that a fund without fallback reads no extra ledger entry when it is valued.
+It is an oracle change, so it needs the same two keys as an admission and waits for the delay. The feed must report in the NAV oracle's base, with at least 6 decimals since rc5, and publish a fresh price for the shares now. Since rc5 it is a second source or nothing (decision S1): never the primary feed itself (the same oracle and asset: `OutsideEnvelope`), and it must agree, within its tolerance, with a primary that is fresh now; a stale or silent primary refuses the proposal with its own error (`StalePrice`, `NoPrice`) instead of letting a backup in unchecked, and a disagreement is `PriceDivergence`. Its age limit stays within the envelope's NAV age and the fund's own limit for its primary feed: a backup older than the primary would be allowed to be is no backup. Its divergence tolerance stays within the envelope's corridor floor: the floor is how far below the model the protocol lets a NAV fall before it calls the price faulty, so two feeds of the same NAV that differ by more than that cannot both be right. Capping it by the fund's own corridor floor instead is an open point of the security pass of 20 October 2026. Replaces any earlier proposal. At most `MAX_FALLBACKS` funds may have one: each keeps its decimals in instance storage, which every invocation loads, so that a fund without fallback reads no extra ledger entry when it is valued.
 
 ### `apply_fallback(fund)`, `cancel_fallback(fund, caller)`
 
-The apply checks the feed again before activating it; anyone may call it. `caller` of the cancellation must be the governor, the guardian or the fund's steward.
+The apply checks the feed again before activating it, with the same rules, a fresh primary that agrees with it included; anyone may call it. `caller` of the cancellation must be the governor, the guardian or the fund's steward.
 
 ### `remove_fallback(fund, caller)`
 
@@ -161,7 +163,7 @@ Removes a fund's fallback feed at once: removing a source never loosens a check.
 
 ### `pause(caller)`, `unpause()`, `set_sentinel(sentinel)`, `clear_sentinel(caller)`, `sentinel()`
 
-Since rc4 the guardian may name a *sentinel* (decision S26): the automated key a monitoring host holds, which may only `pause` and cancel proposals (`cancel_upgrade`, `cancel_stablecoin_change`, `cancel_fund_change`, `cancel_guardian_change`, every `cancel_*` the guardian may call). It can neither lift the pause, veto a governor handover or a forced guardian change, hand over or back up any role, nor propose anything: a stolen sentinel costs a pause and nothing more. It must hold no other role (`SentinelNotIndependent`). The guardian or the governor removes it (`clear_sentinel`); a guardian change leaves it in place until the new guardian decides.
+Since rc4 the guardian may name a *sentinel* (decision S26): the automated key a monitoring host holds, which may only `pause` and cancel proposals (`cancel_upgrade`, `cancel_stablecoin_change`, `cancel_fund_change`, `cancel_guardian_change`, every `cancel_*` the guardian may call). It can neither lift the pause, veto a governor handover or a forced guardian change, hand over or back up any role, nor propose anything: a stolen sentinel costs a pause and nothing more. It must hold no other role, nor be about to take one: `set_sentinel` refuses the governor, the guardian, its backup, the trustee, the sole lender and, since rc5, a proposed governor and a proposed guardian, ordinary or forced (`SentinelNotIndependent`). Since rc5 the other direction holds too: `set_admin`, `set_guardian`, `hand_over_guardian`, `set_guardian_backup`, `force_guardian_change` and `set_sole_lender` refuse the sentinel (`SentinelNotIndependent`), the trustee setters refuse it (`TrusteeNotIndependent`), and `apply_guardian_change` checks again. The guardian or the governor removes it (`clear_sentinel`); a guardian change leaves it in place until the new guardian decides.
 
 The pause suspends new offers and new repos; `caller` must be the guardian or the governor. Exits (repurchase, withdrawal of an offer, seizure, release) stay open. Only the governor lifts it.
 
@@ -169,11 +171,11 @@ The pause suspends new offers and new repos; `caller` must be the guardian or th
 
 ### `set_fund_limits(fund, haircut_bps, max_principal_per_repo, max_outstanding)`
 
-Tunes a fund's haircut and caps inside the envelope. A change that only tightens (haircut not lower, caps not higher) applies at once and drops a pending loosening. Any loosening exposes the fund's lenders more on one key, so it waits for the delay and applies through `apply_fund_limits_change`, which checks it against the envelope again; the governor, the guardian or the steward can cancel it meanwhile (decision S7). Open repos keep their frozen terms.
+Tunes a fund's haircut and caps inside the envelope. Since rc5 the haircut must also cover the fund's NAV corridor (decision S30, `OutsideEnvelope`), here and at `apply_fund_limits_change`. A change that only tightens (haircut not lower, caps not higher) applies at once and drops a pending loosening. Any loosening exposes the fund's lenders more on one key, so it waits for the delay and applies through `apply_fund_limits_change`, which checks it against the envelope again; the governor, the guardian or the steward can cancel it meanwhile (decision S7). Open repos keep their frozen terms.
 
 ### `approve_lender(fund, lender, approved)`
 
-Approves or revokes a lender for a fund, from the issuer's own list of authorized holders: seized shares can then always reach the lender (decision S8). An approval needs the lender's attestation for the fund, co-signed by the current steward, and the steward can never approve itself: the issuer does not lend against its own fund (MMF Regulation, Art. 35). The steward on record is refused as well. A revocation also removes the attestation, so a return needs a fresh one; the events keep the trail.
+Approves or revokes a lender for a fund, from the issuer's own list of authorized holders: seized shares reach only an approved holder (decision S8). An approval needs the lender's attestation for the fund, co-signed by the current steward, and the steward can never approve itself: the issuer does not lend against its own fund (MMF Regulation, Art. 35). The steward on record is refused as well. A revocation also removes the attestation, so a return needs a fresh one; the events keep the trail. A revocation stops the lender's new offers and loans at once, but since rc5 not the seizure of its open repos: the lender of record still seizes, and the shares then wait in the contract until it is approved again or redirects them to an approved holder (`seize`).
 
 ### `attest_lender(fund, lender, declaration)`
 
@@ -185,7 +187,7 @@ Suspends or resumes new repos on a fund. Exits stay open.
 
 ### `reset_reference(fund)`
 
-Lowers the NAV reference to the oracle's current NAV, for instance after a legitimate drop. It can only lower it: upward, the reference follows the model path, so a steward who also runs the feed cannot inflate the collateral. Takes no price from the caller; the NAV follows the same rule as a valuation, so a fresh fallback stands in for a silent primary feed.
+Lowers the NAV reference to the oracle's current NAV, for instance after a legitimate drop. It can only lower it. Upward, the reference follows the model path whoever runs the feed: a steward who also runs the feed can raise it no faster than the model's maximum yield, and since rc5 the fund's haircut covers the corridor such a feed can use (decision S30). Takes no price from the caller; the NAV follows the same rule as a valuation, so a fresh fallback stands in for a silent primary feed.
 
 ### `set_sponsor(offer_id, fund, sponsor)`
 
@@ -201,11 +203,13 @@ An upgrade replaces the code and keeps the storage (decision S15). Since rc4 the
 
 ### `refresh_reference(fund)`
 
-Moves a fund's NAV reference forward when the oracle's NAV is fresh, newer and inside the corridor. The reference never falls and rises at most along the model path. Anyone may call it, like feeding a watchdog: it cannot be made to follow a faulty feed.
+Moves a fund's NAV reference forward when the oracle's NAV is fresh, newer and inside the corridor. The reference never falls and rises at most along the model path: a feed that publishes too high moves it no faster than the model's maximum yield, never above that path. Anyone may call it, like feeding a watchdog.
+
+Since rc5 (decision S30) the corridor grows over at most one NAV age bound after the reference, and one call moves the reference by at most that much growth. A reference nobody moves therefore fails closed once an honest NAV outgrows the floor plus that window (`PriceOutOfBand` for `quote`, `open_repo` and this function alike). While the NAV is still inside, calls step the reference forward one window at a time, which the keeper does; once it is outside, only a two-key re-anchor (`propose_reanchor`) recovers (test `a_stale_reference_fails_closed_and_refreshes_step_it_forward`).
 
 ### `fund_price(fund)`, `quote(fund, shares, stablecoin)`, `repo_due(repo_id)`
 
-`fund_price` is the last NAV reported by the fund's oracle, unchecked. `quote` is what `shares` of `fund` can secure now in `stablecoin`, with every check `open_repo` applies to the price. `repo_due` is the interest due on a repo if it were repurchased now.
+`fund_price` is the last NAV reported by the fund's oracle, unchecked. `quote` is what `shares` of `fund` can secure now in `stablecoin`, with every check `open_repo` applies to the price; for a cross price, the NAV is divided by the higher of the FX rate and the fund's FX reference since rc5 (decision S22). `repo_due` is the interest due on a repo if it were repurchased now.
 
 ## Lending
 
@@ -219,7 +223,7 @@ The lender takes back `amount` of the stablecoins not lent, including repaid pri
 
 ### `open_repo(borrower, offer_id, fund, shares, principal, term)`
 
-The borrower locks `shares` of `fund` against `offer_id` and receives `principal` stablecoins in the same transaction, for `term` seconds. The contract refuses rather than adjusts: the borrower states what they want. Returns the repo identifier.
+The borrower locks `shares` of `fund` against `offer_id` and receives `principal` stablecoins in the same transaction, for `term` seconds. The contract refuses rather than adjusts: the borrower states what they want. Returns the repo identifier. Publishes `RepoOpened`, then, since rc5, `RepoValued` with the readings and the price the loan was valued at, and `ReferenceUpdated` when the opening moves the fund's price reference, as `refresh_reference` would (decision S33).
 
 ### `repurchase(repo_id)`
 
@@ -229,15 +233,17 @@ If the share token refuses to return the shares (issuer freeze, allowlist remova
 
 ### `seize(repo_id, to)`
 
-From maturity, the lender seizes the shares of an unpaid repo and sends them to `to`, the lender or another address the fund's steward approved. Allowed while paused. If the share token refuses the delivery, the repo still defaults and the shares wait for `to` as a pending release (decision S9).
+From maturity, the lender seizes the shares of an unpaid repo and sends them to `to`: itself, or another address the fund's steward approved, never the steward or the steward on record (`StewardCannotLend`). Allowed while paused. If the share token refuses the delivery, the repo still defaults and the shares wait for `to` as a pending release (decision S9).
+
+Since rc5 the lender of record seizes even after the steward revoked it (decision S8): its approval was checked when the repo opened, and a revocation must not take its recourse away. The repo defaults and the totals are released as usual; when the lender is not approved, the shares are not pushed but wait for it as a pending release (`ReleaseDeferred`) until the steward approves it again, after a fresh attestation, or until it redirects them to an approved holder (`redirect_release`). Any other `to` needs its own approval (`LenderNotApproved`).
 
 ### `release(repo_id)`
 
-Retries the delivery of shares a closed repo owes, to the beneficiary recorded. Anyone may call it, typically once the issuer has lifted the freeze or restored the allowlist; only the beneficiary can change itself (`redirect_release`), and no other path moves these shares. Works while paused. Returns whether the shares were delivered. A refusal is not an error: the call succeeds so that the record's TTL extension is kept, and the record waits for the next attempt.
+Retries the delivery of shares a closed repo owes, to the beneficiary recorded. Anyone may call it, typically once the issuer has lifted the freeze or restored the allowlist; only the beneficiary can change itself (`redirect_release`), and no other path moves these shares. Works while paused. Returns whether the shares were delivered. A refusal is not an error: the call succeeds so that the record's TTL extension is kept, and the record waits for the next attempt. Since rc5, seized shares are delivered only to a recipient still approved for the fund and never to its steward: until then the call returns `false` and extends the record, as on a token refusal.
 
 ### `redirect_release(repo_id, to)`
 
-Changes where the shares awaiting release go, for instance when the issuer will never let the recorded address hold them again. After a repurchase the shares are the borrower's, so the borrower signs and picks any address; after a seizure they are the lender's, so the lender signs and picks another address the fund's steward approved (decision S8). Delivery still goes through `release`.
+Changes where the shares awaiting release go, for instance when the issuer will never let the recorded address hold them again. After a repurchase the shares are the borrower's, so the borrower signs and picks any address; after a seizure they are the lender's, so the lender signs and picks another address the fund's steward approved, never the steward (decision S8). Delivery still goes through `release`.
 
 ## Types
 
@@ -245,11 +251,11 @@ Storage keys (`DataKey`) are not part of the interface; their doc comments stay 
 
 - **`PriceData`**: a price point as defined by SEP-40. `price` carries the oracle's `decimals()` fractional digits; `timestamp` is a Unix timestamp.
 - **`RiskEnvelope`**: limits that no fund configuration may exceed, set by the governor. Stewards tune their fund inside it, the way a calibration stays inside the limits a manufacturer burns into the firmware. `max_fx_band_bps` is the widest band an FX rate may move from its reference.
-- **`FxLeg`**: second leg of a cross price: the fund's NAV oracle reports in one base (for instance USD) and the loan is in another currency (for instance EUR). The FX oracle must report `asset` (the loan currency as quoted by the FX oracle, e.g. `Other(EUR)`) in the same base as the NAV oracle. `haircut_bps` is an extra haircut covering a weekend gap of the exchange rate. `band_bps` is the band around the reference rate, both ways; the reference is set at admission, which needs both the governor and the steward. The band may not exceed the FX haircut: a rate the band admits must stay covered by the haircut.
+- **`FxLeg`**: second leg of a cross price: the fund's NAV oracle reports in one base (for instance USD) and the loan is in another currency (for instance EUR). The FX oracle must report `asset` (the loan currency as quoted by the FX oracle, e.g. `Other(EUR)`) in the same base as the NAV oracle. `haircut_bps` is an extra haircut covering a weekend gap of the exchange rate. `band_bps` is the band around the reference rate, both ways; the reference is set at admission, which needs both the governor and the steward. The band may not exceed the FX haircut, and since rc5 the NAV is divided by the higher of the rate and the reference: while the market stays inside the band, a rate the band admits overvalues the shares by at most the band, which the FX haircut covers (decision S22).
 - **`PriceSource`**: `Direct` when the NAV oracle reports in the loan currency; `Cross(FxLeg)` when it reports in another base and the leg converts it.
 - **`FundConfig`**: `oracle` is the SEP-40 oracle publishing the fund's NAV and `oracle_asset` the identifier of the shares in it; `haircut_bps` the haircut on the share value; `steward` the issuer's key, which approves lenders and tunes the fund in the envelope; `currency` the currency of the stablecoins this fund can be borrowed against; `source` direct, or crossed through an FX feed when the NAV oracle does not report in `currency`; `nav_max_age_secs` the oldest acceptable NAV; `corridor_floor_bps` the lower margin of the NAV corridor; `max_yield_bps` the highest annual growth the corridor allows; `max_principal_per_repo` the cap on the principal of one repo, in stablecoin units; `max_outstanding` the cap on the sum of open principals on this fund.
 - **`FundState`**: runtime state, kept apart from the configuration. `currency` is copied from the configuration so that totals can be released even after the fund or its stablecoin leaves the registry; `share_decimals` and `nav_decimals` are read at admission; `fx_decimals` is 0 without FX leg; `reference_nav` and `reference_time` are the reference NAV of the corridor and its timestamp; `reference_fx` the reference FX rate, 0 without FX leg; `outstanding` the sum of open principals; `frozen` is set by the steward to suspend new repos.
-- **`StablecoinConfig`**: `decimals` is read from the token when registered.
+- **`StablecoinConfig`**: `decimals` is read from the token when registered; 7 since rc5 (decision S31).
 - **`Offer`**: a lender's standing offer. Borrowers take it in one transaction; the principal repaid flows back into it. `available` is the amount available to borrow now; `rate_bps` the annual rate; `max_term` the longest term the lender accepts, in seconds; `funds` the fund shares accepted as collateral; `sponsor` is set by a fund's steward on the offer it designates (`set_sponsor`, a name kept for compatibility): a display mark, no funding by the issuer and no special right.
 - **`Repo`**: shares locked against a stablecoin loan; its terms are frozen at opening (invariant I9). `opened_at` is the ledger timestamp at opening; `maturity` the ledger timestamp from which the lender may seize the shares.
 - **`Quote`**: read-only, for interfaces. `price` is the share price in the loan currency, with `price_decimals` digits; `haircut_bps` the fund haircut plus the FX haircut when the price is crossed.
@@ -257,8 +263,8 @@ Storage keys (`DataKey`) are not part of the interface; their doc comments stay 
 - **`PendingFundChange`**: a replacement of an admitted fund's configuration, signed by the governor and the steward(s), waiting for its delay. `fx_anchor` is set when the replacement gives the fund its first FX leg: the rate read at the proposal, which becomes the FX reference; the rate at the apply must lie within the leg's band of it, so whoever applies does not pick the anchor. Zero otherwise. Anyone may apply it from `eta`.
 - **`PendingReanchor`**: a re-anchoring of a fund's references, signed by the governor and the steward. The references it installs are the readings taken at the proposal, never the spot at the apply. `nav_oracle` and `nav_asset` are the feed the readings come from; the apply requires the fund to be priced by the same one. `nav` is the NAV read at the proposal, with `nav_decimals` digits, and `nav_time` its time. `fx` is the FX rate read at the proposal, for a cross price.
 - **`AnchorFx`**: the FX side of a re-anchor: `Direct` for a fund priced directly, or `Cross(AnchorRate)` for a cross price. An enum, like `PriceSource`, rather than a zero rate with zero decimals that could pass for a reading. **`AnchorRate`** is the rate with `decimals` digits and the feed (`oracle`, `asset`) it comes from.
-- **`PendingRelease`**: shares a closed repo owes but the share token refused to deliver: the issuer froze the contract or the recipient, removed one of them from its allowlist, or clawed shares back (decision S9). `to` is the borrower after a repurchase, the seizure recipient after a default. Anyone may retry the delivery to `to`; nothing else moves these shares.
-- **`FallbackFeed`**: a second NAV source, used when the primary feed is stale or silent and checked against it when both are fresh. `oracle` is a SEP-40 oracle reporting in the same base as the fund's NAV oracle; `asset` the identifier of the shares in it; `max_age_secs` the oldest acceptable price, within the envelope's NAV age; `max_divergence_bps` the largest gap allowed between the two feeds when both are fresh, in basis points of the primary NAV.
+- **`PendingRelease`**: shares a closed repo owes but the share token refused to deliver: the issuer froze the contract or the recipient, removed one of them from its allowlist, or clawed shares back (decision S9); since rc5 also seized shares whose recipient is not approved for the fund (decision S8). `to` is the borrower after a repurchase, the seizure recipient after a default. Anyone may retry the delivery to `to`; nothing else moves these shares.
+- **`FallbackFeed`**: a second NAV source, used when the primary feed is stale or silent and checked against it when both are fresh. `oracle` is a SEP-40 oracle reporting in the same base as the fund's NAV oracle (since rc5, `oracle` and `asset` together may not name the primary feed itself); `asset` the identifier of the shares in it; `max_age_secs` the oldest acceptable price, within the envelope's NAV age; `max_divergence_bps` the largest gap allowed between the two feeds when both are fresh, in basis points of the primary NAV.
 - **`PendingGuardianChange`**: a guardian appointment waiting for its delay. The current guardian can cancel it, so a governor key alone cannot remove the veto in time. Also the shape of a forced change.
 - **`PendingMaxTermChange`**, **`PendingEnvelopeChange`**, **`PendingFundLimitsChange`**, **`PendingCurrencyCapChange`**, **`PendingFallback`**: a loosening waiting for its delay; anyone may apply it from `eta`. An envelope change loosens at least one bound; a fund limits change is a lower haircut or higher caps proposed by the steward.
 - **`PendingAdminChange`**: a governor handover waiting for its successor's acceptance. After the first admission it waits for the delay too, during which the guardian can veto it (custody gap I12). `eta` is the ledger timestamp from which the successor may accept.
@@ -280,7 +286,7 @@ Error codes are public ABI: new variants are appended, never renumbered or remov
 | 6 | `NoPrice` | The oracle has no price for the asset. |
 | 7 | `NotInitialized` | Instance storage lost its configuration. Unreachable with a constructor deployment; kept as a typed failure rather than an opaque trap. |
 | 8 | `Paused` | New offers and new repos are suspended. |
-| 9 | `StablecoinNotAccepted` | The stablecoin is not in the registry of accepted stablecoins. |
+| 9 | `StablecoinNotAccepted` | The stablecoin is not in the registry of accepted stablecoins, or, since rc5, does not have the 7 decimals a registration requires. |
 | 10 | `CurrencyMismatch` | Currencies of the fund, its oracles and the stablecoin do not match. |
 | 11 | `StalePrice` | The price is older than the freshness window. |
 | 12 | `PriceOutOfBand` | The fund's NAV is outside the corridor predicted from its reference. |
@@ -297,7 +303,7 @@ Error codes are public ABI: new variants are appended, never renumbered or remov
 | 23 | `FundNotInOffer` | The offer does not accept this fund as collateral. |
 | 24 | `InvalidRate` | Rates are expressed in basis points and capped at 10,000. |
 | 25 | `ArithmeticOverflow` | A computation overflowed or divided by zero. |
-| 26 | `OutsideEnvelope` | A parameter lies outside the protocol risk envelope. |
+| 26 | `OutsideEnvelope` | A parameter lies outside the protocol risk envelope; since rc5 also a haircut that does not cover the fund's NAV corridor, a feed with fewer than 6 decimals, or a backup feed that is the primary feed. |
 | 27 | `FundFrozen` | The fund's steward suspended new repos on this fund. |
 | 28 | `InvalidPrice` | A price is not strictly positive or lies in the future. |
 | 29 | `DuplicateFund` | Reserved: the fund is already listed in the offer. |
@@ -318,14 +324,16 @@ Error codes are public ABI: new variants are appended, never renumbered or remov
 | 44 | `SoleLenderFixed` | The sole lender can be chosen once, before the first admission and the first offer, and never changes. |
 | 45 | `NoStewardBackup` | A steward recovery goes only to the backup the steward registered; none is registered, or the recovery names another address. |
 | 46 | `TrusteeFixed` | The trustee is named once, before the first admission and the first offer; afterwards only the trustee hands its role over. |
-| 47 | `TrusteeNotIndependent` | The trustee must be neither the governor, the guardian nor the sole lender. |
-| 48 | `FxBandExceedsHaircut` | A cross-priced fund's FX band may not exceed its FX haircut: a rate the band admits must stay covered by the haircut. |
-| 49 | `SentinelNotIndependent` | The sentinel must hold no other role: not the governor, the guardian, its backup, the trustee or the sole lender. |
+| 47 | `TrusteeNotIndependent` | The trustee must hold no other role nor be about to take one: not the governor, the guardian, its backup, the sole lender, a proposed governor or guardian, or the sentinel; no role may name it. |
+| 48 | `FxBandExceedsHaircut` | A cross-priced fund's FX band may not exceed its FX haircut: with the rate taken on the lender's side of the band, the haircut covers what an admitted rate can overvalue the shares by while the market stays inside the band. |
+| 49 | `SentinelNotIndependent` | The sentinel must hold no other role nor be about to take one: not the governor, the guardian, its backup, the trustee, the sole lender, or a proposed governor or guardian; since rc5 no role may name it. |
 | 50 | `NothingToMigrate` | The stored layout is already at the version the code expects. |
 | 51 | `SchemaOutdated` | The code was upgraded and `migrate` has not run yet: new offers and repos wait, exits go on. |
 
 - **`PendingStablecoinChange`** (rc4): a stablecoin registration or currency change waiting for its delay; `currency` is what the token will be registered as, `eta` when anyone may apply it.
 
 ## Events
+
+`RepoValued` is the rc5 addition (decision S33): `open_repo` publishes it right after `RepoOpened`, with `repo_id` and `fund` as topics, then `nav` (the NAV read, with the fund's NAV decimals) and `nav_time`; for a cross price `fx` (the rate read), `fx_applied` (the divisor: the higher of the rate and the FX reference) and `fx_time`, all 0 for a fund priced directly; `price`, the share price in the loan currency with the NAV's decimals; and `haircut_bps`, the fund haircut plus the FX haircut. Since rc5 `open_repo` also publishes `ReferenceUpdated` when it moves the price reference, as `refresh_reference` does, and `UpgradeCancelled` is also published by the contract itself when the first admission drops an upgrade proposed during bootstrap.
 
 `StablecoinChangeProposed`, `StablecoinChangeCancelled`, `SentinelChanged` (with `None` when cleared) and `Migrated` (from, to) are the rc4 additions. `Upgraded` is published just before the code switches, by the code being replaced. `GuardianChangeForced` records a guardian the governor imposes without the current one, after the longest delay. `AdminChangeProposed` is published with `AdminProposed`, which keeps its version 2 shape, and adds when the proposed governor may accept.
