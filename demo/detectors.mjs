@@ -7,7 +7,10 @@
 // tested offline (demo/test/).
 //
 // A detector may keep a little memory between passes in the `monitor`
-// object (a rate unchanged since when, say); monitor.mjs saves it.
+// object (a rate unchanged since when, say); monitor.mjs saves it, except
+// the fields starting with "_", which live as long as the process.
+
+import { compareTrail, nameOf } from "../indexer/lib/crosscheck.mjs";
 
 /** Thresholds of the monitoring plan. monitor.mjs overrides some from its flags; the rehearsal forces some for a drill. */
 export const LIMITS = {
@@ -581,33 +584,55 @@ export const DETECTORS = {
     if (s.schemaVersion === null || s.schemaVersion >= EXPECTED_SCHEMA) return [];
     return [{ detector: "schema", threat: "Elev.2", level: "critical", message: `stored layout at version ${s.schemaVersion}, the code expects ${EXPECTED_SCHEMA}: migrate has not run since the upgrade`, action: "governor and trustee run migrate (npm run upgrade -- --apply)" }];
   },
-  journal(s, _monitor, { journalPending }) {
-    // Repud.2: every event the RPC served must be in the indexer's journal once
-    // the journal covers its ledger. An event the journal does not cover yet
-    // waits in `pending` and is checked on a later pass; one older than the
-    // RPC's retention is dropped unchecked.
-    if (!s.journal) return [];
-    for (const e of s.events) {
-      if (e.id) journalPending.set(`${e.txHash}:${e.id}`, { name: e.name, ledger: e.ledger, txHash: e.txHash });
-    }
+  journal(s, monitor) {
+    // Repud.2 and rpc-6: the indexer's journal against the events an
+    // endpoint other than the indexer's serves (`s.trail`), both ways and by
+    // content, once both sides cover a ledger: an event served but not
+    // journaled (a stalled or trimmed journal) warns; a journaled line that
+    // endpoint does not know (an event the indexer's endpoint made up), or
+    // whose ledger, transaction, topics or data differ, is critical. The
+    // hash chain and the anchor cannot see either: they prove a line was not
+    // changed after it was written, not that it was true. What both sides
+    // covered is compared once and forgotten; a line older than the oldest
+    // ledger the endpoint kept when this monitor started cannot be checked.
+    if (!s.journal || !s.trail) return [];
     const out = [];
-    for (const [key, e] of journalPending) {
-      if (s.journal.lastLedger === null || e.ledger > s.journal.lastLedger) {
-        if (e.ledger < s.latest - 17_000) journalPending.delete(key);
-        continue;
+    const memory = (monitor._trail ??= { events: new Map(), lines: new Map(), from: null, warnedSame: false });
+    if (s.trail.independent === false && !memory.warnedSame) {
+      memory.warnedSame = true;
+      out.push({ level: "warning", message: `the journal check reads ${s.trail.url}, the endpoint the indexer read: it cannot see an event that endpoint made up`, action: "list another endpoint in STELLAR_RPC_URLS" });
+    }
+    if (s.trail.error) {
+      out.push({ level: "warning", message: `journal check skipped: ${s.trail.url} did not answer (${s.trail.error})`, action: "check the endpoint" });
+      return out.map((a) => ({ detector: "journal", threat: "Repud.2", ...a }));
+    }
+    memory.from ??= s.trail.from;
+    for (const e of s.trail.events) memory.events.set(e.id, e);
+    for (const l of s.journal.lines) memory.lines.set(l.id, l);
+    const to = Math.min(s.trail.reached ?? -1, s.journal.lastLedger ?? -1);
+    if (memory.from !== null && memory.from !== undefined && to >= memory.from) {
+      const result = compareTrail([...memory.lines.values()], [...memory.events.values()], { from: memory.from, to });
+      for (const e of result.missing) {
+        out.push({ level: "warning", message: `event ${nameOf(e)} at ledger ${e.ledger} missing from the indexer journal`, action: "run the indexer, then compare; a persistent gap means a tampered or stalled journal", tx: e.txHash });
       }
-      journalPending.delete(key);
-      if (!s.journal.seen.has(key)) {
-        out.push({ detector: "journal", threat: "Repud.2", level: "warning", message: `event ${e.name} at ledger ${e.ledger} missing from the indexer journal`, action: "run the indexer, then compare; a persistent gap means a tampered or stalled journal", tx: e.txHash });
+      for (const l of result.unknown) {
+        out.push({ level: "critical", message: `journal line ${l.seq} (${nameOf(l)} at ledger ${l.ledger}) is not served by ${s.trail.url}: an event the indexer's endpoint made up, or a line written by hand`, action: "stop trusting the journal from that line; re-index from an honest endpoint (npm run verify -- --against <url>)", tx: l.txHash });
+      }
+      for (const d of result.altered) {
+        out.push({ level: "critical", message: `journal line ${d.seq} (${d.name} at ledger ${d.ledger}) differs from ${s.trail.url} in ${d.fields.join(", ")}`, action: "stop trusting the journal from that line; re-index from an honest endpoint (npm run verify -- --against <url>)" });
+      }
+      for (const items of [memory.events, memory.lines]) {
+        for (const [id, item] of items) if (Number(item.ledger) <= to) items.delete(id);
       }
     }
-    return out;
+    for (const [id, line] of memory.lines) if (memory.from !== null && Number(line.ledger) < memory.from) memory.lines.delete(id);
+    return out.map((a) => ({ detector: "journal", threat: "Repud.2", ...a }));
   },
 };
 
-/** Runs every detector on one snapshot. `ctx`: `{ limits, journalPending }`. */
+/** Runs every detector on one snapshot. `ctx`: `{ limits }`. */
 export function detect(s, monitor, ctx) {
-  const full = { limits: LIMITS, journalPending: new Map(), ...ctx };
+  const full = { limits: LIMITS, ...ctx };
   return Object.values(DETECTORS).flatMap((run) => run(s, monitor, full));
 }
 

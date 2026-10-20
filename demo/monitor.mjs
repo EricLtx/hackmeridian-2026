@@ -69,6 +69,7 @@ import {
   sv,
 } from "./lib.mjs";
 import { FUND_SETTINGS, navAt } from "./config.mjs";
+import { plain } from "../indexer/lib/plain.mjs";
 import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, statusOf } from "./detectors.mjs";
 
 const args = process.argv.slice(2);
@@ -132,7 +133,8 @@ function loadMonitor() {
   return m.contract === C.openWindow ? m : { contract: C.openWindow, announced: m.announced ?? [] };
 }
 function saveMonitor(m) {
-  fs.writeFileSync(MONITOR_FILE, JSON.stringify(m, null, 2));
+  // Fields starting with "_" are this process's memory (the journal check's), never saved.
+  fs.writeFileSync(MONITOR_FILE, JSON.stringify(m, (key, value) => (key.startsWith("_") ? undefined : value), 2));
 }
 
 // ---------------------------------------------------------------------------
@@ -140,16 +142,24 @@ function saveMonitor(m) {
 // ---------------------------------------------------------------------------
 //
 // `indexer/.state/events-YYYY-MM.jsonl` holds one JSON line per event with
-// `txHash`, `id` (the RPC event id) and `ledger`. Only the files of the
-// current and the previous month are read, from the byte where the last pass
-// stopped; the keys `txHash:id` seen so far stay in memory. `pending` holds
-// the RPC events the journal did not cover yet, re-checked on later passes.
+// `id` (the RPC event id), `ledger`, `txHash`, `topics` and `data`. Only the
+// files of the current and the previous month are read, from the byte where
+// the last pass stopped; each pass hands its new lines to the journal
+// detector, which compares them with the events an endpoint independent of
+// the indexer's serves (rpc-6). `cursor.json` names the indexer's endpoint.
 
-const JOURNAL = { seen: new Set(), lastLedger: null, offsets: new Map(), pending: new Map() };
+const JOURNAL = { lastLedger: null, offsets: new Map(), trailCursor: null };
 
-/** Reads the new lines of the journal; returns `{ lastLedger, seen }` or null when there is no journal. */
+/** Reads the new lines of the journal: `{ lastLedger, lines, endpoint }`, or null when there is no journal. */
 function readJournal(contractId) {
   if (!fs.existsSync(JOURNAL_DIR)) return null;
+  const lines = [];
+  let endpoint = null;
+  try {
+    endpoint = JSON.parse(fs.readFileSync(path.join(JOURNAL_DIR, "cursor.json"), "utf8")).rpc ?? null;
+  } catch {
+    // no cursor yet: the indexer's endpoint is unknown
+  }
   const now = new Date();
   const months = [0, 1].map((back) => {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
@@ -180,12 +190,40 @@ function readJournal(contractId) {
         continue; // `npm run verify` in indexer/ reports a malformed line; this is not its job
       }
       if (line.contract !== contractId) continue;
-      JOURNAL.seen.add(`${line.txHash}:${line.id}`);
+      lines.push(line);
       if (JOURNAL.lastLedger === null || line.ledger > JOURNAL.lastLedger) JOURNAL.lastLedger = line.ledger;
     }
     JOURNAL.offsets.set(file, start + end + 1);
   }
-  return { lastLedger: JOURNAL.lastLedger, seen: JOURNAL.seen };
+  return { lastLedger: JOURNAL.lastLedger, lines, endpoint };
+}
+
+/**
+ * The contract's events in the journal's form, read from an endpoint other
+ * than the one the indexer read (its `cursor.json`), from where the last
+ * pass stopped; the first pass starts at the oldest ledger that endpoint
+ * keeps. When every configured endpoint is the indexer's, the check runs
+ * against it and says it is not independent.
+ */
+async function readTrail(journal) {
+  if (!journal) return null;
+  const other = RPC_URLS.findIndex((url) => url !== journal.endpoint);
+  const index = other >= 0 ? other : Math.max(0, RPC_URLS.indexOf(activeRpcUrl()));
+  const client = endpointClient(index);
+  const independent = journal.endpoint ? client.url !== journal.endpoint : null;
+  try {
+    const events = await client.events(C.openWindow, JOURNAL.trailCursor ?? 1);
+    if (events.reachedLedger !== null && events.reachedLedger !== undefined) JOURNAL.trailCursor = events.reachedLedger + 1;
+    return {
+      url: client.url,
+      independent,
+      from: events.startLedger,
+      reached: events.reachedLedger,
+      events: events.map((e) => ({ id: e.id, ledger: e.ledger, txHash: e.txHash, topics: plain([e.name, ...e.topics]), data: plain(e.data) })),
+    };
+  } catch (error) {
+    return { url: client.url, independent, error: firstLine(error) };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -446,7 +484,8 @@ async function snapshot(monitor) {
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl() };
+  const trail = await readTrail(journal);
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl(), trail };
 }
 
 /**
@@ -493,7 +532,7 @@ async function secondFacts(latest) {
 
 async function pass(monitor, { quiet = false } = {}) {
   const s = await snapshot(monitor);
-  const alerts = detect(s, monitor, { limits: LIMITS, journalPending: JOURNAL.pending });
+  const alerts = detect(s, monitor, { limits: LIMITS });
   // The next pass reads events after the last ledger this one covered.
   monitor.cursor = (s.eventsReached ?? s.latest) + 1;
   if (s.wasmHash) monitor.wasmHash = monitor.wasmHash ?? s.wasmHash;

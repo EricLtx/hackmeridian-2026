@@ -120,6 +120,7 @@ export function endpointClient(index) {
     },
     latestLedger: () => net(() => client.getLatestLedger(), "ledger"),
     ledgerEntries: (keys) => ledgerEntries(keys, client),
+    events: (contractId, startLedger) => contractEvents(contractId, startLedger, client),
   };
 }
 

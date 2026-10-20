@@ -11,7 +11,7 @@ const DAY = 86_400;
 /** Wednesday 13 January 2027, 12:00 UTC: a business day. */
 const NOW = Date.UTC(2027, 0, 13, 12) / 1000;
 
-const ctx = (limits = {}) => ({ limits: { ...LIMITS, ...limits }, journalPending: new Map() });
+const ctx = (limits = {}) => ({ limits: { ...LIMITS, ...limits } });
 
 function fund(label, shares, over = {}) {
   return {
@@ -215,12 +215,43 @@ test("lenders: a lender revoked while its repos are open warns once per count; i
   assert.deepEqual(run("ttl", snap({ ttl })).map((a) => a.message), ["lender GOTHER on fund 1 is archived or missing"]);
 });
 
-test("journal: an RPC event the journal covers but lacks warns; one it does not cover yet waits", () => {
-  const c = ctx();
-  const events = [{ name: "repo_opened", ledger: 100, txHash: "aa", id: "e1" }, { name: "repo_opened", ledger: 120, txHash: "cc", id: "e3" }, { name: "pause_changed", ledger: 200, txHash: "bb", id: "e2" }];
-  const out = run("journal", snap({ events, journal: { lastLedger: 150, seen: new Set(["cc:e3"]) } }), {}, c);
-  assert.deepEqual(out.map((a) => a.message), ["event repo_opened at ledger 100 missing from the indexer journal"]);
-  assert.deepEqual([...c.journalPending.keys()], ["bb:e2"]);
+/** An event as the trail and the journal both carry it. */
+const trailEvent = (ledger, id, name, data = { amount: "1" }) => ({ id, ledger, txHash: `tx-${id}`, topics: [name, "1"], data });
+const line = (seq, event) => ({ seq, ...event, contract: "COW", prevHash: "p", hash: "h" });
+
+test("journal: an event served but not journaled warns, once both sides cover its ledger", () => {
+  const monitor = {};
+  const trail = (events, from, reached) => ({ url: "https://two", independent: true, from, reached, events });
+  const e1 = trailEvent(100, "e1", "repo_opened");
+  const e2 = trailEvent(200, "e2", "pause_changed");
+  let out = run("journal", snap({ journal: { lastLedger: 150, lines: [] }, trail: trail([e1, e2], 90, 210) }), monitor);
+  assert.deepEqual(out.map((a) => [a.level, a.message]), [["warning", "event repo_opened at ledger 100 missing from the indexer journal"]]);
+  // e2 waits until the journal reaches its ledger; then it is compared once.
+  out = run("journal", snap({ journal: { lastLedger: 200, lines: [line(1, e2)] }, trail: trail([], 90, 220) }), monitor);
+  assert.deepEqual(out, []);
+  assert.deepEqual([monitor._trail.events.size, monitor._trail.lines.size], [0, 0]);
+});
+
+test("journal: a line the independent endpoint does not know, or whose content differs, is critical (rpc-6)", () => {
+  const monitor = {};
+  const served = [trailEvent(100, "e1", "repo_opened"), trailEvent(110, "e2", "repo_valued", { price: "108" })];
+  const injected = trailEvent(105, "e9", "pause_changed");
+  const lines = [line(1, served[0]), line(2, injected), line(3, { ...served[1], data: { price: "999" } })];
+  const out = run("journal", snap({ journal: { lastLedger: 110, lines }, trail: { url: "https://two", independent: true, from: 50, reached: 120, events: served } }), monitor);
+  assert.deepEqual(out.map((a) => a.level), ["critical", "critical"]);
+  assert.match(out[0].message, /^journal line 2 \(pause_changed at ledger 105\) is not served by https:\/\/two/);
+  assert.match(out[1].message, /^journal line 3 \(repo_valued at ledger 110\) differs from https:\/\/two in data$/);
+});
+
+test("journal: lines older than the endpoint's retention are not checked; the indexer's own endpoint is said not independent", () => {
+  const monitor = {};
+  const old = line(1, trailEvent(10, "e0", "repo_opened"));
+  let out = run("journal", snap({ journal: { lastLedger: 10, lines: [old] }, trail: { url: "https://one", independent: false, from: 50, reached: 60, events: [] } }), monitor);
+  assert.deepEqual(out.map((a) => a.level), ["warning"]);
+  assert.match(out[0].message, /the endpoint the indexer read/);
+  assert.equal(monitor._trail.lines.size, 0);
+  out = run("journal", snap({ journal: { lastLedger: 10, lines: [] }, trail: { url: "https://one", independent: false, error: "timeout" } }), monitor);
+  assert.deepEqual(out.map((a) => a.message), ["journal check skipped: https://one did not answer (timeout)"]);
 });
 
 test("privileged: every privileged event is reported; handovers, recoveries and forced changes are critical", () => {
