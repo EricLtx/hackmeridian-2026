@@ -583,6 +583,8 @@ export class Chain {
     const urls = [deployment.rpcUrl, ...(Array.isArray(deployment.rpcFallbacks) ? deployment.rpcFallbacks : [])].filter(Boolean);
     this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: rpcServer(url), lastMs: null, failures: 0 }));
     this.active = 0;
+    /** Moves between endpoints so far: a call started before the last one is no reason to move again (`failover`). */
+    this.moveCount = 0;
     /** Pause between two looks at a submitted transaction, in milliseconds. */
     this.pollMs = 1000;
     /** How long the other endpoints may stay silent before a write ends unverified (SILENT_MS). */
@@ -695,14 +697,18 @@ export class Chain {
    * the same endpoint. A 429 the caller marks `exhausted` (RATE_LIMIT_STRIKES
    * in a row, or a Retry-After longer than a timeout) is a failure like any
    * other, but only when another endpoint is not resting: with every other
-   * one resting, the caller keeps waiting as the endpoint asks.
+   * one resting, the caller keeps waiting as the endpoint asks. `since` is
+   * the `moveCount` when the call started: a call that started before the
+   * last move, such as a 12 s scan of events launched before a round trip
+   * away and back, reports a failure of the past, so it follows the calls
+   * (true) rather than moving them again.
    */
-  failover(error, from = this.active, { exhausted = false } = {}) {
+  failover(error, from = this.active, { exhausted = false, since } = {}) {
     if (this.endpoints.length < 2) return false;
     if (!(error instanceof RpcTimeout) && !isTransient(error)) return false;
     const limited = isRateLimited(error);
     if (limited && !exhausted) return false;
-    if (from !== this.active) return true;
+    if (from !== this.active || (since !== undefined && since !== this.moveCount)) return true;
     const now = Date.now();
     if (limited && this.endpoints.every((endpoint, i) => i === from || resting(endpoint, now))) return false;
     const previous = this.endpoints[this.active];
@@ -737,6 +743,7 @@ export class Chain {
    */
   moveTo(index, now = Date.now()) {
     this.active = index;
+    this.moveCount += 1;
     this.endpoints[index].returnedAt = now;
     this.endpoints[index].limitedPolls = 0;
   }
@@ -853,6 +860,7 @@ export class Chain {
         continue;
       }
       const started = Date.now();
+      const since = this.moveCount;
       let error;
       try {
         const result = await withTimeout(call(), timeoutMs);
@@ -868,13 +876,13 @@ export class Chain {
       attempt += 1;
       if (isRateLimited(error)) {
         strikes += 1;
-        if (rateLimitExhausted(error, strikes) && moves < this.endpoints.length - 1 && this.failover(error, index, { exhausted: true })) {
+        if (rateLimitExhausted(error, strikes) && moves < this.endpoints.length - 1 && this.failover(error, index, { exhausted: true, since })) {
           moves += 1;
           strikes = 0;
         } else await sleep(retryAfterMs(error));
       }
       // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
-      else if (moves < this.endpoints.length - 1 && this.failover(error, index)) moves += 1;
+      else if (moves < this.endpoints.length - 1 && this.failover(error, index, { since })) moves += 1;
       else {
         await sleep(delay);
         delay *= 2;
@@ -1332,12 +1340,13 @@ export class Chain {
       onStatus({ stage: "submitting", text: t("Sending to the network."), hash });
       let sent = null;
       const via = this.active;
+      const since = this.moveCount;
       try {
         sent = await withTimeout(this.server.sendTransaction(tx), SEND_TIMEOUT_MS);
       } catch (error) {
         // Lost or late response: the transaction may be queued. The lookup settles it, and the next
         // send goes to the other endpoint; the same signed transaction cannot apply twice.
-        this.failover(error, via);
+        this.failover(error, via, { since });
       }
       if (sent?.status === "PENDING" || sent?.status === "DUPLICATE") break;
       const known = await this.lookup(hash);

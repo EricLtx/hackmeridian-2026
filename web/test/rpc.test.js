@@ -637,6 +637,26 @@ test("at most 20 calls reach one endpoint in any one second: 60 issued at once a
   }
 });
 
+test("a call started before a round trip away and back, timing out after the return, moves nothing: one move in all", async () => {
+  const chain = chainWith(fake("sdf.example", { getHealth: never, getLatestLedger: never }), fake("gfm.example", { getHealth: healthy, getLatestLedger: never }));
+  const changes = [];
+  chain.onRpcChange = (c) => changes.push(`${c.from}->${c.to}:${c.reason}`);
+  // A long call (a scan of events, bound 300 ms here) and a short one are launched together on the first endpoint.
+  const long = chain.net(() => chain.server.getLatestLedger(), { timeoutMs: 300, attempts: 2 }).then(
+    () => "answered",
+    (e) => e.name,
+  );
+  const short = await chain.net(() => chain.server.getHealth(), { timeoutMs: 40 });
+  assert.equal(short.status, "healthy");
+  assert.equal(chain.rpcInfo().host, "gfm.example");
+  // The calls come back to the first endpoint (a level return of the height poll, or net()'s own return) before the long call ends.
+  chain.moveTo(0);
+  assert.equal(await long, "RpcTimeout");
+  assert.deepEqual(changes, ["sdf.example->gfm.example:timeout"], "the long call's timeout is a failure of the past");
+  assert.equal(chain.rpcInfo().host, "sdf.example");
+  assert.equal(chain.moveCount, 2);
+});
+
 test("every move between endpoints is told in a sentence", () => {
   assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "timeout" }), "RPC a.example did not answer in time: switched to b.example.");
   assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "error" }), "RPC a.example failed: switched to b.example.");
