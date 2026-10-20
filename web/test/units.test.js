@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+import { Asset, Networks } from "@stellar/stellar-sdk";
+import { Chain } from "../src/chain.js";
 import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError, describeError } from "../src/errors.js";
 import { formatAge, formatAmount, formatCountdown, formatDuration, formatOrDash, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
 import {
@@ -165,6 +168,62 @@ test("a simulation error is named after the contract that raised it", () => {
 
   const bare = decodeSimulationError("HostError: Error(Contract, #8)", kinds);
   assert.equal(bare.contract, "unknown");
+});
+
+test("a refusal by any registered stablecoin's contract is named after that contract and its ticker", async () => {
+  const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
+  const ow = dep.contracts.openWindow;
+  const eurb = dep.stablecoins.find((c) => c.code === "tEURB").contract;
+  // A repurchase whose tEURB trustline the issuer deauthorized: the Stellar Asset Contract's #11.
+  const frozen = (coin) =>
+    [
+      "HostError: Error(Contract, #11)",
+      "",
+      "Event log (newest first):",
+      `   0: [Diagnostic Event] contract:${ow}, topics:[error, Error(Contract, #11)], data:"escalating error to VM trap from failed host function call: call"`,
+      `   1: [Diagnostic Event] contract:${ow}, topics:[error, Error(Contract, #11)], data:["contract call failed", transfer, [GBORROWER, ${ow}, 1000]]`,
+      ...(coin ? [`   2: [Failed Diagnostic Event (not emitted)] contract:${coin}, topics:[error, Error(Contract, #11)], data:["trustline entry is not authorized"]`] : []),
+    ].join("\n");
+  const chain = new Chain(dep);
+  const error = chain.simulationError(frozen(eurb));
+  assert.equal(error.name, "stellar-asset:BalanceDeauthorized");
+  assert.equal(error.contractId, eurb);
+  assert.equal(describeError(error, { code: "tEUR" }).text, "Your tEURB trustline is not authorized by the issuer.", "the coin that refused, not the screen's");
+  // The callee's own event missing: Open Window only passed the refusal on, so #11 is not its StalePrice.
+  const relayed = chain.simulationError(frozen(null));
+  assert.equal(relayed.contract, "unknown");
+  assert.notEqual(relayed.name, "StalePrice");
+  assert.equal(describeError(relayed).text, "A contract refused the operation.");
+  // XLM itself, through its Stellar Asset Contract.
+  const xlm = chain.simulationError(`HostError: Error(Contract, #10)\n0: [Diagnostic Event] contract:${chain.nativeContract}, topics:[error, Error(Contract, #10)], data:["resulting balance is not within the allowed range"]`);
+  assert.equal(describeError(xlm, { code: "tEUR" }).text, "Your XLM balance is too low for this.");
+});
+
+test("a stablecoin the deployment file does not list is learned from the chain", async () => {
+  const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
+  const issuer = dep.stablecoin.issuer;
+  const usdc = new Asset("tUSDC", issuer).contractId(Networks.TESTNET);
+  const other = "CBVSCT2WPGYBP23BQKI5LCQQT4AWVT3WB36GUYJBS7OENEJCS3A6IKA7";
+  const silent = new Asset("tGBP", issuer).contractId(Networks.TESTNET);
+  const chain = new Chain(dep);
+  const asked = [];
+  chain.read = async (contract, fn) => {
+    asked.push(contract);
+    if (fn !== "name") throw new Error(`unexpected read ${fn}`);
+    if (contract === usdc) return `tUSDC:${issuer}`;
+    if (contract === other) return `tUSDC:${issuer}`; // a name that does not derive this address
+    throw new TypeError("Failed to fetch");
+  };
+  await chain.learnCoins([usdc, other, silent, usdc, dep.contracts.stablecoin]);
+  assert.equal(chain.kinds.get(usdc), "stellar-asset");
+  assert.equal(chain.codes.get(usdc), "tUSDC");
+  assert.equal(chain.kinds.get(other), "token", "a contract whose name is not its own asset is a token of its own");
+  assert.equal(chain.kinds.has(silent), false, "unanswered: asked again later");
+  assert.deepEqual(asked.sort(), [usdc, other, silent].sort(), "one read per unknown address, none for a listed coin");
+  const error = chain.simulationError(`HostError: Error(Contract, #11)\n0: [Diagnostic Event] contract:${usdc}, topics:[error, Error(Contract, #11)]`);
+  assert.equal(describeError(error, { code: "tEUR" }).text, "Your tUSDC trustline is not authorized by the issuer.");
+  await chain.learnCoins([usdc, other]);
+  assert.equal(asked.length, 3, "learned addresses are not read again");
 });
 
 test("errors read as sentences with their name", () => {

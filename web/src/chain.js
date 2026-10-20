@@ -26,7 +26,7 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { TransactionError, WalletError, contractKinds, decodeSimulationError } from "./errors.js";
+import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError } from "./errors.js";
 import { formatUnits } from "./format.js";
 import { locale, t } from "./i18n.js";
 
@@ -405,15 +405,75 @@ export class Chain {
      */
     this.onRpcChange = null;
     this.kinds = contractKinds(deployment.contracts);
+    /** The ticker of each token the page knows, by address: a token's refusal names that token. */
+    this.codes = new Map();
+    if (deployment.contracts.stablecoin && deployment.stablecoin?.code) this.codes.set(deployment.contracts.stablecoin, deployment.stablecoin.code);
     // Every admitted fund's share token and NAV feed, and every registered stablecoin, so a refusal names its contract.
     for (const f of deployment.funds ?? []) {
-      if (f.shares && !this.kinds.has(f.shares)) this.kinds.set(f.shares, f.tokenCode === "stellar-asset-contract" ? "stellar-asset" : "fund-token");
+      const sac = f.tokenCode === "stellar-asset-contract";
+      if (f.shares && !this.kinds.has(f.shares)) this.kinds.set(f.shares, sac ? "stellar-asset" : "fund-token");
+      if (f.shares && sac && f.symbol) this.codes.set(f.shares, f.symbol);
       if (f.navFeed && !this.kinds.has(f.navFeed)) this.kinds.set(f.navFeed, "nav-oracle");
     }
     for (const c of deployment.stablecoins ?? []) {
       if (c.contract && !this.kinds.has(c.contract)) this.kinds.set(c.contract, "stellar-asset");
+      if (c.contract && c.code) this.codes.set(c.contract, c.code);
     }
     this.nativeContract = Asset.native().contractId(this.passphrase);
+    this.kinds.set(this.nativeContract, "stellar-asset");
+    this.codes.set(this.nativeContract, "XLM");
+    /** Addresses whose kind a read is settling, so each is asked once at a time. */
+    this.learning = new Map();
+  }
+
+  /** A simulation's error, decoded and, for a token the page knows, given that token's ticker. */
+  simulationError(text) {
+    const error = decodeSimulationError(text, this.kinds);
+    if (error instanceof ContractError && error.contractId) error.coin = this.codes.get(error.contractId) ?? null;
+    return error;
+  }
+
+  /**
+   * Learns the kind of the stablecoins the chain shows that the deployment
+   * file does not list (offers and repos carry only registered ones), so a
+   * refusal by any of them is named after it. A Stellar Asset Contract is
+   * recognised by its name, "CODE:ISSUER", from which its address derives;
+   * any other contract is a token with no table here. One read per new
+   * address; a read the network did not answer is tried again later.
+   */
+  async learnCoins(addresses) {
+    const fresh = [...new Set(addresses)].filter((a) => typeof a === "string" && STRKEY.test(a) && a.startsWith("C") && !this.kinds.has(a));
+    await Promise.all(
+      fresh.map((address) => {
+        if (!this.learning.has(address)) {
+          const settle = this.identify(address).finally(() => this.learning.delete(address));
+          this.learning.set(address, settle);
+        }
+        return this.learning.get(address);
+      }),
+    );
+  }
+
+  async identify(address) {
+    let name;
+    try {
+      name = await this.read(address, "name");
+    } catch (error) {
+      if (!(error instanceof ContractError)) return; // the network, not the contract: ask again later
+      this.kinds.set(address, "token");
+      return;
+    }
+    const [code, issuer] = typeof name === "string" ? name.split(":") : [];
+    try {
+      if (code && issuer && new Asset(code, issuer).contractId(this.passphrase) === address) {
+        this.kinds.set(address, "stellar-asset");
+        this.codes.set(address, code);
+        return;
+      }
+    } catch {
+      // Not an asset name: a token of its own.
+    }
+    this.kinds.set(address, "token");
   }
 
   explorerTx(hash) {
@@ -547,7 +607,7 @@ export class Chain {
       .setTimeout(0)
       .build();
     const sim = await this.net(() => this.server.simulateTransaction(tx));
-    if (rpc.Api.isSimulationError(sim)) throw decodeSimulationError(sim.error, this.kinds);
+    if (rpc.Api.isSimulationError(sim)) throw this.simulationError(sim.error);
     return scValToNative(sim.result.retval);
   }
 
@@ -589,17 +649,23 @@ export class Chain {
   }
 
   async offers() {
-    return (await this.scan("get_offer")).map(({ id, value }) => normalizeOffer(id, value));
+    const offers = (await this.scan("get_offer")).map(({ id, value }) => normalizeOffer(id, value));
+    await this.learnCoins(offers.map((o) => o.stablecoin));
+    return offers;
   }
 
   /** Repos from `from` on, until the first id with no repo. */
   async repos(from = 1) {
-    return (await this.scan("get_repo", from)).map(({ id, value }) => normalizeRepo(id, value));
+    const repos = (await this.scan("get_repo", from)).map(({ id, value }) => normalizeRepo(id, value));
+    await this.learnCoins(repos.map((r) => r.stablecoin));
+    return repos;
   }
 
   async repo(id) {
     const value = await this.read(this.contracts.openWindow, "get_repo", [sv.u64(id)]);
-    return value ? normalizeRepo(id, value) : null;
+    const repo = value ? normalizeRepo(id, value) : null;
+    if (repo) await this.learnCoins([repo.stablecoin]);
+    return repo;
   }
 
   /** Interest due on an open repo if repurchased now (principal not included). */
@@ -820,7 +886,7 @@ export class Chain {
       .setTimeout(TX_VALIDITY_SECS)
       .build();
     const sim = await this.net(() => this.server.simulateTransaction(tx));
-    if (rpc.Api.isSimulationError(sim)) throw decodeSimulationError(sim.error, this.kinds);
+    if (rpc.Api.isSimulationError(sim)) throw this.simulationError(sim.error);
     // The simulation sets the resource fee the wallet is asked to sign: the assembled transaction is
     // checked, since its fee comes from the simulation's transaction data, not from its summary.
     const ready = rpc.assembleTransaction(tx, sim).build();
