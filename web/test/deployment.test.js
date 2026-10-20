@@ -51,6 +51,24 @@ test("symbols, URLs, decimals and contract addresses are checked", () => {
   assert.doesNotThrow(() => checkDeployment(lean));
 });
 
+test("a contract address with a wrong checksum is refused, not left to fail every read (WEB-7)", () => {
+  // A one-character typo that keeps the strkey alphabet: the format matches, the checksum does not.
+  const typo = (address) => address.slice(0, -1) + (address.endsWith("A") ? "B" : "A");
+  const refused = (edit) => {
+    const edited = copy();
+    edit(edited);
+    assert.throws(() => checkDeployment(edited), /unexpected contract address/);
+  };
+  refused((d) => (d.contracts.fundShares = typo(d.contracts.fundShares)));
+  refused((d) => (d.contracts.openWindow = typo(d.contracts.openWindow)));
+  refused((d) => (d.funds[1].navFeed = typo(d.funds[1].navFeed)));
+  refused((d) => (d.stablecoins[1].contract = typo(d.stablecoins[1].contract)));
+  // An account address is not a contract address, whatever its checksum.
+  refused((d) => (d.contracts.stablecoin = dep.stablecoin.issuer));
+  // Every address of the published file is a valid contract strkey.
+  assert.doesNotThrow(() => checkDeployment(copy()));
+});
+
 test("the small checks the two pages share", () => {
   assert.ok(isDecimals(0) && isDecimals(7) && isDecimals(38));
   assert.ok(![39, -1, 1.5, "7", null, Number.NaN].some(isDecimals));
