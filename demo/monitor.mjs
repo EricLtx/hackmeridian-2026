@@ -72,7 +72,7 @@ import {
 } from "./lib.mjs";
 import { FUND_SETTINGS, navAt } from "./config.mjs";
 import { plain } from "../indexer/lib/plain.mjs";
-import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, statusOf } from "./detectors.mjs";
+import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, restoredLabel, restoredOutcome, statusOf } from "./detectors.mjs";
 import { loadMonitor as loadMonitorFile, monitorFileName, refreshMonitor as refreshMonitorFile, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
 
 const args = process.argv.slice(2);
@@ -803,9 +803,11 @@ async function rehearse() {
   const pub = (role) => keypair(state, role).publicKey();
   const fund = sv.address(C.shares);
   const clean = async () => (await pass(monitor, { quiet: true })).alerts;
+  // `restored` is true, false, or the outcome's own text (a proposal the
+  // drill had to withdraw itself, which is no success of the monitor).
   const record = (detector, threat, trigger, fired, action, restored) => {
     results.push({ detector, threat, trigger, fired, action, restored });
-    console.log(`  => ${detector}: fired ${fired ? "yes" : "NO"}, action ${action}, restored ${restored ? "yes" : "NO"}`);
+    console.log(`  => ${detector}: fired ${fired ? "yes" : "NO"}, action ${action}, restored ${restored === false ? "NO" : restoredLabel(restored)}`);
   };
   const firedBy = (alerts, detector) => alerts.some((a) => a.detector === detector);
 
@@ -929,14 +931,18 @@ async function rehearse() {
     // cancellation was not taken (the second endpoint lagging or down), the
     // governor withdraws its own proposal, which `npm run upgrade -- --apply`
     // would otherwise meet (TOOL-2).
+    // The monitor is judged here, before the drill's own cleanup.
+    const cleared = !after && early?.name === "TimelockPending";
     let cleanup = "";
+    let withdrawn = false;
     if (after && hex(after.wasm_hash) === hostile.toString("hex")) {
-      const withdrawn = await invoke(state, "governor", C.openWindow, "cancel_upgrade", [sv.address(pub("governor"))]);
+      const cancelled = await invoke(state, "governor", C.openWindow, "cancel_upgrade", [sv.address(pub("governor"))]);
       after = await read(state, C.openWindow, "pending_upgrade");
+      withdrawn = !after;
       cleanup = "; still pending after the monitor's action, withdrawn by the governor";
-      console.log(`  still pending after the monitor's action: the governor withdrew its own proposal ${explorer(withdrawn.hash)}`);
+      console.log(`  still pending after the monitor's action: the governor withdrew its own proposal ${explorer(cancelled.hash)}`);
     }
-    record("privileged", "Elev.2", "unannounced upgrade proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, ${window} s of the delay left${cleanup}`, !after && early?.name === "TimelockPending");
+    record("privileged", "Elev.2", "unannounced upgrade proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, ${window} s of the delay left${cleanup}`, restoredOutcome(cleared, withdrawn));
   }
 
   if (runStep(9)) {
@@ -977,16 +983,20 @@ async function rehearse() {
     let after = await read(state, C.openWindow, "pending_admin");
     // Not vetoed (no guardian key on this host, or the second endpoint did
     // not confirm): the governor withdraws its own handover (TOOL-2).
+    // The monitor is judged here, before the drill's own cleanup.
+    const cleared = !after;
     let cleanup = "";
+    let withdrawn = false;
     if (after && String(after.admin) === attacker) {
-      const withdrawn = await invoke(state, "governor", C.openWindow, "cancel_admin", []);
+      const cancelled = await invoke(state, "governor", C.openWindow, "cancel_admin", []);
       after = await read(state, C.openWindow, "pending_admin");
+      withdrawn = !after;
       cleanup = "; still pending after the monitor's action, withdrawn by the governor";
-      console.log(`  still pending after the monitor's action: the governor withdrew its own handover ${explorer(withdrawn.hash)}`);
+      console.log(`  still pending after the monitor's action: the governor withdrew its own handover ${explorer(cancelled.hash)}`);
     }
     const governor = await read(state, C.openWindow, "admin");
     const window = Number(pending.eta) - (await ledgerTime());
-    record("privileged", "Elev.2", "governor handover proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${((Date.now() - proposedAt) / 1000).toFixed(0)} s, ${window} s of the delay left${cleanup}`, !after && governor === pub("governor") && early?.name === "TimelockPending");
+    record("privileged", "Elev.2", "governor handover proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${((Date.now() - proposedAt) / 1000).toFixed(0)} s, ${window} s of the delay left${cleanup}`, restoredOutcome(cleared && governor === pub("governor") && early?.name === "TimelockPending", withdrawn));
   }
 
   if (runStep(11)) {
@@ -1077,15 +1087,19 @@ async function rehearse() {
       let left = await read(state, C.openWindow, "pending_forced_guardian_change");
       console.log(`  proposal ${explorer(proposed.hash)}; ${done.join(", ") || "no action"} after ${reacted.toFixed(0)} s`);
       // Not vetoed: the governor withdraws its own forced change (TOOL-2).
+      // The monitor is judged here, before the drill's own cleanup.
+      const cleared = !left;
       let cleanup = "";
+      let withdrawn = false;
       if (left && String(left.guardian) === pub("operator")) {
-        const withdrawn = await invoke(state, "governor", C.openWindow, "cancel_forced_guardian_change", []);
+        const cancelled = await invoke(state, "governor", C.openWindow, "cancel_forced_guardian_change", []);
         left = await read(state, C.openWindow, "pending_forced_guardian_change");
+        withdrawn = !left;
         cleanup = "; still pending after the monitor's action, withdrawn by the governor";
-        console.log(`  still pending after the monitor's action: the governor withdrew its own forced change ${explorer(withdrawn.hash)}`);
+        console.log(`  still pending after the monitor's action: the governor withdrew its own forced change ${explorer(cancelled.hash)}`);
       }
       const guardian1 = await read(state, C.openWindow, "guardian");
-      record("privileged", "Elev.2", "forced guardian change proposed with the governor and trustee keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, 30 days before it could apply${cleanup}`, !left && guardian1 === guardian0);
+      record("privileged", "Elev.2", "forced guardian change proposed with the governor and trustee keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, 30 days before it could apply${cleanup}`, restoredOutcome(cleared && guardian1 === guardian0, withdrawn));
     }
   }
 
@@ -1165,14 +1179,18 @@ async function rehearse() {
       let left = await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]);
       console.log(`  proposal ${explorer(proposed.hash)}; ${done.join(", ") || "no action"}`);
       // Not cancelled: the governor withdraws its own proposal (TOOL-2).
+      // The monitor is judged here, before the drill's own cleanup.
+      const cleared = !left;
       let cleanup = "";
+      let withdrawn = false;
       if (left) {
-        const withdrawn = await invoke(state, "governor", C.openWindow, "cancel_stablecoin_change", [sv.address(token), sv.address(pub("governor"))]);
+        const cancelled = await invoke(state, "governor", C.openWindow, "cancel_stablecoin_change", [sv.address(token), sv.address(pub("governor"))]);
         left = await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]);
+        withdrawn = !left;
         cleanup = "; still pending after the monitor's action, withdrawn by the governor";
-        console.log(`  still pending after the monitor's action: the governor withdrew its own proposal ${explorer(withdrawn.hash)}`);
+        console.log(`  still pending after the monitor's action: the governor withdrew its own proposal ${explorer(cancelled.hash)}`);
       }
-      record("privileged", "Elev.2", "unannounced stablecoin registration proposed with the governor keys", fired, `${done.join(", ") || "none"} by ${actorRole(s)}${cleanup}`, !left);
+      record("privileged", "Elev.2", "unannounced stablecoin registration proposed with the governor keys", fired, `${done.join(", ") || "none"} by ${actorRole(s)}${cleanup}`, restoredOutcome(cleared, withdrawn));
     }
   }
 
@@ -1199,7 +1217,7 @@ async function rehearse() {
   fs.writeFileSync(file, JSON.stringify(results, null, 2));
   console.log(`\nRehearsal written to ${path.relative(process.cwd(), file)}`);
   console.log("\n| Detector | Threat | Trigger | Fired | Action | Restored |\n|---|---|---|---|---|---|");
-  for (const r of results) console.log(`| ${r.detector} | ${r.threat} | ${r.trigger} | ${r.fired ? "yes" : "no"} | ${r.action} | ${r.restored ? "yes" : "no"} |`);
+  for (const r of results) console.log(`| ${r.detector} | ${r.threat} | ${r.trigger} | ${r.fired ? "yes" : "no"} | ${r.action} | ${restoredLabel(r.restored)} |`);
 }
 
 async function main() {

@@ -4,7 +4,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DETECTORS, LIMITS, businessSeconds, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement } from "../detectors.mjs";
+import { DETECTORS, LIMITS, businessSeconds, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement, restoredLabel, restoredOutcome } from "../detectors.mjs";
+
+test("rehearsal: a proposal the drill's governor had to withdraw is its own outcome, never 'restored yes' for the monitor", () => {
+  // Drills 8, 10, 13 and 18 withdraw their own proposal when the monitor's
+  // action did not take: the monitor is judged before that cleanup.
+  assert.equal(restoredOutcome(true, false), true);
+  assert.equal(restoredOutcome(false, false), false);
+  const withdrawn = restoredOutcome(false, true);
+  assert.notEqual(withdrawn, true);
+  assert.equal(withdrawn, "no: withdrawn by the governor, the drill's own cleanup");
+  assert.deepEqual([true, false, withdrawn].map(restoredLabel), ["yes", "no", "no: withdrawn by the governor, the drill's own cleanup"]);
+  // The summary's cell is never "yes" for an outcome the monitor did not produce.
+  assert.ok(![false, withdrawn].some((o) => restoredLabel(o) === "yes"));
+});
 
 const H = 3600;
 const DAY = 86_400;

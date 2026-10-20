@@ -58,6 +58,22 @@ export const CODE_MAX_DAYS = 120;
 /** What the small entries are extended to, in ledgers: about 140 days. */
 export const ENTRY_EXTEND_LEDGERS = 2_419_200;
 
+/**
+ * The "Restored" outcome of a rehearsal drill whose proposal the drill
+ * itself withdraws when the monitor's action did not take (drills 8, 10,
+ * 13 and 18): the monitor is judged on `cleared`, the state right after
+ * its action and before that cleanup, never after it. A proposal the
+ * governor had to withdraw is its own outcome, not a success of the
+ * monitor. Returns true, false, or the text the summary prints.
+ */
+export function restoredOutcome(cleared, withdrawn) {
+  if (cleared) return true;
+  return withdrawn ? "no: withdrawn by the governor, the drill's own cleanup" : false;
+}
+
+/** The text of a "Restored" outcome in the rehearsal's summary. */
+export const restoredLabel = (outcome) => (outcome === true ? "yes" : outcome === false ? "no" : String(outcome));
+
 /** Privileged changes: every one of them is reported (Elev.2). */
 export const PRIVILEGED = new Set([
   "guardian_changed", "envelope_changed", "fund_set", "fund_removed",
