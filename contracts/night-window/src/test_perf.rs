@@ -351,6 +351,63 @@ fn check_budget(rows: &[Row]) {
     }
 }
 
+/// Reads an unsigned or signed LEB128 number.
+fn leb(bytes: &[u8], mut at: usize, signed: bool) -> (i64, usize) {
+    let (mut value, mut shift) = (0i64, 0u32);
+    loop {
+        let byte = bytes[at];
+        at += 1;
+        value |= i64::from(byte & 0x7f) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            if signed && shift < 64 && byte & 0x40 != 0 {
+                value |= -1i64 << shift;
+            }
+            return (value, at);
+        }
+    }
+}
+
+/// The initial linear memory (pages of 64 KiB) and the initial stack pointer
+/// of a WASM module: its memory and first global.
+fn memory_layout(wasm: &[u8]) -> (i64, i64) {
+    let (mut at, mut pages, mut stack) = (8usize, -1i64, -1i64);
+    while at < wasm.len() {
+        let id = wasm[at];
+        let (size, body) = leb(wasm, at + 1, false);
+        let end = body + size as usize;
+        if id == 5 {
+            let (_count, j) = leb(wasm, body, false);
+            let (_flags, j) = leb(wasm, j, false);
+            pages = leb(wasm, j, false).0;
+        }
+        if id == 6 {
+            // count, value type, mutability, then `i32.const <value>`.
+            let (_count, j) = leb(wasm, body, false);
+            if wasm[j + 2] == 0x41 {
+                stack = leb(wasm, j + 3, true).0;
+            }
+        }
+        at = end;
+    }
+    (pages, stack)
+}
+
+/// The stack build.rs sizes: 64 KiB, first in linear memory, 2 pages in all.
+#[test]
+fn test_perf_wasm_memory_is_sized() {
+    let (pages, stack) = memory_layout(NIGHT_WINDOW_WASM);
+    assert_eq!(
+        stack,
+        64 * 1024,
+        "the stack pointer starts at the top of a 64 KiB stack"
+    );
+    assert!(
+        pages <= 2,
+        "the module starts with {pages} pages of linear memory"
+    );
+}
+
 fn print(rows: &[Row]) {
     println!(
         "\n| entry point | CPU insns | mem bytes | entries read | entries written | bytes written | event bytes | rent bumps | fee (stroops) | sub-calls (k insns) |"

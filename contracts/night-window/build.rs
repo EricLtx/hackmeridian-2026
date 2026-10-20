@@ -1,20 +1,36 @@
-//! Locates the contract's own release WASM for the upgrade test.
+//! Sizes the WASM stack, and locates the contract's own release WASM for the
+//! upgrade test and the real-time profile.
 //!
 //! The upgrade test uploads the bytes that `stellar contract build` produced
 //! and switches a live contract to them. When the file exists, this script
 //! exposes its path to the tests (`NIGHT_WINDOW_WASM`) and sets the
 //! `night_window_wasm` cfg; when it does not, the test module stops the
 //! compilation with a message asking for `stellar contract build` first.
-//! Nothing here affects the WASM itself.
 
 use std::path::PathBuf;
 
 const WASM: &str = "wasm32v1-none/release/night_window.wasm";
 
+/// Stack of the WASM, in bytes. The linker default is 1 MiB, and every
+/// invocation allocates the whole linear memory: 17 pages, about 123,000
+/// metered instructions and 1 MB of memory per call before any work is
+/// done. The whole test suite, run against the WASM, passes with a 2 KiB
+/// stack and fails with 1 KiB (src/test_perf.rs explains the measure):
+/// 64 KiB keeps a margin above 30 and needs 2 pages. The stack sits first in
+/// linear memory, below the data: an overflow traps, it never overwrites
+/// data, like a stack guard on an embedded target.
+const STACK_BYTES: u32 = 64 * 1024;
+
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo::rustc-check-cfg=cfg(night_window_wasm)");
+
+    // A linker argument, not a rustflag: `stellar contract build` passes its
+    // own rustflags (path remapping), which a target rustflag would replace.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        println!("cargo::rustc-link-arg-cdylib=-zstack-size={STACK_BYTES}");
+    }
 
     let Some(target_dir) = target_dir() else {
         return;
