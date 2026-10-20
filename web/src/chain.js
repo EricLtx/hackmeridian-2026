@@ -166,6 +166,17 @@ export const MAX_REST_MS = 600_000;
  * 30 per second per IP.
  */
 export const MAX_IN_FLIGHT = 6;
+/**
+ * Calls sent to one endpoint within any one second, at most; the others
+ * wait their turn, in order. MAX_IN_FLIGHT caps concurrency, not rate: six
+ * calls of about 120 ms allow about 48 a second, and a pass sent up to 44
+ * in one second to Gateway.fm on 20 October, which allows 30 POST per
+ * second per IP, shared with every client behind the same NAT, and sends
+ * no Retry-After. Under this budget the page causes no 429 of its own and
+ * leaves room for the others on the same IP.
+ */
+export const RATE_PER_SECOND = 20;
+const RATE_WINDOW_MS = 1000;
 
 /**
  * The rest of an endpoint that just failed a call, in milliseconds, from
@@ -207,6 +218,29 @@ function slotOn(endpoint) {
       grant();
     } else endpoint.waiting.push(grant);
   });
+}
+
+/**
+ * Resolves when one more call may be sent to `endpoint` under
+ * RATE_PER_SECOND: the sends of the last second are kept, and a call past
+ * the budget waits for the oldest of them to leave the window. Turns are
+ * given in the order asked.
+ */
+function turnOn(endpoint) {
+  const turn = (endpoint.turns ?? Promise.resolve()).then(async () => {
+    endpoint.sentAt ??= [];
+    for (;;) {
+      const now = Date.now();
+      while (endpoint.sentAt.length && now - endpoint.sentAt[0] >= RATE_WINDOW_MS) endpoint.sentAt.shift();
+      if (endpoint.sentAt.length < RATE_PER_SECOND) {
+        endpoint.sentAt.push(now);
+        return;
+      }
+      await sleep(endpoint.sentAt[0] + RATE_WINDOW_MS - now + 1);
+    }
+  });
+  endpoint.turns = turn;
+  return turn;
 }
 
 /**
@@ -792,8 +826,8 @@ export class Chain {
 
   /**
    * Runs `call` on the endpoint in use, within `timeoutMs`, holding one of
-   * its MAX_IN_FLIGHT slots; a call that waited for a slot while calls moved
-   * goes to the endpoint now in use. A timeout or a transient network
+   * its MAX_IN_FLIGHT slots and its turn under RATE_PER_SECOND; a call that
+   * waited while calls moved goes to the endpoint now in use. A timeout or a transient network
    * failure moves at once to the next endpoint when there is one, else waits
    * and retries. An HTTP 429 is back-pressure: the call waits as asked
    * (`retryAfterMs`) and goes to the same endpoint again; the
@@ -810,6 +844,7 @@ export class Chain {
       const index = this.active;
       const endpoint = this.endpoints[index];
       const release = await slotOn(endpoint);
+      if (index === this.active) await turnOn(endpoint);
       if (index !== this.active) {
         // Calls moved while this one waited: it follows them, and that counts as its move, so that it
         // backs off rather than bouncing back when the new endpoint fails it too.

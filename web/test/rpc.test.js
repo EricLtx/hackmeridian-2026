@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { xdr } from "@stellar/stellar-sdk";
 import {
   Chain,
   HEIGHT_BUDGET_MS,
@@ -588,6 +589,52 @@ test("at most 6 calls are in flight on one endpoint; calls waiting for a slot fo
   assert.ok(all.every((r) => r.status === "healthy"));
   assert.equal(changes.length, 1);
   assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`);
+});
+
+test("at most 20 calls reach one endpoint in any one second: 60 issued at once arrive in three waves and all complete", async () => {
+  const PER_SECOND = 20; // RATE_PER_SECOND
+  const arrivals = [];
+  const counting = fake("gw.example", {
+    getHealth: async () => {
+      arrivals.push(Date.now());
+      return { status: "healthy" };
+    },
+  });
+  const chain = chainWith(counting, fake("b.example", { getHealth: healthy }));
+  const started = Date.now();
+  const results = await Promise.all(Array.from({ length: 60 }, () => chain.net(() => chain.server.getHealth())));
+  const ms = Date.now() - started;
+  assert.equal(results.length, 60);
+  assert.ok(results.every((r) => r.status === "healthy"));
+  assert.equal(arrivals.length, 60);
+  for (const t of arrivals) {
+    const within = arrivals.filter((u) => u >= t && u < t + 1000).length;
+    assert.ok(within <= PER_SECOND, `${within} calls within one second from ${t - started} ms`);
+  }
+  assert.ok(ms >= 2000 && ms < 3500, `60 calls took ${ms} ms`);
+  assert.equal(chain.rpcInfo().host, "gw.example", "a wait for a turn is not a failure");
+
+  // The cost on an ordinary board pass, offline: its calls, and the time at 0 ms and at 120 ms per call.
+  const stubServer = (latency) => {
+    let calls = 0;
+    const answer = async (value) => {
+      calls += 1;
+      if (latency) await new Promise((resolve) => setTimeout(resolve, latency));
+      return value;
+    };
+    return {
+      calls: () => calls,
+      simulateTransaction: () => answer({ latestLedger: 1, minResourceFee: "0", result: { auth: [], retval: xdr.ScVal.scvVoid() } }),
+      getLatestLedger: () => answer({ sequence: 1, closeTime: String(Math.floor(Date.now() / 1000)) }),
+    };
+  };
+  for (const latency of [0, 120]) {
+    const server = stubServer(latency);
+    const board = chainWith(fake("a.example", server), fake("b.example", server));
+    const from = Date.now();
+    await board.board(10_000_000n);
+    console.log(`board pass under the rate window: ${server.calls()} calls in ${Date.now() - from} ms at ${latency} ms per call`);
+  }
 });
 
 test("every move between endpoints is told in a sentence", () => {
