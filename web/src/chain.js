@@ -466,10 +466,14 @@ const REPO_INTS = ["offer_id", "shares", "principal", "rate_bps", "opened_at", "
 const REPO_ADDRESSES = ["borrower", "lender", "fund", "stablecoin"];
 const OFFER_INTS = ["available", "rate_bps", "max_term"];
 const OFFER_ADDRESSES = ["lender", "stablecoin"];
+const QUOTE_INTS = ["max_principal", "price", "price_decimals", "haircut_bps"];
 const STATUSES = new Set(["Open", "Repurchased", "Defaulted"]);
 
+// Every field of a repo, an offer and a quote must be there: one missing would reach the page as
+// undefined, then BigInt() or a format at render, outside the guards of the board's tiles (WEB-5).
 const normalizeRepo = (id, repo) => {
   checkShape(repo, { ints: REPO_INTS, addresses: REPO_ADDRESSES, what: "repo" });
+  need(repo, [...REPO_INTS, ...REPO_ADDRESSES, "status"], "repo");
   const status = Array.isArray(repo.status) ? repo.status[0] : repo.status;
   if (!STATUSES.has(status)) throw new TypeError("unexpected repo.status from the chain");
   // The scanned id comes last: a decoded field named id cannot replace it.
@@ -478,9 +482,17 @@ const normalizeRepo = (id, repo) => {
 
 const normalizeOffer = (id, offer) => {
   checkShape(offer, { ints: OFFER_INTS, addresses: OFFER_ADDRESSES, what: "offer" });
+  need(offer, [...OFFER_INTS, ...OFFER_ADDRESSES, "funds", "sponsor"], "offer");
   if (!Array.isArray(offer.funds) || !offer.funds.every((f) => typeof f === "string" && STRKEY.test(f))) throw new TypeError("unexpected offer.funds from the chain");
-  return { ...offer, id, sponsor: offer.sponsor === true };
+  return { ...offer, id, sponsor: isBool(offer.sponsor, "offer.sponsor") };
 };
+
+/** A quote as the contract returns it (Quote): its four figures, all present and integers, decimals from 0 to 38. */
+export function checkQuote(value) {
+  checkShape(value, { ints: QUOTE_INTS, what: "quote" });
+  need(value, QUOTE_INTS, "quote");
+  return checkDecimals(value, "quote");
+}
 
 /** Decoded Soroban values as plain JSON, as the indexer writes them: big integers as strings, bytes as hex. */
 export function plain(value) {
@@ -834,9 +846,7 @@ export class Chain {
 
   /** What `shares` of `fund` (default: the interface's fund) secure now, fully checked by the contract. */
   quote(shares, fund = this.fund) {
-    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]).then((q) =>
-      checkDecimals(checkShape(q, { ints: ["max_principal", "price", "price_decimals", "haircut_bps"], what: "quote" }), "quote"),
-    );
+    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]).then(checkQuote);
   }
 
   async offers() {

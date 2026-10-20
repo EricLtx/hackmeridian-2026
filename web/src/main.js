@@ -411,7 +411,25 @@ function renderFunds(funds) {
   );
 }
 
+/**
+ * Draws one part of the page on its own, as the board's tiles are: a value it
+ * cannot show leaves a short note in `el`, and the pass, with the wallet,
+ * positions and terminal after it, goes on (WEB-5).
+ */
+function drawPart(el, label, draw) {
+  try {
+    draw();
+  } catch (error) {
+    console.warn(label, error);
+    if (el) setHTML(el, `<span class="text-error">${esc(t(UNSHOWABLE))}</span>`);
+  }
+}
+
 function renderQuote(result, shares) {
+  drawPart($("quote-out"), "quote", () => drawQuote(result, shares));
+}
+
+function drawQuote(result, shares) {
   const out = $("quote-out");
   if (!shares || shares <= 0n) {
     setHTML(out, `<span class="muted">${esc(t("Enter a number of shares."))}</span>`);
@@ -423,6 +441,10 @@ function renderQuote(result, shares) {
 }
 
 function renderOffers() {
+  drawPart($("offers"), "offers", drawOffers);
+}
+
+function drawOffers() {
   const fund = S.chain.fund;
   const offers = S.offers.filter((o) => o.funds.includes(fund) && o.available > 0n);
   if (S.board?.offers.error && !S.offers.length) {

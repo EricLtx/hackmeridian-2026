@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Account, Asset, Networks, Operation, SorobanDataBuilder, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Account, Asset, Networks, Operation, SorobanDataBuilder, TransactionBuilder, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
 import {
   Chain,
   MAX_RESOURCE_FEE,
@@ -154,6 +154,100 @@ test("a malformed fund source fails its own fields, not the board pass", async (
   // Read directly, a source the page cannot use is the exchange rate's error.
   assert.ok((await chain.exchangeRate({ source: ["Cross", { ...leg, asset: 5 }] })).error);
   assert.deepEqual(await chain.exchangeRate({ source: ["Direct"] }), { value: null });
+});
+
+// Structs as the contract returns them: maps with sorted symbol keys. The values are those of the
+// deployed instance's offers, repos and quotes, which carried every field on 20 October.
+const scMap = (entries) =>
+  xdr.ScVal.scvMap(
+    Object.entries(entries)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([k, v]) => new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol(k), val: v })),
+  );
+const scAddress = (a) => nativeToScVal(a, { type: "address" });
+const offerFields = () => ({
+  available: nativeToScVal(5_000_000_000n, { type: "i128" }),
+  funds: xdr.ScVal.scvVec([scAddress(dep.contracts.fundShares)]),
+  lender: scAddress(G),
+  max_term: nativeToScVal(604_800n, { type: "u64" }),
+  rate_bps: nativeToScVal(325, { type: "u32" }),
+  sponsor: xdr.ScVal.scvBool(false),
+  stablecoin: scAddress(dep.contracts.stablecoin),
+});
+const repoFields = () => ({
+  borrower: scAddress(G),
+  fund: scAddress(dep.contracts.fundShares),
+  lender: scAddress(G),
+  maturity: nativeToScVal(1_800_000_000n, { type: "u64" }),
+  offer_id: nativeToScVal(1n, { type: "u64" }),
+  opened_at: nativeToScVal(1_700_000_000n, { type: "u64" }),
+  principal: nativeToScVal(9_000_000_000n, { type: "i128" }),
+  rate_bps: nativeToScVal(350, { type: "u32" }),
+  shares: nativeToScVal(10_000_000_000n, { type: "i128" }),
+  stablecoin: scAddress(dep.contracts.stablecoin),
+  status: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Open")]),
+});
+const quoteFields = () => ({
+  haircut_bps: nativeToScVal(400, { type: "u32" }),
+  max_principal: nativeToScVal(8_700_000_000n, { type: "i128" }),
+  nav_timestamp: nativeToScVal(1_792_448_341n, { type: "u64" }),
+  price: nativeToScVal(96_705_213_504_883n, { type: "i128" }),
+  price_decimals: nativeToScVal(14, { type: "u32" }),
+});
+const without = (fields, key) => {
+  const copy = { ...fields };
+  delete copy[key];
+  return copy;
+};
+
+/** The function and arguments of a contract call, as SDK 17 decodes its operation. */
+function callOf(tx) {
+  const invoke = tx.operations[0].func.invokeContract;
+  return { fn: new TextDecoder().decode(invoke.functionName.bytes), args: invoke.args.map((arg) => scValToNative(arg)) };
+}
+
+/** A chain on a stand-in RPC whose simulations return `answer(fn, args)`, or None. */
+function chainAnswering(answer) {
+  const chain = new Chain(dep);
+  const server = {
+    simulateTransaction: async (tx) => {
+      const { fn, args } = callOf(tx);
+      return { latestLedger: 1, minResourceFee: "0", result: { auth: [], retval: answer(fn, args) ?? xdr.ScVal.scvVoid() } };
+    },
+    getLatestLedger: async () => ({ sequence: 1, closeTime: "1792500000" }),
+  };
+  chain.endpoints = [{ url: "https://stub.example", host: "stub.example", server, lastMs: null, failures: 0 }];
+  chain.active = 0;
+  return chain;
+}
+
+test("an offer, a repo or a quote missing any field is refused at the boundary, naming the field (WEB-5)", async () => {
+  const first = (fn, value) => (name, [id]) => (name === fn && id === 1n ? value : null);
+  // Complete, as the deployed instance returns them.
+  assert.equal((await chainAnswering(first("get_offer", scMap(offerFields()))).offers()).length, 1);
+  assert.equal((await chainAnswering(first("get_repo", scMap(repoFields()))).repos(1))[0].principal, 9_000_000_000n);
+  assert.equal((await chainAnswering(() => scMap(quoteFields())).quote(1n)).max_principal, 8_700_000_000n);
+  for (const key of Object.keys(offerFields())) {
+    await assert.rejects(chainAnswering(first("get_offer", scMap(without(offerFields(), key)))).offers(), new RegExp(`missing offer\\.${key} `), key);
+  }
+  for (const key of Object.keys(repoFields())) {
+    const chain = chainAnswering(first("get_repo", scMap(without(repoFields(), key))));
+    await assert.rejects(chain.repos(1), new RegExp(`missing repo\\.${key} `), key);
+    await assert.rejects(chain.repo(1), new RegExp(`missing repo\\.${key} `), key);
+  }
+  for (const key of ["haircut_bps", "max_principal", "price", "price_decimals"]) {
+    await assert.rejects(chainAnswering(() => scMap(without(quoteFields(), key))).quote(1n), new RegExp(`missing quote\\.${key} `), key);
+  }
+  // The designation is a boolean, as the contract's Offer has it.
+  await assert.rejects(chainAnswering(first("get_offer", scMap({ ...offerFields(), sponsor: nativeToScVal(1, { type: "u32" }) }))).offers(), /unexpected offer\.sponsor/);
+});
+
+test("an offer missing a field is the offer table's error; the board pass goes on (WEB-5)", async () => {
+  const chain = chainAnswering((fn, [id]) => (fn === "get_offer" && id === 1n ? scMap(without(offerFields(), "rate_bps")) : fn === "is_paused" ? xdr.ScVal.scvBool(false) : null));
+  const board = await chain.board(0n);
+  assert.match(board.offers.error.message, /missing offer\.rate_bps/);
+  assert.equal(board.paused.value, false, "the other reads of the pass stand");
+  assert.equal(board.now.value, 1_792_500_000);
 });
 
 test("the resource fee a simulation may ask is capped at 25 XLM", () => {

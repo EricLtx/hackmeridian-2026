@@ -638,24 +638,45 @@ export function createTerminal(ctx) {
     setHTML($("t-status"), parts.join(""));
   }
 
+  /**
+   * Draws one panel on its own: a value it cannot show leaves a short note in
+   * that panel, and the other panels still draw (WEB-5). The band came first,
+   * so one repo without its principal used to stop every panel, the ticket
+   * included.
+   */
+  function drawPanel(id, draw, inline = false) {
+    try {
+      draw();
+    } catch (error) {
+      console.warn("terminal panel", id, error);
+      const box = $(id);
+      const note = esc(t(UNSHOWABLE));
+      if (box) setHTML(box, inline ? `<span class="tb-item t-bad">${note}</span>` : `<p class="t-empty t-bad">${note}</p>`);
+    }
+  }
+
   function render() {
     if (!T.active || !S.dep) return;
-    // A language switch re-labels the ticket and the quote on screen.
+    // A language switch re-labels the ticket and the quote on screen; a view that cannot be rebuilt keeps its labels.
     if (T.viewsLang !== lang()) {
-      if (T.ticket?.rebuild) T.ticket.view = T.ticket.rebuild();
-      if (T.quote && T.quoteRebuild) T.quote = T.quoteRebuild();
+      try {
+        if (T.ticket?.rebuild) T.ticket.view = T.ticket.rebuild();
+        if (T.quote && T.quoteRebuild) T.quote = T.quoteRebuild();
+      } catch (error) {
+        console.warn("terminal views", error);
+      }
       T.viewsLang = lang();
     }
     const input = $("t-input");
     if (input && input.placeholder !== t("HELP")) input.placeholder = t("HELP");
-    renderBand();
-    renderConsole();
-    renderBook();
-    renderTicket();
-    renderPositions();
-    renderFunds();
-    renderTape();
-    renderStatus();
+    drawPanel("t-band", renderBand, true);
+    drawPanel("t-console", renderConsole);
+    drawPanel("t-book", renderBook);
+    drawPanel("t-ticket", renderTicket);
+    drawPanel("t-pos", renderPositions);
+    drawPanel("t-funds", renderFunds);
+    drawPanel("t-tape", renderTape);
+    drawPanel("t-status", renderStatus, true);
     for (const id of ["t-book-panel", "t-ticket-panel", "t-pos-panel", "t-funds-panel", "t-tape-panel"]) {
       $(id)?.classList.toggle("is-focus", T.focused === id);
     }
