@@ -6,7 +6,7 @@
 // and signs through the same chain functions as the guided view: nothing
 // here writes to the chain on its own.
 
-import { rpcChangeText, sv } from "./chain.js";
+import { rpcChangeText, sv, unverifiedText } from "./chain.js";
 import { COMMANDS, NOTATION, completions, parseCommand } from "./command.js";
 import {
   bandItems,
@@ -711,7 +711,9 @@ export function createTerminal(ctx) {
     const watched = async (onStatus) => {
       try {
         const result = await action(onStatus);
-        outcome = { ok: true, text: message(result) };
+        outcome = result?.unverified
+          ? { ok: true, unverified: true, text: `${sentence(message(result))} ${unverifiedText(result.unverified.host)}` }
+          : { ok: true, text: message(result) };
         return result;
       } catch (error) {
         outcome = { ok: false, text: describeError(error, context).text, unconfirmed: error?.name === "TxUnconfirmed" };
@@ -735,7 +737,11 @@ export function createTerminal(ctx) {
     render();
     say("out", t("{title}: asking Freighter to sign…", { title: ticket.view.title }));
     const outcome = await ticket.run();
-    if (outcome?.ok) {
+    if (outcome?.ok && outcome.unverified) {
+      // Applied according to one endpoint only: signing the ticket again could apply it twice.
+      say("warn", t("{reason} The ticket is closed: check the transaction before preparing it again.", { reason: outcome.text }));
+      T.ticket = null;
+    } else if (outcome?.ok) {
       say("ok", outcome.text);
       T.ticket = null;
     } else if (outcome?.unconfirmed) {

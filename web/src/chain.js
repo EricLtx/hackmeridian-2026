@@ -46,8 +46,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const RPC_TIMEOUT_MS = 7000;
 const EVENTS_TIMEOUT_MS = 12000;
 const SEND_TIMEOUT_MS = 10000;
-/** Seconds past a write's validity window that a second endpoint gets to see it before its silence counts. */
+/** Seconds past a write's validity window that a second endpoint that answers gets to see it. */
 const CONFIRM_GRACE_SECS = 30;
+/**
+ * How long the other endpoints may stay silent (no answer at all) before a
+ * write the endpoint in use reports applied ends as unverified: two of the
+ * public endpoint's slowest answers (13 to 15 s on 20 October).
+ */
+export const SILENT_MS = 30_000;
+
+/** The sentence of a write applied according to one endpoint, which no other endpoint could confirm. */
+export const unverifiedText = (host) => t("Applied according to {host}; no second endpoint could confirm it.", { host });
 
 /** An RPC call that did not answer within its bound. */
 export class RpcTimeout extends Error {
@@ -169,6 +178,9 @@ function resultCode(transactionResult) {
     return "unknown";
   }
 }
+
+/** The failure of transaction `hash`, from a getTransaction answer that reports it FAILED. */
+const txFailed = (result, hash) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
 
 function feeCharged(result) {
   try {
@@ -406,6 +418,8 @@ export class Chain {
     this.active = 0;
     /** Pause between two looks at a submitted transaction, in milliseconds. */
     this.pollMs = 1000;
+    /** How long the other endpoints may stay silent before a write ends unverified (SILENT_MS). */
+    this.silentMs = SILENT_MS;
     /**
      * Called with `{ from, to, reason, behind }` when calls move to another endpoint: reason
      * "timeout" or "error" (a failing call), "behind" (it lagged by `behind` ledgers) or "level" (back to the first).
@@ -887,7 +901,8 @@ export class Chain {
   }
 
   /**
-   * Calls a contract function from `signer`. Returns `{ value, hash, seconds, fee }`.
+   * Calls a contract function from `signer`. Returns `{ value, hash, seconds, fee }`,
+   * plus `unverified` when no second endpoint could confirm it (`submit`).
    * `onStatus({ stage, text, hash })` follows each step for the interface.
    */
   async invoke(signer, fn, args, onStatus = () => {}) {
@@ -904,8 +919,8 @@ export class Chain {
     const ready = rpc.assembleTransaction(tx, sim).build();
     checkFee(ready, { estimate: estimateOf(sim) });
     const signed = await this.signWith(signer, ready, onStatus);
-    const { result, hash, seconds, fee } = await this.submit(signed, onStatus);
-    return { value: result.returnValue ? scValToNative(result.returnValue) : undefined, hash, seconds, fee };
+    const { result, hash, seconds, fee, unverified } = await this.submit(signed, onStatus);
+    return { value: result.returnValue ? scValToNative(result.returnValue) : undefined, hash, seconds, fee, ...(unverified ? { unverified } : {}) };
   }
 
   /** Submits one classic operation (a trustline) from `signer`. */
@@ -937,14 +952,34 @@ export class Chain {
     }
   }
 
+  /** `getTransaction` on one given endpoint, within RPC_TIMEOUT_MS; null when it does not answer. */
+  async transactionOn(endpoint, hash) {
+    try {
+      return await withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS);
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Asks the endpoints other than `via` whether `hash` succeeded, so that one
    * endpoint's word never shows a write as confirmed: an RPC can report
    * SUCCESS for a transaction it never forwarded. Returns another endpoint's
-   * SUCCESS answer, or null when there is no other endpoint. Throws
-   * TxUnconfirmed when another endpoint reports a failure, does not know the
-   * transaction once its ledgers are past the validity window, or stays
-   * silent until shortly after it.
+   * SUCCESS answer, null when there is no other endpoint, or `{ unverified }`
+   * (the hosts asked) when none of them answered at all within `silentMs`,
+   * or by the end of the window: silence is not a contradiction, and the
+   * write is then shown as applied according to `via` alone, never as
+   * confirmed.
+   *
+   * A contradiction throws TxUnconfirmed: another endpoint reports a
+   * failure, or does not know the transaction once its own ledgers are past
+   * the validity window. Neither is taken on that endpoint's word alone:
+   * `via` is asked again first, and must still report the success (a
+   * failure it reports too is the transaction's failure, TxFailed) and, for
+   * a transaction the other endpoint does not know, must itself have closed
+   * a ledger past the window; otherwise the wait goes on. An endpoint that
+   * answers but has not seen the transaction shortly after the window ends
+   * it as TxUnconfirmed too.
    */
   async confirmElsewhere(hash, via, maxTime, onStatus = () => {}) {
     const others = this.endpoints.filter((_, i) => i !== via);
@@ -952,23 +987,30 @@ export class Chain {
     const hosts = others.map((e) => e.host).join(", ");
     onStatus({ stage: "confirming", text: t("Submitted, confirming: waiting for a second RPC endpoint ({host}) to see it.", { host: hosts }), hash });
     const deadline = (maxTime || Math.floor(Date.now() / 1000) + TX_VALIDITY_SECS) + CONFIRM_GRACE_SECS;
+    const asked = Date.now();
+    let heard = false;
     for (;;) {
-      const answers = await Promise.all(
-        others.map((endpoint) =>
-          withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS).then(
-            (answer) => ({ endpoint, answer }),
-            () => ({ endpoint, answer: null }),
-          ),
-        ),
-      );
+      const answers = await Promise.all(others.map(async (endpoint) => ({ endpoint, answer: await this.transactionOn(endpoint, hash) })));
+      if (answers.some(({ answer }) => typeof answer?.status === "string")) heard = true;
       const success = answers.find(({ answer }) => answer?.status === "SUCCESS");
       if (success) return success.answer;
       const failure = answers.find(({ answer }) => answer?.status === "FAILED");
-      if (failure) throw new TransactionError("TxUnconfirmed", t("{host} reports it failed.", { host: failure.endpoint.host }), hash);
       // Past the window, an endpoint that has closed later ledgers would know a transaction that landed.
       const unknown = answers.find(({ answer }) => answer?.status === "NOT_FOUND" && maxTime && Number(answer.latestLedgerCloseTime) > maxTime + 5);
-      if (unknown) throw new TransactionError("TxUnconfirmed", t("{host} does not know it, and its validity window has passed.", { host: unknown.endpoint.host }), hash);
-      if (Date.now() / 1000 > deadline) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
+      if (failure || unknown) {
+        const again = await this.transactionOn(this.endpoints[via], hash);
+        if (again?.status === "FAILED") throw txFailed(again, hash);
+        if (typeof again?.status === "string") {
+          if (failure) throw new TransactionError("TxUnconfirmed", t("{host} reports it failed.", { host: failure.endpoint.host }), hash);
+          // The other endpoint's close time counts once the endpoint in use has reached the same side of the window.
+          if (Number(again.latestLedgerCloseTime) > maxTime + 5) {
+            throw new TransactionError("TxUnconfirmed", t("{host} does not know it, and its validity window has passed.", { host: unknown.endpoint.host }), hash);
+          }
+        }
+      }
+      const late = Date.now() / 1000 > deadline;
+      if (!heard && (late || Date.now() - asked >= this.silentMs)) return { unverified: hosts };
+      if (late) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
       await sleep(this.pollMs);
     }
   }
@@ -977,20 +1019,28 @@ export class Chain {
    * Sends a signed transaction and returns once it has landed. Throws only
    * on a definitive outcome: failed on chain, refused by the network, or
    * expired (the ledger closed past the validity window without it); or
-   * TxUnconfirmed when a second endpoint does not confirm the success the
-   * first one reports (`confirmElsewhere`).
+   * TxUnconfirmed when a second endpoint contradicts the success the first
+   * one reports (`confirmElsewhere`). Returns `{ result, hash, seconds, fee }`,
+   * plus `unverified: { host, others }` when the other endpoints stayed
+   * silent: applied according to `host` alone, never confirmed.
    */
   async submit(tx, onStatus = () => {}) {
     const started = Date.now();
     const hash = toHex(tx.hash());
     const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
     const done = async (answer) => {
-      const confirmed = (await this.confirmElsewhere(hash, answer.via, maxTime, onStatus)) ?? answer;
+      const confirmed = await this.confirmElsewhere(hash, answer.via, maxTime, onStatus);
       const seconds = (Date.now() - started) / 1000;
+      if (confirmed?.unverified) {
+        const host = this.endpoints[answer.via]?.host ?? "";
+        onStatus({ stage: "unverified", text: unverifiedText(host), hash });
+        return { result: answer, hash, seconds, fee: feeCharged(answer), unverified: { host, others: confirmed.unverified } };
+      }
+      const result = confirmed ?? answer;
       onStatus({ stage: "confirmed", text: t("Confirmed in {seconds} s.", { seconds: formatUnits(BigInt(Math.round(seconds * 10)), 1) }), hash });
-      return { result: confirmed, hash, seconds, fee: feeCharged(confirmed) };
+      return { result, hash, seconds, fee: feeCharged(result) };
     };
-    const failed = (result) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
+    const failed = (result) => txFailed(result, hash);
     const until = maxTime ? new Date(maxTime * 1000).toLocaleTimeString(locale()) : null;
 
     // 1. Into the queue, or learn that it already applied.

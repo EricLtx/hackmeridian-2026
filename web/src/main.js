@@ -4,7 +4,7 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
-import { Chain, rpcChangeText } from "./chain.js";
+import { Chain, rpcChangeText, unverifiedText } from "./chain.js";
 import { checkDeployment, privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
 import { describeError } from "./errors.js";
@@ -161,6 +161,13 @@ function tracker(el) {
         hash ? ` ${link(S.chain.explorerTx(hash), t("View on Stellar Expert"))}` : ""
       }`;
     },
+    /** Applied according to the endpoint in use, which no other endpoint could confirm: amber, never "Confirmed". */
+    unverified(message, { hash, unverified }) {
+      el.className = "tx tx-unverified";
+      el.innerHTML = `<span class="icon" aria-hidden="true">?</span><span>${esc(message)} ${esc(unverifiedText(unverified.host))}</span>${
+        hash ? ` ${link(S.chain.explorerTx(hash), t("View on Stellar Expert"))}` : ""
+      }`;
+    },
     fail(error, context) {
       const { text, name } = describeError(error, context);
       el.className = "tx tx-error";
@@ -181,7 +188,9 @@ function syncWriteButtons() {
 
 /**
  * Runs one write. `context` feeds the error sentences; `message(result)`
- * is the success line. Everything is refreshed afterwards either way.
+ * is the success line. A write that no second endpoint could confirm
+ * (`result.unverified`) ends in amber, as applied according to one endpoint.
+ * Everything is refreshed afterwards either way, and the page is free again.
  */
 async function runTx(el, context, action, message) {
   if (S.busy) return;
@@ -190,7 +199,10 @@ async function runTx(el, context, action, message) {
   const track = tracker(el);
   try {
     const result = await action((status) => track.update(status));
-    if (result?.hash) {
+    if (result?.unverified) {
+      track.unverified(message(result), result);
+      toast(`${message(result)} ${unverifiedText(result.unverified.host)}`, { tone: "warn", announce: false });
+    } else if (result?.hash) {
       track.success(message(result), result);
       toast(message(result), { tone: "ok", announce: false });
     }
