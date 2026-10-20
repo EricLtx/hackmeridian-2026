@@ -23,7 +23,7 @@ This page shows two things. First, what the minimum viable product already prove
 | The fund issuer keeps control of who holds its shares | Tests `issuer_must_whitelist_the_contract_before_any_repo`, `seizure_delivers_permissioned_shares_to_the_whitelisted_lender` |
 | Accounting stays exact under any sequence of operations | Test `invariants_hold_over_random_sequences`: invariants checked after 300 random operations |
 | Cost per operation does not grow with usage | Tests `opening_a_repo_touches_a_constant_number_of_entries` and `many_repos_keep_a_constant_footprint_per_operation`: 16 entries read and 9 written by every `open_repo` over 200 repos; on the testnet instance the heaviest opening used 1.66 % of the instructions a transaction may use (validators' metrics, 20 October 2026) |
-| The code meets its own security rules | CI on every push: format, WASM build, clippy with warnings as errors, 210 contract tests, web build and tests, RustSec advisories; internal reviews of versions 2, 3 and 4 with every finding fixed and tested |
+| The code meets its own security rules | CI on every push: format, WASM build, clippy with warnings as errors, the contract's host tests and the same suite against a WASM with an 8 KiB stack, web build and tests, the tooling's offline tests, RustSec advisories; internal reviews of versions 2, 3 and 4 with every finding fixed and tested; the security pass of 20 October 2026, whose contract findings the rc5 candidate fixes |
 
 The value for a holder is shown in the demo's last scene. It compares the measured latency with the earliest cash through a fund redemption, at four moments of the week. On a weekday after the cut-off, the redemption route takes about 42 hours. From a Friday evening it takes about 89 hours. Open Window answers within one ledger at any of those moments.
 
@@ -62,9 +62,9 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 | Item | State | Evidence |
 |---|---|---|
-| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; since 18 October 2026 an in-page guide per party with the instance's terms read from the chain, a timeline per position fed by the indexer's export, and a phone-width layout; since 19 October 2026 a terminal view for desk users (command line, offer book, tickets with every check before signing, positions blotter, funds, tape of contract events); since 20 October 2026 both views and the History page in English, French and Spanish, published on GitHub Pages with a fallback RPC, and hardened by the security pass of that day (values read from the chain checked before display, content security policy, fees capped before signing); a manual run with Freighter by a real user is still to record |
-| Indexer | Done, first version (17 October 2026) | `indexer/` keeps every contract event in an append-only journal under a SHA-256 hash chain (`verify` recomputes it), behind a persistent cursor, and exports CSV, a per-repo register and the SFTR columns the chain can fill; the web interface's History page reads its export. Not yet consulted by the monitor; runs on the operator's machine |
-| Monitoring | Done | Thirteen detectors per admitted fund; nineteen drills replayed on testnet on 18 October 2026 against the upgraded instance, including a key-compromise, an issuer-freeze, a frozen-NAV and an unannounced-stablecoin drill, with the automatic actions signed by the sentinel key ([incident-procedure.md](incident-procedure.md)) |
+| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; since 18 October 2026 an in-page guide per party with the instance's terms read from the chain, a timeline per position fed by the indexer's export, and a phone-width layout; since 19 October 2026 a terminal view for desk users (command line, offer book, tickets with every check before signing, positions blotter, funds, tape of contract events); since 20 October 2026 both views and the History page in English, French and Spanish, published on GitHub Pages with a fallback RPC, and hardened by the security pass of that day (values read from the chain checked before display, content security policy, fees capped before signing); the rc5 candidate adds a check of the fee the wallet signs, a write confirmed on a second endpoint, a lagging endpoint left for a level one, a refusal to run in another site's frame and a footer naming the RPC providers; a manual run with Freighter by a real user is still to record |
+| Indexer | Done, first version (17 October 2026) | `indexer/` keeps every contract event in an append-only journal under a SHA-256 hash chain (`verify` recomputes it), behind a persistent cursor, and exports CSV, a per-repo register and the SFTR columns the chain can fill; the web interface's History page reads its export. The monitor compares the journal with the events an RPC serves; since rc5 both ways and by content, against an endpoint the indexer did not read, as `verify --against <url>` does; runs on the operator's machine |
+| Monitoring | Done | Nineteen drills replayed on testnet on 18 October 2026 against the rc4 instance, including a key-compromise, an issuer-freeze, a frozen-NAV and an unannounced-stablecoin drill, with the automatic actions signed by the sentinel key ([incident-procedure.md](incident-procedure.md)). The rc5 candidate's monitor has nineteen detectors, tested offline, and takes an action only once a second endpoint confirms it; the new detectors have no drill yet |
 | Incident procedure | Done | [incident-procedure.md](incident-procedure.md) |
 | Static analysis | Partly | Scout: 2 medium and 23 enhancement alerts, all justified; OpenZeppelin detectors not run yet |
 | Upgrade test | Done | `upgrade_to_the_built_wasm_keeps_offers_repos_and_roles`; and `an_rc2_instance_upgrades_then_migrates_with_a_repo_open` runs the real rc2 WASM, upgrades it, repays a repo opened before the upgrade and migrates the stored layout. The governed upgrade and the migration were then executed on the testnet instance on 18 October 2026 (`npm run upgrade`) |
@@ -92,22 +92,23 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Item | State | Evidence |
 |---|---|---|
 | Multisig governor | Done on testnet; custody not done | 2-of-2 native account with a co-signer; both signing paths succeed, a single key is refused with `txBadAuth`. The demo holds both keys on one machine: real custody (separate people and hardware devices) is the critical path to any deployment that holds value. Since 17 October 2026 the ceremony is tooled (`npm run keys`: unsigned atomic setOptions plan, read-back, testnet rehearsal with minutes) and the key policy is summarised in [security.md](security.md), section 6.4 |
-| Time delay | Done, version 3; stablecoin registry behind the delay since rc4 | Upgrades, feed changes, re-anchoring, a new guardian, stablecoin registrations after the first admission and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate |
+| Time delay | Done, version 3; stablecoin registry behind the delay since rc4 | Upgrades, feed changes, re-anchoring, a new guardian, stablecoin registrations after the first admission and every loosening wait 48 hours by default, are cancellable, and expire after seven days; tightening is immediate. In the rc5 candidate the governor in office applies a stablecoin registration, and an upgrade proposed before the first admission is cancelled at it |
 | Schema version and migration | Done, rc4 | The contract stores a schema version; `migrate` (governor and trustee) transforms the stored layout after an upgrade; entries refuse to open while the layout is outdated, exits never check. Demonstrated on testnet on 18 October 2026 |
 | Sentinel | Done, rc4 | A hot key named by the guardian that can pause and cancel proposals, and nothing else; the monitoring host acts with it, so the guardian key leaves that host |
 | Several funds and stablecoins as data | Done, 18 October 2026 | Two funds (a dollar T-bill share with an FX leg, a euro money market share without one) and two euro stablecoins sharing one currency cap, admitted on the same testnet instance without a code change |
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
-| Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |
+| Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one; in the rc5 candidate it is never the primary itself and is installed only against a fresh primary it agrees with |
 | Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 6 seconds later, with 295 of the 300 seconds of the testnet delay left |
-| Internal reviews | Done | Three passes on version 3 and two on version 4, every finding fixed with a test |
-| Security pass of 20 October 2026 | Done; contract findings open | Over rc4, its RPC path, the web interface and the tooling: the web and the tooling hardened the same day; the contract's findings, with their planned fixes, wait for the next audit candidate (rc5); the restore of an archived code entry on mainnet is to check before any mainnet deployment ([threat-model-stride.md](threat-model-stride.md#32-security-pass-of-20-october-2026)) |
+| Internal reviews | Done | Three passes on version 3 and two on version 4, every finding fixed with a test; the security pass of 20 October 2026, and an adversarial review of the rc5 candidate, which runs now |
+| Security pass of 20 October 2026 | Done; contract fixes in the rc5 candidate | Over rc4, its RPC path, the web interface and the tooling: the web and the tooling hardened the same day; the contract's findings fixed in the rc5 candidate (decisions S30 to S34 and amendments in [security.md](security.md)), which becomes the tag `audit-v4-rc5` after an adversarial review, then a governed upgrade of the testnet instance; a stablecoin freeze on the cash leg and the pooled share balance wait for an interface change (version 2); the restore of an archived code entry on mainnet is to check before any mainnet deployment ([threat-model-stride.md](threat-model-stride.md#32-security-pass-of-20-october-2026)) |
+| Real-time profile | Done, rc5 candidate | A 64 KiB WASM stack instead of 1 MiB: 122,880 instructions and 983,040 bytes of memory saved on every call; every user-facing call checked against a budget on the release WASM; a CI canary runs the whole suite on an 8 KiB stack |
 | Lenders independent of the fund | Done, version 4 | The issuer can never lend against its fund; lenders attested before approval; an instance can be fixed to a single regulated lender (mode D3); shown live in the demo |
 | Custody safeguards in the contract | Done, version 4 | Governor handover behind the delay with a guardian veto; guardian handover only to a registered backup; lost steward key recovered only to the issuer's own backup, after 30 days, with governor and guardian. Devices and signers are still to set up |
-| Audit package | Ready | [audit-scope.md](audit-scope.md) |
+| Audit package | Ready, for the rc5 candidate | [audit-scope.md](audit-scope.md) |
 | Third-party audit | Not started | Needs an auditor and a budget |
 | Bug bounty | Not started | Needs a budget sized to the value at stake |
 
-Found on the way and fixed: operations used to extend the contract's code entry, whose rent grows with its size. On testnet the user who crossed the extension threshold would have paid about 530 XLM, more than one transaction may carry. The contract now extends only its instance, and the operator keeps the code alive (decision S20 in [security.md](security.md)).
+Found on the way and fixed: operations used to extend the contract's code entry, whose rent grows with its size. On testnet the user who crossed the extension threshold would have paid about 530 XLM (14 October 2026), more than one transaction may carry. The contract now extends only its instance, and the operator keeps the code alive (decision S20 in [security.md](security.md)): at the testnet rate read on 20 October 2026, one 30-day slice of the rc4 code cost about 215 XLM, so the monitor extends the code when it has less than 90 days to live and keeps the keeper's float above 250 XLM.
 
 ### Step 3: guarded launch
 
@@ -136,18 +137,18 @@ Found on the way and fixed: operations used to extend the contract's code entry,
 
 ## Next developments, sorted MoSCoW
 
-Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. "Must" items gate the guarded launch; nothing below changes the contract before the external audit, except a fix the audit itself requires.
+Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. "Must" items gate the guarded launch; nothing below changes the contract before the external audit, except a fix a review requires. The rc5 candidate of 20 October 2026 is such a fix, from the security pass of that day, under a new tag.
 
 **Must**
-- External audit of the frozen tag; every critical, high and medium finding fixed, each on its own commit.
+- External audit of the frozen tag (`audit-v4-rc5` once the rc5 candidate passes its review); every critical, high and medium finding fixed, each on its own commit.
 - Key custody on hardware with separate signers: governor signers, guardian, sentinel and keeper keys off the development machine; the ceremony replayed on devices; the monitor's witness on a second host.
 - A NAV feed for the pilot fund published to a SEP-40 interface, with the freshness policy written into the fund's admission.
 - One public story: the reserve of step 3 is the lender's own, held off chain by agreement and sized from the maximum-loss scenarios (S16, amended 18 October 2026).
 - A second maintainer with keys, so that no role depends on one person.
 
 **Should**
-- A second RPC provider, so the monitor's cross-check detector runs and a mainnet exchange-rate log can be kept.
-- The indexer anchored on a schedule and compared with an independent event source; `verify` run periodically.
+- Two RPC providers chosen for production: the rc5 monitor confirms every automatic action on a second endpoint (the testnet default uses two public ones), and a mainnet exchange-rate log can be kept.
+- The indexer anchored and compared with an independent endpoint on a schedule (`verify --against <url>`, rc5); `verify` run periodically.
 - The SFTR export checked with a reporting team; the master agreement and the DORA clauses signed.
 - The web interface completed by a real user with a standard wallet; the timelines, the phone-width layout and the terminal view are built (18 and 19 October 2026).
 - A deployment kit for an instance operator: runbooks for deployment, admission, daily operation and upgrades (including the inventory of funds that a tightened admission rule would refuse) and an off-chain instance register are in [operations.md](operations.md) with `npm run inventory` (18 October 2026); a setup that signs every governor step from an external account remains to do.
@@ -174,8 +175,8 @@ These tasks run continuously from step 1 on. Each one has an owner in the incide
 | Task | Rule |
 |---|---|
 | SDK and protocol | Stay within the two latest major versions of `soroban-sdk`, the ones that get security fixes; rebuild and rerun the tests at every protocol upgrade |
-| Storage | Entries are extended on every write; monitoring alerts when an open entry has under 14 days left |
-| Feeds | Freshness and drift watched per fund; a stale feed stops new repos and never forces a liquidation |
+| Storage | Entries are extended on every write; monitoring alerts when an open entry has under 14 days left, and the contract code under 90 days |
+| Feeds | Freshness and drift watched per fund; a stale feed stops new repos and never forces a liquidation; a price reference older than its NAV age bound is stepped by the keeper (rc5) |
 | Keys | Governor and guardian keys rotated through the two-step handover, never shared between roles |
 | Dependencies | Dependabot updates reviewed as pull requests; RustSec advisories checked in CI |
 | Testnet | Network resets are planned for: `npm run setup` rebuilds the demo from nothing |
@@ -183,11 +184,11 @@ These tasks run continuously from step 1 on. Each one has an owner in the incide
 ## Where the details are
 
 - [architecture.md](architecture.md): the map of the system, with diagrams.
-- [security.md](security.md): security baseline, decisions S1 to S29, maximum loss, DORA.
+- [security.md](security.md): security baseline, decisions S1 to S34, maximum loss, DORA.
 - [threat-model-stride.md](threat-model-stride.md): threat model and monitoring plan.
 - [incident-procedure.md](incident-procedure.md): who acts, how and within what time when an alert fires.
 - [interface-reference.md](interface-reference.md): every entry point, type and error, in long form.
-- [audit-scope.md](audit-scope.md): what an external auditor needs; the code is frozen at the tag `audit-v4-rc4`.
+- [audit-scope.md](audit-scope.md): what an external auditor needs; the testnet runs the tag `audit-v4-rc4`, and the rc5 candidate, its size, hash and test counts are described there.
 - [operations.md](operations.md): running an instance as its operator, with the pre-upgrade inventory and the instance register.
 - [faq.md](faq.md): questions and answers for users, the Stellar ecosystem, engineers and security reviewers.
 - [demo/README.md](../demo/README.md): the live testnet demo and its recovery procedures.

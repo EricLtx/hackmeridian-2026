@@ -131,11 +131,11 @@ Three external dependencies per fund, and one optional:
 - an FX feed if the NAV and the loan are in different currencies;
 - optionally, a backup SEP-40 NAV feed.
 
-The contract itself is about 115 KB of WASM (version 4), built with `soroban-sdk` 28; the network limit is 128 KB. An operator must also keep the contract's code entry alive (see the next answer).
+The contract itself is about 100 KB of WASM (the exact size and hash of the rc5 candidate are in [audit-scope.md](audit-scope.md)), built with `soroban-sdk` 28; the network limit is 128 KB. An operator must also keep the contract's code entry alive (see the next answer).
 
 ### How does it behave with storage archival?
 
-Every write of a persistent entry extends its TTL: when fewer than 30 days remain, it is extended to 120 days. Every privileged call extends the contract instance, but never the code entry: code rent grows with its size, and a user crossing the threshold would otherwise pay it (on testnet, about 530 XLM for 75 KB of code, more than one transaction may carry). The operator extends the code itself, 30 days at a time, and the monitoring alerts when it nears expiry. Deadlines are timestamps stored in the repo and compared with the ledger time, never inferred from a TTL. An archived entry can be restored by any caller before use.
+Every write of a persistent entry extends its TTL: when fewer than 30 days remain, it is extended to 120 days. Every privileged call extends the contract instance, but never the code entry: code rent grows with its size, and a user crossing the threshold would otherwise pay it (on testnet, about 530 XLM to extend 75 KB of code to 120 days on 14 October 2026, more than one transaction may carry). The operator extends the code itself, 30 days at a time, and the monitoring alerts when it has less than 90 days to live. At the testnet rate read on 20 October 2026, one such 30-day slice of the rc4 code cost about 215 XLM. Deadlines are timestamps stored in the repo and compared with the ledger time, never inferred from a TTL. An archived entry can be restored by any caller before use.
 
 ### Does its cost grow with usage?
 
@@ -143,7 +143,7 @@ No. Each fund, offer and repo is one storage entry, and no function loops over p
 
 ### What does it emit?
 
-One event per state change, with identifiers and addresses as topics: offers, repos, repurchases, seizures, every administrative change, price reference updates and pauses. An indexer can rebuild the full history from events alone; the repository ships one (`indexer/`), an append-only journal under a hash chain that any party can recompute, with a per-repo register and the reporting columns the chain can fill.
+One event per state change, with identifiers and addresses as topics: offers, repos, repurchases, seizures, every administrative change, price reference updates and pauses. Since the rc5 candidate, every opening also records the valuation behind the loan (`RepoValued`: the NAV and its time, the exchange rate read and the one applied, the price, the haircut). An indexer can rebuild the full history from events alone; the repository ships one (`indexer/`), an append-only journal under a hash chain that any party can recompute, with a per-repo register and the reporting columns the chain can fill.
 
 ### Can it be upgraded?
 
@@ -177,13 +177,14 @@ SEP-41 amounts are `i128`. Rates and haircuts are integers in basis points: 250 
 Workspace lints deny `unsafe`, unchecked arithmetic, `unwrap`, `expect`, `panic!` and slice indexing in contract code. Every operation is `checked_*` and returns a typed error on overflow. Overflow checks also stay on in release builds. Each rounding has a stated direction:
 
 - the amount a borrower may take rounds down;
-- the interest a borrower owes rounds up.
+- the interest a borrower owes rounds up;
+- since rc5, the bounds of the price corridor and of the exchange-rate band round inward, so a check is never looser than its setting.
 
 ### How is the price checked?
 
 1. **Freshness.** The NAV must be younger than the fund's maximum age, and not in the future.
-2. **Corridor.** The NAV must lie between the reference minus a small floor and the reference grown at a maximum yield since it was set. The reference never follows the feed blindly: anyone can move it up along that model path, only the steward can lower it, and only a two-key re-anchor can set it elsewhere. A faulty feed cannot drag it, even by publishing every ledger.
-3. **FX.** If the price is crossed through an FX feed, that rate must be fresh and within a band around the reference rate (set at admission, by a re-anchor, or at the proposal that added the FX leg), and it adds its own haircut.
+2. **Corridor.** The NAV must lie between the reference minus a small floor and the reference grown at a maximum yield since it was set, counted over at most the fund's NAV age bound since rc5. The reference never follows the feed blindly: anyone can move it up along that model path, only the steward can lower it, and only a two-key re-anchor can set it elsewhere. A faulty feed can push it up no faster than the maximum yield, never down, even by publishing every ledger; since rc5 the fund's haircut must cover the whole corridor.
+3. **FX.** If the price is crossed through an FX feed, that rate must be fresh and within a band around the reference rate (set at admission, by a re-anchor, or at the proposal that added the FX leg), and it adds its own haircut. Since rc5 the NAV is divided by the higher of the rate and the reference, so a low rate never raises the price.
 
 ### Can one instance serve several funds and several stablecoins?
 
@@ -195,7 +196,7 @@ Both are set per instance and per fund, by the governor and the fund's issuer, n
 
 ### Does the exchange-rate feed publish on weekends?
 
-On the testnet feed observed from Friday night to Sunday (17 and 18 October 2026), yes: a new rate every five minutes, with a fresh timestamp, but the same value all weekend, since the currency market is closed. A freshness check cannot tell a closed market from a live one. That is why the FX leg has its own band around the reference rate and its own haircut: together they bound what a rate frozen on Friday can be worth by Sunday night, whatever the feed says. The monitoring also warns when the published rate has not moved for longer than a weekend.
+On the testnet feed observed from Friday night to Sunday (17 and 18 October 2026), yes: a new rate every five minutes, with a fresh timestamp, but the same value all weekend, since the currency market is closed. A freshness check cannot tell a closed market from a live one. That is why the FX leg has its own band around the reference rate and its own haircut: together they bound what a rate frozen on Friday can be worth by Sunday night, as long as the market stays inside the band. The monitoring also warns when the published rate has not moved for longer than a weekend, or over 24 hours of business days, and when it strays more than half the band from a second FX source (rc5).
 
 ### Why interest per started hour?
 
@@ -203,7 +204,7 @@ The amount the borrower signs is fixed when the transaction is simulated, a few 
 
 ### How is it tested?
 
-248 host tests across the workspace, 205 of them for Open Window:
+Host tests across the workspace, most of them for Open Window (the counts for the rc5 candidate are in [audit-scope.md](audit-scope.md)):
 
 - every error path;
 - an intruder refused on every privileged function;
@@ -214,7 +215,7 @@ The amount the borrower signs is fixed when the transaction is simulated, a few 
 - an upgrade to the real compiled WASM, through the time delay;
 - issuer freezes, allowlist removal, clawback and asset-contract deauthorization during a repo.
 
-An integration module runs the full cycle with the real share token and NAV feed contracts of this repository. CI runs format, clippy with warnings as errors, the tests, the WASM build and a RustSec advisory check on every push.
+An integration module runs the full cycle with the real share token and NAV feed contracts of this repository. CI runs format, clippy with warnings as errors, the tests, the WASM build and a RustSec advisory check on every push; since rc5 also the whole contract suite against a WASM linked with an 8 KiB stack, the tooling's offline tests, and an advisory gate on the web's dependencies.
 
 ### How do I run it?
 
@@ -232,8 +233,8 @@ The demo runner is described in [demo/README.md](../demo/README.md). It never re
 
 ### Where is the threat model?
 
-- **[security.md](security.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S29, maximum loss per scenario and the DORA mapping.
-- **[threat-model-stride.md](threat-model-stride.md)** holds 36 STRIDE problems (21 at the start, 15 added by the security pass of 20 October 2026), the treatment of each and the monitoring plan.
+- **[security.md](security.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S34, maximum loss per scenario and the DORA mapping.
+- **[threat-model-stride.md](threat-model-stride.md)** holds 38 STRIDE problems (21 at the start, 17 added by the security pass of 20 October 2026), the treatment of each, the fixes of the rc5 candidate and the monitoring plan.
 
 
 ### How do I report a vulnerability?
@@ -248,10 +249,10 @@ Privately, as described in [SECURITY.md](../SECURITY.md): GitHub's private vulne
 | Guardian | Pause new offers and new repos; cancel pending proposals except a forced guardian change; veto a governor handover; remove a backup feed alone; hand its role to its registered backup; name and remove the sentinel | Unpause; block repurchase, withdrawal or seizure; hand its role to an address not registered with the governor |
 | Sentinel, optional (rc4), the monitoring host's key | Pause; cancel pending proposals the guardian may cancel | Unpause; veto anything; hand over, back up or name any role; propose anything |
 | Trustee, optional, fixed at deployment | Co-sign upgrades and forced guardian changes; veto them and a governor handover; hand its role to a successor who accepts (which drops what it had co-signed) | Hold any other role; propose anything; be removed or replaced by anyone else |
-| Steward, one per fund | Attest and approve lenders (approvals end with its tenure: a new steward approves again), tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring, register its own backup key and replace it after the delay | Lend against its fund, directly or through a pre-v4 approval; raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
-| Lender | Create and withdraw its offers; seize at maturity | Seize early; seize to an unapproved address |
+| Steward, one per fund | Attest and approve lenders (approvals end with its tenure: a new steward approves again; since rc5 a revocation stops new loans, not the seizure of open repos), tighten its fund at once, propose loosening it, freeze its fund, lower the NAV reference, co-sign replacement, backup feed and re-anchoring, register its own backup key and replace it after the delay | Lend against its fund, directly or through a pre-v4 approval; raise the reference; loosen its fund before the delay; exceed the envelope; touch another fund |
+| Lender | Create and withdraw its offers; seize at maturity, even after a revocation, its shares then waiting for an approval (rc5) | Seize early; seize to an unapproved address other than its own |
 | Borrower | Open and repurchase its repos | Borrow above the haircut-adjusted value |
-| Anyone | Read; move the NAV reference along the model path; apply a proposal once it is due; deliver held-back shares to their recorded beneficiary | Move the reference outside the corridor; apply a proposal early or change it |
+| Anyone | Read; move the NAV reference along the model path; apply a proposal once it is due (since rc5 the governor applies a stablecoin registration); deliver held-back shares to their recorded beneficiary | Move the reference outside the corridor; apply a proposal early or change it |
 
 Every function that consumes an address's authority calls `require_auth` on that address. Governor handover takes two steps: the successor must sign to accept.
 
@@ -261,8 +262,8 @@ Five layers stop it:
 
 1. Prices come from NAV feeds chosen at admission, never from a market price or a function argument.
 2. Freshness limits apply to the NAV and the FX rate.
-3. The model-based corridor stops sudden moves.
-4. The FX band stops a faulty rate.
+3. The model-based corridor stops sudden moves, and since rc5 the haircut covers it from its bottom to its top.
+4. The FX band stops a faulty rate, and since rc5 the price takes the rate on the lender's side of the band.
 5. Haircuts and three caps, per repo, per fund and per currency, bound what a wrong price that passes every check can cost.
 
 The demo publishes a NAV 3 % too high and shows the contract refuse it.
@@ -283,10 +284,10 @@ Open Window is designed to be operated as an ICT service a regulated entity can 
 
 - **Third-party audit:** not done; the package for it is ready in [audit-scope.md](audit-scope.md).
 - **Bug bounty:** not set up; it needs a budget sized to the value at stake.
-- **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where every detector with a possible real trigger fired on one ([incident-procedure.md](incident-procedure.md)); it is not yet run continuously on dedicated infrastructure.
+- **Monitoring in production:** the plan is implemented and was rehearsed on testnet against rc4, where every detector with a possible real trigger fired on one ([incident-procedure.md](incident-procedure.md)); the detectors the rc5 candidate adds have offline tests and no drill yet; it is not yet run continuously on dedicated infrastructure.
 - **Static analysis:** Scout has run, with every alert justified in [security.md](security.md), section 7; the OpenZeppelin detectors have not run yet.
 - **Multisig governor in production:** in place on testnet as a 2-of-2 account; the outside signer's organisation is a decision for launch.
-- **Contract findings of the security pass of 20 October 2026:** recorded in the [threat model](threat-model-stride.md#32-security-pass-of-20-october-2026) with their planned fix (seizure after a steward revocation, an FX band that follows the market, a NAV corridor bounded by the haircut, units normalised across stablecoins of one currency, a valuation event at opening). They need a new audit candidate and are not fixed in the deployed code.
+- **Contract findings of the security pass of 20 October 2026:** fixed in the rc5 candidate (the seizure after a steward revocation, the exchange rate taken on the lender's side of its band, a NAV corridor bounded by the NAV age and covered by the haircut, one precision per currency, feed precision, a valuation event at opening), recorded in the [threat model](threat-model-stride.md#32-security-pass-of-20-october-2026). The candidate becomes the tag `audit-v4-rc5` after an adversarial review now running, then a governed upgrade of the testnet instance, which still runs rc4. Still open: a stablecoin freeze on the cash leg and the pooled share balance, both an interface change for version 2.
 
 Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 
