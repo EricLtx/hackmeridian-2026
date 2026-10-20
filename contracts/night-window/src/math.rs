@@ -68,9 +68,28 @@ impl Price {
 
     /// Cross price: `self` and `quote` are both expressed in the same base
     /// (for instance USD); the result is `self` expressed in units of
-    /// `quote`'s asset (for instance EUR), with `self`'s decimals.
+    /// `quote`'s asset (for instance EUR), with `self`'s decimals:
+    /// `self.mantissa * 10^d / quote.mantissa`, rounded down, with `d` the
+    /// quote's decimals, without forming that product (review finding
+    /// VAL-3, 20 October 2026: at 18 and 18 decimals it exceeded i128 above
+    /// 170 per share). With `self.mantissa = q * quote.mantissa + r`, the
+    /// result is `q * 10^d + floor(r * 10^d / quote.mantissa)`: the first
+    /// term is at most the result, and `r * 10^d` stays below
+    /// `quote.mantissa * 10^d`. The result is the direct formula's wherever
+    /// that one fits in i128; the only overflows left are a result that
+    /// does not fit, and a rate whose mantissa times `10^d` does not (above
+    /// 170 at 18 decimals).
     pub fn divided_by(self, quote: Price) -> Result<Price, Error> {
-        let mantissa = mul_div_floor(self.mantissa, pow10(quote.decimals)?, quote.mantissa)?;
+        let unit = pow10(quote.decimals)?;
+        let (whole, rest) = (
+            self.mantissa.checked_div(quote.mantissa).ok_or(OVERFLOW)?,
+            self.mantissa.checked_rem(quote.mantissa).ok_or(OVERFLOW)?,
+        );
+        let mantissa = whole
+            .checked_mul(unit)
+            .ok_or(OVERFLOW)?
+            .checked_add(mul_div_floor(rest, unit, quote.mantissa)?)
+            .ok_or(OVERFLOW)?;
         Price::new(mantissa, self.decimals)
     }
 }

@@ -114,6 +114,12 @@ pub const MAX_PENDING_CURRENCY_CAPS: u32 = 8;
 /// in to nothing since. At 6 decimals one unit of a price near 1 is
 /// 0.01 bps.
 pub const MIN_FEED_DECIMALS: u32 = 6;
+/// Most decimals a NAV, FX or fallback feed may publish with (review finding
+/// VAL-3, 20 October 2026). The valuation is exact up to 18 decimals: the
+/// cross price divides the NAV by the rate without forming the NAV times
+/// `10^decimals`, and the share value splits its product, which covers up
+/// to 19. A feed with more could be admitted and then never price.
+pub const MAX_FEED_DECIMALS: u32 = 18;
 /// Decimals of every stablecoin: those of a Stellar classic asset through
 /// its Stellar Asset Contract. Caps and outstanding totals add base units
 /// across the stablecoins of a currency, so these must share one precision
@@ -3092,10 +3098,10 @@ fn check_fallback(
 }
 
 /// The decimals of a NAV, FX or fallback feed, refused below
-/// `MIN_FEED_DECIMALS`: at admission, at a replacement, and when a fallback
-/// or a re-anchor is proposed or applied.
+/// `MIN_FEED_DECIMALS` and above `MAX_FEED_DECIMALS`: at admission, at a
+/// replacement, and when a fallback or a re-anchor is proposed or applied.
 fn check_feed_decimals(decimals: u32) -> Result<u32, Error> {
-    if decimals < MIN_FEED_DECIMALS {
+    if !(MIN_FEED_DECIMALS..=MAX_FEED_DECIMALS).contains(&decimals) {
         return Err(Error::OutsideEnvelope);
     }
     Ok(decimals)

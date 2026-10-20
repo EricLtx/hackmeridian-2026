@@ -648,6 +648,143 @@ fn a_feed_with_fewer_than_six_decimals_is_refused() {
     );
 }
 
+/// Review finding VAL-3 (20 October 2026): a feed publishing with more than
+/// `MAX_FEED_DECIMALS` (18) is refused wherever the floor of six decimals
+/// is checked: at admission and at a replacement (NAV and FX feeds), at a
+/// fallback's proposal, and at a re-anchor. Beyond 18 decimals the share
+/// value leaves the domain its arithmetic covers, and a fund could be
+/// admitted that never prices.
+#[test]
+fn a_feed_with_more_than_eighteen_decimals_is_refused() {
+    let f = bare();
+    let shares = Asset::Stellar(f.shares.clone());
+    let (finest, finest_feed) = feed_with_decimals(&f, eur(&f.env), MAX_FEED_DECIMALS + 1);
+    finest_feed.set_price(&shares, &(NAV_EUR * 100_000), &T0);
+    let finest_config = FundConfig {
+        oracle: finest,
+        ..fund_config(&f)
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &finest_config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    let (fine, fine_feed) = feed_with_decimals(&f, eur(&f.env), MAX_FEED_DECIMALS);
+    fine_feed.set_price(&shares, &(NAV_EUR * 10_000), &T0);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: fine,
+            ..fund_config(&f)
+        },
+    );
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().nav_decimals,
+        MAX_FEED_DECIMALS
+    );
+    // A replacement by the finer feed.
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &finest_config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    // A fallback.
+    let (backup, backup_feed) = feed_with_decimals(&f, eur(&f.env), MAX_FEED_DECIMALS + 1);
+    backup_feed.set_price(&shares, &(NAV_EUR * 100_000), &T0);
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &backup)),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    // A re-anchor, reading a feed that now reports more decimals, which a
+    // SEP-40 feed should never do.
+    fine_feed.set_decimals(&(MAX_FEED_DECIMALS + 1));
+    fine_feed.set_price(&shares, &(NAV_EUR * 100_000), &T0);
+    assert_eq!(
+        f.client
+            .try_propose_reanchor(&f.shares, &(NAV_EUR * 100_000), &0),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+
+    // The FX feed of a cross fund.
+    let f = bare();
+    let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &T0);
+    let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), MAX_FEED_DECIMALS + 1);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &(EUR_USD * 100_000), &T0);
+    let config = FundConfig {
+        oracle: nav_oracle,
+        source: PriceSource::Cross(FxLeg {
+            oracle: fx_oracle,
+            asset: Asset::Other(eur(&f.env)),
+            haircut_bps: 200,
+            max_age_secs: 3 * DAY,
+            band_bps: 200,
+        }),
+        ..fund_config(&f)
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    fx_feed.set_decimals(&MAX_FEED_DECIMALS);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &(EUR_USD * 10_000), &T0);
+    f.client.set_fund(&f.shares, &config);
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().fx_decimals,
+        MAX_FEED_DECIMALS
+    );
+}
+
+/// Review finding VAL-3 (20 October 2026): a cross fund whose NAV and FX
+/// feeds both publish with 18 decimals. The cross price formed the NAV
+/// times 10^18 before dividing by the rate, which exceeds i128 above 170.14
+/// per share: a 1,000 USD share was admitted, then every quote and opening
+/// failed with `ArithmeticOverflow`. It now prices at the exact floor of
+/// the division, at the old edge and above it, and an opening lends what
+/// the quote announces.
+#[test]
+fn an_eighteen_decimal_cross_fund_prices_a_thousand_dollar_share() {
+    let e18 = 10i128.pow(18);
+    let rate = 112 * e18 / 100;
+    for nav in [170 * e18, 171 * e18, 1_000 * e18] {
+        let f = bare();
+        let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), 18);
+        let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), 18);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &T0);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &T0);
+        let config = FundConfig {
+            oracle: nav_oracle,
+            source: PriceSource::Cross(FxLeg {
+                oracle: fx_oracle,
+                asset: Asset::Other(eur(&f.env)),
+                haircut_bps: 200,
+                max_age_secs: 3 * DAY,
+                band_bps: 200,
+            }),
+            ..fund_config(&f)
+        };
+        let (f, offer_id) = ready_with(f, config);
+        let quote = f.client.quote(&f.shares, &ONE, &f.eurc);
+        // floor(nav * 10^18 / (1.12 * 10^18)), the price of one share in EUR.
+        let price = nav * 100 / 112;
+        assert_eq!((quote.price, quote.price_decimals), (price, 18));
+        assert_eq!(quote.haircut_bps, 400);
+        assert_eq!(quote.max_principal, ONE * price / e18 * 9_600 / 10_000);
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &ONE,
+            &quote.max_principal,
+            &DAY,
+        );
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().principal,
+            quote.max_principal
+        );
+    }
+}
+
 /// A re-anchor installs references in the decimals of the feeds it reads,
 /// so the same rule holds there: a NAV or FX feed publishing with fewer than
 /// `MIN_FEED_DECIMALS` is refused when the re-anchor is proposed, and when

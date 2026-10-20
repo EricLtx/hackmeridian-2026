@@ -247,6 +247,66 @@ proptest! {
         }
     }
 
+    /// The cross price without the full product (review finding VAL-3)
+    /// changes no result: wherever `nav * 10^d` fits in i128, it is the
+    /// direct formula's, at every precision up to 18 decimals, and a price
+    /// that rounds down to nothing is still refused.
+    #[test]
+    fn divided_by_is_the_direct_formula_where_it_fits(
+        nav in 1i128..=100_000_000_000_000_000_000,
+        rate in 1i128..=1_000_000_000_000_000_000_000,
+        scales in (0u32..=20, 0u32..=21),
+        nav_decimals in 0u32..=18,
+        fx_decimals in 0u32..=18,
+    ) {
+        let nav = (nav / 10i128.pow(scales.0)).max(1);
+        let rate = (rate / 10i128.pow(scales.1)).max(1);
+        let direct = nav * 10i128.pow(fx_decimals) / rate;
+        let price = Price::new(nav, nav_decimals)
+            .unwrap()
+            .divided_by(Price::new(rate, fx_decimals).unwrap());
+        if direct > 0 {
+            prop_assert_eq!(price, Price::new(direct, nav_decimals));
+        } else {
+            prop_assert_eq!(price, Err(Error::InvalidPrice));
+        }
+    }
+
+    /// Beyond the direct formula's reach, the cross price is still the exact
+    /// floor of `nav * 10^d / rate`. The only overflow left is a result that
+    /// does not fit in i128, or a rate whose mantissa times `10^d` does not.
+    #[test]
+    fn divided_by_is_exact_beyond_the_direct_formula(
+        nav in 1i128..=i128::MAX,
+        rate in 1i128..=i128::MAX,
+        scales in (0u32..=38, 0u32..=38),
+        nav_decimals in 0u32..=18,
+        fx_decimals in 0u32..=18,
+    ) {
+        let nav = (nav / 10i128.pow(scales.0)).max(1);
+        let rate = (rate / 10i128.pow(scales.1)).max(1);
+        let unit = 10i128.pow(fx_decimals);
+        let product = Wide::of(nav).times(unit);
+        let price = Price::new(nav, nav_decimals)
+            .unwrap()
+            .divided_by(Price::new(rate, fx_decimals).unwrap());
+        match price {
+            Ok(price) => {
+                prop_assert_eq!(price.decimals(), nav_decimals);
+                let floor = Wide::of(price.mantissa()).times(rate);
+                prop_assert!(floor <= product);
+                prop_assert!(product < floor.plus(rate));
+            }
+            Err(Error::InvalidPrice) => prop_assert!(product < Wide::of(rate)),
+            Err(error) => {
+                prop_assert_eq!(error, Error::ArithmeticOverflow);
+                let result_too_large = product >= Wide::of(i128::MAX).times(rate).plus(rate);
+                let rate_too_fine = Wide::of(rate).times(unit) > Wide::of(i128::MAX);
+                prop_assert!(result_too_large || rate_too_fine);
+            }
+        }
+    }
+
     /// The bounds round inward (review finding arith-4): a value passes the
     /// band exactly when it lies within it in exact arithmetic, whatever the
     /// precision, so nothing beyond the configured band passes and the
@@ -382,6 +442,22 @@ proptest! {
         if let (Ok(first), Ok(second)) = (Bps::haircut(small), Bps::haircut(other)) {
             check(first.plus(second).map(|sum| i128::from(sum.get())))?;
         }
+    }
+}
+
+/// Review finding VAL-3 (20 October 2026): a 1,000 USD share priced in EUR
+/// through feeds of 18 decimals each. The direct formula's product,
+/// 10^21 * 10^18, does not fit in i128; the split one gives the exact floor,
+/// and so does it at the old edge of 170 USD.
+#[test]
+fn an_eighteen_decimal_cross_price_needs_no_full_product() {
+    let e18 = 10i128.pow(18);
+    let rate = Price::new(112 * e18 / 100, 18).unwrap();
+    assert!((170 * e18).checked_mul(e18).is_some());
+    assert!((171 * e18).checked_mul(e18).is_none());
+    for nav in [170 * e18, 171 * e18, 1_000 * e18] {
+        let price = Price::new(nav, 18).unwrap().divided_by(rate).unwrap();
+        assert_eq!((price.mantissa(), price.decimals()), (nav * 100 / 112, 18));
     }
 }
 
