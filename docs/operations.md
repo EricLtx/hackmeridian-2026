@@ -41,7 +41,7 @@ Order of operations, as `demo/setup.mjs` performs it (each step is idempotent an
 Admission checklist, to tick before step 3 for every fund:
 
 - the NAV feed publishes at the promised cadence; the NAV age bound covers the longest gap (a fund that publishes on business days is 64 hours old on Monday morning);
-- haircut at or above the envelope minimum, and at or above the corridor's maximum drift over the NAV age bound (the envelope enforces it);
+- haircut at or above the envelope minimum, and at or above the corridor's maximum drift over the NAV age bound: the envelope checks each bound on its own and does not enforce this relation, so check it here (threat model Tamper.7);
 - for a cross-currency fund, FX band at or below the FX haircut (S22);
 - the contract and the lender are allowlisted on the share token; a revoked authorization is handled (S9: the repurchase settles and the shares are delivered when the issuer allows), but the issuer's policy should say when it freezes;
 - caps per repo, per fund and per currency consistent with the maximum-loss scenarios (security.md 6.1) and with the lender's off-chain reserve (S16);
