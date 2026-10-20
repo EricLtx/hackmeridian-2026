@@ -8,6 +8,7 @@ import { Chain, rpcChangeText, unverifiedText } from "./chain.js";
 import { checkDeployment, privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
 import { describeError } from "./errors.js";
+import { loadExport } from "./journal.js";
 import {
   UNSHOWABLE,
   formatAge,
@@ -1444,18 +1445,33 @@ function wire() {
 
 /**
  * The indexer's export, when it sits next to the page: it dates and links the
- * closing steps of the timelines. Optional. "no-cache" revalidates it with
- * the host, which answers 304 while it is unchanged.
+ * closing steps of the timelines. Optional: the first render, or a pass that
+ * fetches it again, waits for it EXPORT_WAIT_MS at most, and one that lands
+ * later fills the timelines then. Without it, the timelines show what the
+ * chain alone tells. "no-cache" revalidates it with the host, which answers
+ * 304 while it is unchanged.
  */
+let historyLoads = 0;
+let historyApplied = 0;
 async function loadHistory() {
-  try {
+  const load = (historyLoads += 1);
+  // An export that lands after a newer one was applied is dropped.
+  const apply = (h) => {
+    if (load < historyApplied) return false;
+    historyApplied = load;
+    S.history = h;
+    return true;
+  };
+  const fetchExport = async () => {
     const response = await fetch("./history.json", { cache: "no-cache" });
-    if (!response.ok) return;
-    const h = await response.json();
-    if (Array.isArray(h?.events)) S.history = { generatedAt: h.generatedAt, events: h.events };
-  } catch {
-    // No export: the timelines show what the chain alone tells.
-  }
+    return response.ok ? response.json() : null;
+  };
+  const h = await loadExport(fetchExport, {
+    onLate: (late) => {
+      if (apply(late) && S.chain && S.face !== "terminal") renderPositions();
+    },
+  });
+  if (h) apply(h);
 }
 
 /** The footer: the contracts behind the page, each linked to the explorer, the endpoint in use and who sees the visitor's reads. */
@@ -1533,9 +1549,9 @@ async function start() {
   // page waits for the instance settings below.
   if (initialFace() === "terminal") setFace("terminal", { persist: false });
   wire();
-  await loadHistory();
+  // The export (2 s at most, EXPORT_WAIT_MS) and the instance settings are read together.
   const ow = S.dep.contracts.openWindow;
-  const [delay, version] = await Promise.all([S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
+  const [, delay, version] = await Promise.all([loadHistory(), S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
   S.delay = delay.value === undefined ? null : Number(delay.value);
   S.version = version.value === undefined ? null : Number(version.value);
   renderGuide();
