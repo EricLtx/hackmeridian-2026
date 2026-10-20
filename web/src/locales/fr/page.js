@@ -65,4 +65,7 @@ export default {
     "Chaque événement émis par le contrat, conservé dans un journal en ajout seul avec une chaîne de hachage, au-delà des quelques jours que garde le RPC public. Les repos sont reconstitués à partir des seuls événements. Le journal est produit par l'indexeur du dépôt (<code>indexer/</code>) ; cette page lit son export.",
   "Journal": "Journal",
   "Latest events": "Derniers événements",
+  "Stellar testnet · tokenized fund shares · euro stablecoins": "Testnet Stellar · parts de fonds tokenisées · stablecoins en euro",
+  "See how it works": "Voir comment ça marche",
+  "Open the terminal": "Ouvrir le terminal",
 };

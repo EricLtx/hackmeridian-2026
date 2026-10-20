@@ -14,6 +14,7 @@ import {
   compactDuration,
   fundRows,
   lendTicket,
+  eventKey,
   mergeEvents,
   openTicket,
   positionRows,
@@ -29,6 +30,7 @@ import { describeError } from "./errors.js";
 import { formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
 import { LANG_NAMES, lang, numberStyle, setLang, t, tc, tk, tn } from "./i18n.js";
 import { HOUR, nextInterestStep } from "./terms.js";
+import { replay } from "./motion.js";
 
 const SLOW_EVERY = 4; // pending changes and layout version: one refresh in four, about a minute
 const CONSOLE_LINES = 8;
@@ -316,7 +318,7 @@ export function createTerminal(ctx) {
       .map(
         (i) =>
           `<span class="tb-item"${i.title ? ` title="${esc(i.title)}"` : ""}><span class="tb-k">${esc(i.label)}</span>${
-            i.value ? ` <span class="tb-v${tone(i.tone)}">${esc(i.value)}</span>` : ""
+            i.value ? ` <span class="tb-v${tone(i.tone)}" data-k="band:${esc(i.label)}">${esc(i.value)}</span>` : ""
           }</span>`,
       )
       .join("");
@@ -385,7 +387,7 @@ export function createTerminal(ctx) {
         return `<tr>
           <td>${fill ? `<button type="button" class="t-pick" data-fill="${esc(fill)}" title="${esc(fill.trim())}">#${r.id}</button>` : `#${r.id}`}</td>
           <td class="n${r.id === best ? " t-ok" : ""}">${esc(formatRate(r.rateBps))}</td>
-          <td class="n">${esc(formatAmount(r.available, sd(), "floor"))}${coin === code() ? "" : ` <span class="t-dim">${esc(coin)}</span>`}</td>
+          <td class="n" data-k="offer:${r.id}">${esc(formatAmount(r.available, sd(), "floor"))}${coin === code() ? "" : ` <span class="t-dim">${esc(coin)}</span>`}</td>
           <td class="n">${Math.floor(r.termSecs / HOUR)}h</td>
           <td>${esc(r.funds.join(" "))}</td>
           <td>${flags}</td>
@@ -422,7 +424,7 @@ export function createTerminal(ctx) {
       .map(([label, value, style]) => `<dt>${esc(label)}</dt><dd${style === "strong" ? ` class="strong"` : ""}>${esc(value)}</dd>`)
       .join("");
     const checks = view.checks
-      .map((c) => `<li class="${c.ok ? "ok" : c.block ? "fail" : "warn"}">${esc(c.text)}</li>`)
+      .map((c, i) => `<li class="${c.ok ? "ok" : c.block ? "fail" : "warn"}" style="--i:${i}">${esc(c.text)}</li>`)
       .join("");
     let action = "";
     if (T.ticket) {
@@ -435,6 +437,10 @@ export function createTerminal(ctx) {
       box,
       `<dl class="t-dl">${rows}</dl>${checks ? `<ul class="t-checks">${checks}</ul>` : ""}${view.note ? `<p class="t-note">${esc(view.note)}</p>` : ""}${action}`,
     );
+    if (T.shownView !== view) {
+      T.shownView = view;
+      replay(box);
+    }
   }
 
   function renderPositions() {
@@ -471,7 +477,7 @@ export function createTerminal(ctx) {
         <td>${esc(r.fund)}</td>
         <td class="n">${esc(formatAmount(r.principal, sd()))}${coinSuffix(r.stablecoin)}</td>
         <td class="n">${esc(formatRate(r.rateBps))}</td>
-        <td class="n">${r.due === null ? (r.held ? esc(shareText(BigInt(r.held.shares), r.fund)) : "—") : esc(formatAmount(r.due, sd(), "ceil"))}</td>
+        <td class="n" data-k="due:${r.id}">${r.due === null ? (r.held ? esc(shareText(BigInt(r.held.shares), r.fund)) : "—") : esc(formatAmount(r.due, sd(), "ceil"))}</td>
         <td class="n">${r.hours === null ? "—" : r.hours}</td>
         <td class="n">${
           r.state === "OPEN"
@@ -506,7 +512,7 @@ export function createTerminal(ctx) {
       .map(
         (f) => `<tr>
           <td><button type="button" class="t-pick" data-fill="${esc(`Q 1K ${f.symbol}`)}" title="${esc(`${f.name}: Q 1K ${f.symbol}`)}">${esc(f.symbol)}</button>${f.iface ? `<span class="t-amber" title="${esc(t("The fund this screen borrows against"))}">◆</span>` : ""} <span class="t-dim" title="${esc(f.token === "SAC" ? t("Classic Stellar asset held through the Stellar Asset Contract") : t("SEP-41 share token"))}">${f.token === "SAC" ? "SAC" : "41"}</span></td>
-          <td class="n" title="${esc(t("NAV in {currency}", { currency: f.navCurrency }))}">${f.nav === null ? "—" : esc(formatUnits(f.nav, f.navDecimals, { digits: 4 }))} <span class="t-dim">${esc(f.navCurrency)}</span></td>
+          <td class="n" data-k="nav:${esc(f.symbol)}" title="${esc(t("NAV in {currency}", { currency: f.navCurrency }))}">${f.nav === null ? "—" : esc(formatUnits(f.nav, f.navDecimals, { digits: 4 }))} <span class="t-dim">${esc(f.navCurrency)}</span></td>
           <td class="n${tone(f.navTone)}" title="${esc(
             f.navMaxAge === null
               ? t("Age of the NAV; the contract refuses it beyond its bound")
@@ -556,10 +562,12 @@ export function createTerminal(ctx) {
       setHTML($("t-tape"), `${warn}<p class="t-empty">${esc(t("No event yet in the window the RPC keeps."))}</p>`);
       return;
     }
+    const fresh = T.tapeSeen ? events.filter((e) => !T.tapeSeen.has(eventKey(e))).map(eventKey) : [];
+    T.tapeSeen = new Set([...(T.tapeSeen ?? []), ...events.map(eventKey)]);
     const body = events
       .map((e) => {
         const l = tapeLine(e, lineCtx);
-        return `<tr><td class="t-dim">${esc(l.time)}</td><td class="t-code${tone(l.tone)}">${esc(l.code)}</td><td class="t-wrap">${esc(l.text)}</td><td>${txLink(l.txHash)}</td></tr>`;
+        return `<tr${fresh.includes(eventKey(e)) ? ` class="row-new"` : ""}><td class="t-dim">${esc(l.time)}</td><td class="t-code${tone(l.tone)}">${esc(l.code)}</td><td class="t-wrap">${esc(l.text)}</td><td>${txLink(l.txHash)}</td></tr>`;
       })
       .join("");
     setHTML($("t-tape"), `${warn}<table class="tt tt-tape"><caption class="sr-only">${esc(t("Contract events, newest first"))}</caption><tbody>${body}</tbody></table>`);
@@ -610,7 +618,7 @@ export function createTerminal(ctx) {
       );
     }
     if (T.updatedAt) parts.push(`<span class="tb-item t-dim">${t("updated {when}", { when: `<span data-since="${T.updatedAt}">${esc(t("just now"))}</span>` })}</span>`);
-    else parts.push(`<span class="tb-item t-warn">${esc(t("reading the chain…"))}</span>`);
+    else parts.push(`<span class="tb-item t-warn is-reading">${esc(t("reading the chain…"))}</span>`);
     parts.push(`<span class="tb-item tb-help t-dim">${esc(t("/ command · ↑↓ history · Tab completes · Esc cancels"))}</span>`);
     setHTML($("t-status"), parts.join(""));
   }

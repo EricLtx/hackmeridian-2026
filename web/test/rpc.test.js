@@ -83,3 +83,16 @@ test("withTimeout passes a value through and turns a late one into an RpcTimeout
   await assert.rejects(withTimeout(never(), 10), RpcTimeout);
   await assert.rejects(withTimeout(Promise.reject(new Error("boom")), 50), /boom/);
 });
+
+test("many calls failing at once switch once, not back and forth", async () => {
+  const down = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const chain = chainWith(fake("down.example", { getHealth: down }), fake("up.example", { getHealth: healthy }));
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change);
+  const results = await Promise.all(Array.from({ length: 12 }, () => chain.net(() => chain.server.getHealth(), { timeoutMs: 50 })));
+  assert.ok(results.every((r) => r.status === "healthy"));
+  assert.equal(chain.rpcInfo().host, "up.example");
+  assert.equal(changes.length, 1);
+});

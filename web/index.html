@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
+    <div class="progress" aria-hidden="true"></div>
     <a class="skip" href="#main" data-i18n>Skip to content</a>
     <header class="top">
       <div class="wrap top-inner">
@@ -27,9 +28,9 @@
           <button type="button" class="face-btn" data-face="terminal" aria-pressed="false" title="Dense keyboard view for desk users" data-i18n data-i18n-attr="title">Terminal</button>
         </div>
         <div class="face-switch lang-switch" role="group" aria-label="Language" data-i18n-attr="aria-label">
-          <button type="button" class="face-btn lang-btn" data-lang="en" lang="en" title="English" aria-pressed="true">EN</button>
-          <button type="button" class="face-btn lang-btn" data-lang="fr" lang="fr" title="Français" aria-pressed="false">FR</button>
-          <button type="button" class="face-btn lang-btn" data-lang="es" lang="es" title="Español" aria-pressed="false">ES</button>
+          <button type="button" class="face-btn lang-btn" data-lang="en" lang="en" title="English" aria-pressed="true"><svg class="flag" viewBox="0 0 60 30" aria-hidden="true" focusable="false"><clipPath id="flag-gb-a"><path d="M0 0v30h60V0z"/></clipPath><clipPath id="flag-gb-b"><path d="M30 15h30v15zv15H0zH0V0zV0h30z"/></clipPath><g clip-path="url(#flag-gb-a)"><path d="M0 0v30h60V0z" fill="#012169"/><path d="M0 0l60 30m0-30L0 30" stroke="#fff" stroke-width="6"/><path d="M0 0l60 30m0-30L0 30" clip-path="url(#flag-gb-b)" stroke="#C8102E" stroke-width="4"/><path d="M30 0v30M0 15h60" stroke="#fff" stroke-width="10"/><path d="M30 0v30M0 15h60" stroke="#C8102E" stroke-width="6"/></g></svg><span class="lang-code">EN</span></button>
+          <button type="button" class="face-btn lang-btn" data-lang="fr" lang="fr" title="Français" aria-pressed="false"><svg class="flag" viewBox="0 0 3 2" aria-hidden="true" focusable="false"><path fill="#ED2939" d="M0 0h3v2H0z"/><path fill="#fff" d="M0 0h2v2H0z"/><path fill="#002395" d="M0 0h1v2H0z"/></svg><span class="lang-code">FR</span></button>
+          <button type="button" class="face-btn lang-btn" data-lang="es" lang="es" title="Español" aria-pressed="false"><svg class="flag" viewBox="0 0 750 500" aria-hidden="true" focusable="false"><path fill="#c60b1e" d="M0 0h750v500H0z"/><path fill="#ffc400" d="M0 125h750v250H0z"/></svg><span class="lang-code">ES</span></button>
         </div>
         <nav class="nav" aria-label="Sections" data-i18n-attr="aria-label">
           <a href="#guide" data-i18n>How it works</a>
@@ -47,11 +48,16 @@
 
     <main id="main" class="wrap">
       <section class="intro">
+        <p class="eyebrow" data-i18n>Stellar testnet · tokenized fund shares · euro stablecoins</p>
         <h1 data-i18n>Borrow against fund shares, at any hour.</h1>
         <p data-i18n>
           Lock tokenized money market fund shares, receive stablecoins in one transaction, and buy the shares back when
           you are done. Interest runs per started hour. Testnet only: nothing here has real value.
         </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary btn-lg" href="#guide" data-i18n>See how it works</a>
+          <button type="button" class="btn btn-ghost btn-lg" data-goto-face="terminal" data-i18n>Open the terminal</button>
+        </div>
       </section>
 
       <div class="notice" id="load-error" role="alert" hidden></div>
@@ -80,7 +86,12 @@
             <button type="button" class="btn btn-ghost btn-small" id="refresh" data-i18n>Refresh</button>
           </div>
         </div>
-        <div class="tiles" id="tiles" aria-live="off"></div>
+        <div class="tiles" id="tiles" aria-live="off">
+          <div class="tile" aria-hidden="true"><span class="skeleton sk-line sk-short"></span><span class="skeleton sk-value"></span><span class="skeleton sk-line"></span></div>
+          <div class="tile" aria-hidden="true"><span class="skeleton sk-line sk-short"></span><span class="skeleton sk-value"></span><span class="skeleton sk-line"></span></div>
+          <div class="tile" aria-hidden="true"><span class="skeleton sk-line sk-short"></span><span class="skeleton sk-value"></span><span class="skeleton sk-line"></span></div>
+          <div class="tile" aria-hidden="true"><span class="skeleton sk-line sk-short"></span><span class="skeleton sk-value"></span><span class="skeleton sk-line"></span></div>
+        </div>
         <div id="funds"></div>
 
         <form class="quote" id="quote-form" novalidate>

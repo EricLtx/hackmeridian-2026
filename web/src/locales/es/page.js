@@ -65,4 +65,7 @@ export default {
     "Todos los eventos que emitió el contrato, conservados en un diario de solo adición con una cadena de hashes, más allá de los pocos días que guarda el RPC público. Los repos se reconstruyen solo a partir de los eventos. El diario lo produce el indexador del repositorio (<code>indexer/</code>); esta página lee su exportación.",
   "Journal": "Diario",
   "Latest events": "Últimos eventos",
+  "Stellar testnet · tokenized fund shares · euro stablecoins": "Testnet de Stellar · participaciones de fondos tokenizadas · stablecoins en euros",
+  "See how it works": "Ver cómo funciona",
+  "Open the terminal": "Abrir el terminal",
 };

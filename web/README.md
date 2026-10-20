@@ -39,6 +39,12 @@ What each panel reads:
 
 The view uses no animation, keeps numbers in a monospaced font aligned right, and stays usable at phone width, where the panels stack and the GO and CANCEL keys replace Enter and Esc.
 
+## Design and motion
+
+A clean visual system: light grey page, white cards with large radii, one blue accent, a blue-to-teal gradient kept for small accents (the hero line, the progress bar, the capacity bars). Text is set in Inter, served with the page from the `@fontsource-variable/inter` package (OFL), so no font is fetched from a third party and the page looks the same on every system; the terminal keeps the system's monospaced font for its figures. The terminal view is a dark market screen whatever the system theme; the guided view follows the system's light or dark setting. The language switch shows flags drawn in SVG, since Windows has no flag emoji.
+
+Motion is short and eased, and stops entirely when the system asks for reduced motion (`src/motion.js`): cards and panels rise in turn on arrival; the view and language switches cross-fade (View Transitions where the browser has them) and their segmented controls slide a thumb under the pressed key; a figure that moves flashes green when it rises and red when it falls, like a market screen (every value marked `data-k`, compared by `setHTML` before and after each render); new events slide into the tape; a new ticket rises and its checks follow one by one; skeletons stand in for figures until the first read lands, with a thin progress bar; a confirmed transaction and an RPC switch also say so in a toast.
+
 ## Languages
 
 Both views and the History page are available in English, French and Spanish. The EN, FR and ES keys in the header switch the language at once, without reading the chain again; in the terminal, `LANG FR` does the same. The page opens in the language of the link (`?lang=fr`), else the one chosen last on the device, else the browser's, else English. A link shared for a demo can therefore fix the language: `?view=terminal&lang=en`.

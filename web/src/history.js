@@ -4,8 +4,11 @@
 // chain: everything comes from the journal. A language switch re-renders
 // from the export already loaded.
 
+// Inter, served with the page (no font request to a third party).
+import "@fontsource-variable/inter";
 import { formatAmount, formatRate, shortAddress } from "./format.js";
 import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
+import { initMotion, setLoading, transition } from "./motion.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) =>
@@ -170,11 +173,13 @@ function wireLanguage() {
   document.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-lang]");
     if (!button) return;
-    setLang(button.dataset.lang);
-    persistLang();
-    applyStatic();
-    markLangButtons();
-    render();
+    transition(() => {
+      setLang(button.dataset.lang);
+      persistLang();
+      applyStatic();
+      markLangButtons();
+      render();
+    });
   });
 }
 
@@ -188,6 +193,8 @@ async function main() {
   bootLang();
   applyStatic();
   markLangButtons();
+  initMotion();
+  setLoading(true);
   wireLanguage();
   try {
     const dep = await loadJson("deployment.testnet.json");
@@ -203,6 +210,7 @@ async function main() {
     view.error = error;
   }
   render();
+  setLoading(false);
 }
 
 main();

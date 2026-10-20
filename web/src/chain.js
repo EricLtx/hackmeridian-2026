@@ -197,15 +197,22 @@ export class Chain {
     return { host: endpoint.host, url: endpoint.url, ms: endpoint.lastMs, index: this.active, count: this.endpoints.length };
   }
 
-  /** Moves to the next endpoint after a timeout or a network failure. False when there is no other endpoint or the error is not the network's. */
-  failover(error) {
+  /**
+   * Moves to the next endpoint after a timeout or a network failure of a call
+   * made on endpoint `from`. Many calls run at once: only the first failure
+   * on the endpoint in use switches; the others find the switch done and
+   * retry on the new endpoint, so the interface never bounces between them.
+   * False when there is no other endpoint or the error is not the network's.
+   */
+  failover(error, from = this.active) {
     if (this.endpoints.length < 2) return false;
     if (!(error instanceof RpcTimeout) && !isTransient(error)) return false;
-    const from = this.endpoints[this.active];
-    from.failures += 1;
+    if (from !== this.active) return true;
+    const previous = this.endpoints[this.active];
+    previous.failures += 1;
     this.active = (this.active + 1) % this.endpoints.length;
     try {
-      this.onRpcChange?.({ from: from.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
+      this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
     } catch {
       // A failing listener never stops a call.
     }
@@ -220,7 +227,8 @@ export class Chain {
   async net(call, { timeoutMs = RPC_TIMEOUT_MS, attempts = 4 } = {}) {
     let delay = 800;
     for (let attempt = 1; ; attempt += 1) {
-      const endpoint = this.endpoints[this.active];
+      const index = this.active;
+      const endpoint = this.endpoints[index];
       const started = Date.now();
       try {
         const result = await withTimeout(call(), timeoutMs);
@@ -229,7 +237,7 @@ export class Chain {
         return result;
       } catch (error) {
         if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
-        if (!this.failover(error)) {
+        if (!this.failover(error, index)) {
           await sleep(delay);
           delay *= 2;
         }
@@ -557,12 +565,13 @@ export class Chain {
     for (;;) {
       onStatus({ stage: "submitting", text: t("Sending to the network."), hash });
       let sent = null;
+      const via = this.active;
       try {
         sent = await withTimeout(this.server.sendTransaction(tx), SEND_TIMEOUT_MS);
       } catch (error) {
         // Lost or late response: the transaction may be queued. The lookup settles it, and the next
         // send goes to the other endpoint; the same signed transaction cannot apply twice.
-        this.failover(error);
+        this.failover(error, via);
       }
       if (sent?.status === "PENDING" || sent?.status === "DUPLICATE") break;
       const known = await this.lookup(hash);

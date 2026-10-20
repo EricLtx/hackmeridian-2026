@@ -2,6 +2,8 @@
 // actions for a connected Freighter wallet. All chain access goes through
 // chain.js; this file only renders and wires events.
 
+// Inter, served with the page (no font request to a third party).
+import "@fontsource-variable/inter";
 import { Chain } from "./chain.js";
 import { describeError } from "./errors.js";
 import {
@@ -33,6 +35,7 @@ import { eventsOfRepo, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 import { applyStatic, bootLang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
+import { flashChanges, initMotion, setLoading, snapshot, toast, transition } from "./motion.js";
 
 const REFRESH_MS = 15_000;
 const REMEMBER_KEY = "openwindow.connect";
@@ -105,11 +108,16 @@ const terminal = createTerminal({
   setLanguage: (choice) => setLanguage(choice),
 });
 
-/** Replaces an element's markup only when it changed, so focus and selection survive refreshes. */
+/**
+ * Replaces an element's markup only when it changed, so focus and selection
+ * survive refreshes. Figures marked data-k flash when they move (motion.js).
+ */
 function setHTML(el, html) {
   if (el._html === html) return;
+  const before = el._html === undefined ? null : snapshot(el);
   el._html = html;
   el.innerHTML = html;
+  flashChanges(el, before);
 }
 
 const link = (href, text) => `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>`;
@@ -168,7 +176,10 @@ async function runTx(el, context, action, message) {
   const track = tracker(el);
   try {
     const result = await action((status) => track.update(status));
-    if (result?.hash) track.success(message(result), result);
+    if (result?.hash) {
+      track.success(message(result), result);
+      toast(message(result), { tone: "ok" });
+    }
     else track.note(message(result));
   } catch (error) {
     console.error(error);
@@ -185,7 +196,7 @@ async function runTx(el, context, action, message) {
 // ---------------------------------------------------------------------------
 
 function tile(label, value, sub = "", tone = "") {
-  return `<div class="tile ${tone}"><p class="tile-label">${label}</p><p class="tile-value">${value}</p><p class="tile-sub">${sub}</p></div>`;
+  return `<div class="tile ${tone}"><p class="tile-label">${label}</p><p class="tile-value" data-k="tile:${label}">${value}</p><p class="tile-sub">${sub}</p></div>`;
 }
 
 const errorLine = (result, context) => {
@@ -727,7 +738,7 @@ function updateBorrowForm() {
     const term = Math.min(hours, maxHours || hours) * HOUR;
     const atTerm = interest(principal, offer.rate_bps, term);
     const row = (label, value, strong = false) =>
-      `<div><dt>${esc(label)}</dt><dd class="num">${strong ? `<strong>${esc(value)}</strong>` : esc(value)}</dd></div>`;
+      `<div><dt>${esc(label)}</dt><dd class="num" data-k="preview:${esc(label)}">${strong ? `<strong>${esc(value)}</strong>` : esc(value)}</dd></div>`;
     preview.push(
       row(t("Rate"), t("{rate} a year, offer #{id}", { rate: formatRate(offer.rate_bps), id: offer.id })),
       row(t("Interest for the first hour"), exact(interest(principal, offer.rate_bps, HOUR))),
@@ -1276,8 +1287,12 @@ function wire() {
     if (target.id === "connect") return connect();
     if (target.id === "disconnect") return disconnect();
     if (target.id === "refresh") return refreshAll();
-    if (target.dataset.face) return setFace(target.dataset.face);
-    if (target.dataset.lang) return setLanguage(target.dataset.lang);
+    if (target.dataset.face) return transition(() => setFace(target.dataset.face));
+    if (target.dataset.gotoFace) {
+      window.scrollTo({ top: 0 });
+      return transition(() => setFace(target.dataset.gotoFace));
+    }
+    if (target.dataset.lang) return transition(() => setLanguage(target.dataset.lang));
     if (target.dataset.copy !== undefined) {
       try {
         await navigator.clipboard.writeText(target.dataset.copy);
@@ -1410,6 +1425,8 @@ async function start() {
   bootLang();
   applyStatic();
   markLangButtons();
+  initMotion();
+  setLoading(true);
   try {
     const response = await fetch("./deployment.testnet.json", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1417,6 +1434,7 @@ async function start() {
   } catch (error) {
     const box = $("load-error");
     box.hidden = false;
+    setLoading(false);
     box.textContent = t("The deployment file could not be loaded ({reason}). The interface needs deployment.testnet.json next to this page.", {
       reason: error.message,
     });
@@ -1427,6 +1445,7 @@ async function start() {
   S.chain.onRpcChange = (change) => {
     renderFoot();
     terminal.rpcChanged(change);
+    if (S.face !== "terminal") toast(t("The chain is now read through {host}: the first RPC was slow or down.", { host: change.to }), { tone: "warn" });
   };
   // The terminal shows at once and fills as its own reads land; the guided
   // page waits for the instance settings below.
@@ -1447,6 +1466,7 @@ async function start() {
   renderAllWalletViews();
   if (S.face !== "terminal") setFace(initialFace(), { persist: false });
   await refreshAll();
+  setLoading(false);
   setInterval(() => {
     if (!document.hidden) refreshAll();
   }, REFRESH_MS);
