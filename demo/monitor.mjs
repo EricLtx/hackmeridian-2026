@@ -718,9 +718,11 @@ async function perform(action, s) {
     }
     case "release": {
       // The simulation said it would deliver; a refusal since then is logged
-      // and the position goes back to waiting, warned about once.
+      // and the position goes back to waiting, warned about once. The
+      // delivery writes the holder's balance or trustline: that holder may be
+      // in the footprint, though the call does not name it (TOOL-9).
       try {
-        const r = await invoke(state, keeperRole(), C.openWindow, "release", [sv.u64(action.repoId)]);
+        const r = await invoke(state, keeperRole(), C.openWindow, "release", [sv.u64(action.repoId)], { extraAddresses: action.to ? [action.to] : [] });
         console.log(`  ACTION   ${keeperRole()} released the shares of repo #${action.repoId} in ${r.seconds.toFixed(1)} s (${r.value ? "delivered" : "still refused"})  ${explorer(r.hash)}`);
         return r.value ? "release" : null;
       } catch (error) {

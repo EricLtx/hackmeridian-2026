@@ -289,3 +289,19 @@ test("a deployment token's transfer into Open Window by its signer is signed; el
   await lib.invoke(deployment, "lender", OW, "open_repo", args, { tokens: [FOREIGN] });
   assert.equal(sent.length, 3);
 });
+
+test("a release writes the trustline of a holder it does not name only once the caller declares that holder, who still signs nothing (TOOL-9)", async () => {
+  // Shares of a Stellar Asset Contract delivered to an outside G-address: the simulation writes its trustline.
+  const holder = Keypair.random();
+  const trustline = xdr.LedgerKey.trustline(new xdr.LedgerKeyTrustLine({ accountId: holder.xdrAccountId(), asset: new Asset("tSHARE", roles.steward.publicKey()).toTrustLineXDRObject() }));
+  answer.readWrite = [dataKey(OW, 4), trustline];
+  const release = [lib.sv.u64(4)];
+  await assert.rejects(lib.invoke(deployment, "keeper", OW, "release", release), new RegExp(`writes the trustline of ${holder.publicKey()}, which this call does not touch; nothing signed`));
+  assert.equal(sent.length, 0);
+  await lib.invoke(deployment, "keeper", OW, "release", release, { extraAddresses: [holder.publicKey()] });
+  assert.equal(sent.length, 1);
+  // Declared for the footprint only: an entry asking that holder to sign is still refused.
+  answer.auth = [entryFor(holder.publicKey(), callOf(OW, "release", release))];
+  await assert.rejects(lib.invoke(deployment, "keeper", OW, "release", release, { extraAddresses: [holder.publicKey()] }), /to authorize this call, which does not expect it; nothing signed/);
+  assert.equal(sent.length, 1);
+});

@@ -180,8 +180,9 @@ test("reconciliation: a waiting delivery warns once per reason, then stays silen
     out = at({ status: "Defaulted", deliverable: true, approved: true, to: "GLENDER" });
     assert.deepEqual([out[0].action, out[0].repoId], ["release", 4]);
   }
+  // The keeper's release names the holder it delivers to: that holder's entries may be written (TOOL-9).
   const { actions } = decideActions(out, snap(), {}, {});
-  assert.deepEqual(actions, [{ kind: "release", repoId: 4 }]);
+  assert.deepEqual(actions, [{ kind: "release", repoId: 4, to: "GLENDER" }]);
   // Delivered: forgotten, so a new deferral of the same id warns again.
   run("reconciliation", snap({ releases: [] }), monitor);
   assert.deepEqual(monitor.releaseSeen, {});

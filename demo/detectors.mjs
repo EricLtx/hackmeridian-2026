@@ -274,7 +274,9 @@ export const DETECTORS = {
       const f = s.funds.find((x) => x.shares === String(r.fund)) ?? { label: `fund ${String(r.fund).slice(0, 6)}` };
       const head = `repo #${r.id}: ${units(r.shares, 7, 0)} shares held back`;
       if (reason === "deliverable") {
-        out.push({ threat: "DoS.5", level: "warning", message: `${head} can be delivered now to ${String(r.to).slice(0, 6)}…${tag(s, f)}`, action: "release", repoId: r.id });
+        // `to` goes with the action: the delivery writes that holder's
+        // balance or trustline, which the release call does not name (TOOL-9).
+        out.push({ threat: "DoS.5", level: "warning", message: `${head} can be delivered now to ${String(r.to).slice(0, 6)}…${tag(s, f)}`, action: "release", repoId: r.id, to: String(r.to) });
       } else if (reason === "unapproved") {
         out.push({ threat: "DoS.7", level: "warning", message: `${head}, seized for a lender not approved for the fund: the delivery waits for its approval (rc5)${tag(s, f)}`, action: "the steward approves the lender again, or the lender redirects the release to an approved holder (redirect_release)" });
       } else {
@@ -737,9 +739,10 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
     actions.push({ kind: "refresh_reference", fund: a.fund });
   }
   // A deferred delivery the simulated release says would go through: the
-  // keeper sends it (anyone may). A waiting one is never retried blindly.
+  // keeper sends it (anyone may), to the holder named on record. A waiting
+  // one is never retried blindly.
   for (const a of alerts.filter((x) => x.action === "release" && x.repoId !== undefined)) {
-    actions.push({ kind: "release", repoId: a.repoId });
+    actions.push({ kind: "release", repoId: a.repoId, to: a.to });
   }
   return { actions, alerts: raised };
 }

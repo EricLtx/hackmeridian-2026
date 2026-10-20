@@ -749,10 +749,13 @@ function foreignWrite(key, known) {
  * contracts, of the contracts and accounts it names and of the local roles
  * (balances, trustlines, signature nonces), never contract code; an upload
  * writes only the code it uploads. Restoring a stranger's archived entry is
- * how a simulation makes the payer buy rent it never needed.
+ * how a simulation makes the payer buy rent it never needed. `extra` names
+ * addresses the call writes to without naming them, such as the holder a
+ * `release` delivers to (review finding TOOL-9): their entries may be
+ * written, and they sign nothing.
  */
-export function checkFootprint(state, ready, func, expected, label, tail = NOTHING_SIGNED) {
-  const known = { addresses: new Set(expected) };
+export function checkFootprint(state, ready, func, expected, label, tail = NOTHING_SIGNED, extra = []) {
+  const known = { addresses: new Set([...expected, ...extra]) };
   for (const id of Object.values(state.contracts ?? {})) if (typeof id === "string" && id.startsWith("C")) known.addresses.add(id);
   for (const role of Object.keys(state.keys ?? {})) known.addresses.add(publicKeyOf(state, role));
   // The SDK's hash() returns a Uint8Array: hex through a Buffer.
@@ -850,9 +853,10 @@ async function signAuth(state, entries, expiry) {
  * and ask at most `maxResourceFee` (25 XLM by default). Otherwise it throws
  * and nothing leaves this machine. The entries of the co-signers are signed
  * before the second simulation, which checks them: a refusal after that
- * point says what went out.
+ * point says what went out. `extraAddresses` are addresses whose entries the
+ * call may write without naming them (footprint only: they never sign).
  */
-export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE, tokens = [] } = {}) {
+export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE, tokens = [], extraAddresses = [] } = {}) {
   const begun = Date.now();
   const source = keypair(state, sourceRole);
   let tx = await build(source.publicKey(), operation);
@@ -877,7 +881,7 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
   // The assembled transaction keeps our entries when we signed some, else it
   // takes the simulation's: check what is actually there.
   checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label, { source: source.publicKey(), tail, tokens });
-  checkFootprint(state, ready, func, expected, label, tail);
+  checkFootprint(state, ready, func, expected, label, tail, extraAddresses);
   checkFee(ready, maxResourceFee, label, tail);
   signTx(state, sourceRole, ready);
   const { result, hash: txHash, seconds, fee } = await submit(ready, label);
@@ -897,7 +901,9 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
  * `args` (the steward on record for `propose_fallback`, the trustee for
  * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap;
  * `options.tokens` names a token the state does not list whose transfer
- * into Open Window the call makes (a registered stablecoin).
+ * into Open Window the call makes (a registered stablecoin);
+ * `options.extraAddresses` names addresses the call writes to without
+ * naming them (the holder a `release` delivers to), never signers.
  */
 export function invoke(state, sourceRole, contractId, fn, args = [], options = {}) {
   const operation = Operation.invokeContractFunction({ contract: contractId, function: fn, args });
