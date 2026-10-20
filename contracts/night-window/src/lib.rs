@@ -1981,7 +1981,10 @@ impl OpenWindow {
             .ok_or(Error::ArithmeticOverflow)?;
         storage::set_offer(&env, offer_id, &offer);
         state.outstanding = fund_outstanding;
-        if let Some(next) = oracle::next_reference(&config, &state, &valuation.nav)? {
+        // A newer NAV moves the reference as `refresh_reference` would, and
+        // the move is published the same way (review finding oracle-4).
+        let next_reference = oracle::next_reference(&config, &state, &valuation.nav)?;
+        if let Some(next) = next_reference {
             state.reference_nav = next;
             state.reference_time = valuation.nav.timestamp;
         }
@@ -2015,13 +2018,43 @@ impl OpenWindow {
             borrower,
             offer_id,
             lender: offer.lender,
-            fund,
+            fund: fund.clone(),
             shares,
             principal,
             rate_bps: offer.rate_bps,
             maturity,
         }
         .publish(&env);
+        // The valuation behind the loan, which a lender, the issuer or an
+        // auditor can then evidence from the contract's own trail (review
+        // finding oracle-4, 20 October 2026).
+        let (fx, fx_applied, fx_time) = valuation.fx.map_or((0, 0, 0), |leg| {
+            (
+                leg.rate.price.mantissa(),
+                leg.applied.mantissa(),
+                leg.rate.timestamp,
+            )
+        });
+        RepoValued {
+            repo_id,
+            fund: fund.clone(),
+            nav: valuation.nav.price.mantissa(),
+            nav_time: valuation.nav.timestamp,
+            fx,
+            fx_applied,
+            fx_time,
+            price: valuation.price.mantissa(),
+            haircut_bps: valuation.haircut.get(),
+        }
+        .publish(&env);
+        if next_reference.is_some() {
+            ReferenceUpdated {
+                fund,
+                nav: state.reference_nav,
+                timestamp: state.reference_time,
+            }
+            .publish(&env);
+        }
         Ok(repo_id)
     }
 

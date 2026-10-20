@@ -37,13 +37,6 @@ pub struct Reading {
 #[derive(Clone, Copy, Debug)]
 pub struct FxValuation {
     /// The FX feed's reading, with the fund's FX decimals.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "recorded with each loan from rc5 F6 on; remove this attribute then"
-        )
-    )]
     pub rate: Reading,
     /// The divisor of the NAV: the rate read, or the fund's FX reference when
     /// the rate is below it. Same decimals as the rate.
@@ -56,13 +49,6 @@ pub struct Valuation {
     /// NAV as reported by the NAV oracle, in its own base.
     pub nav: Reading,
     /// The FX leg, for a cross price; `None` for a fund priced directly.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "recorded with each loan from rc5 F6 on; remove this attribute then"
-        )
-    )]
     pub fx: Option<FxValuation>,
     /// Share price in the loan currency.
     pub price: Price,

@@ -2123,6 +2123,131 @@ fn open_moves_shares_in_and_stablecoins_out_in_one_transaction() {
     assert_eq!(f.client.currency_outstanding(&eur(&f.env)), 10_000 * ONE);
 }
 
+/// Review finding oracle-4 (20 October 2026): every opening publishes the
+/// valuation behind the loan right after `RepoOpened`, and an opening that
+/// moves the NAV reference publishes `ReferenceUpdated`, as a refresh does.
+/// A fund priced directly has no FX leg.
+#[test]
+fn opening_a_repo_publishes_its_valuation_and_any_move_of_the_reference() {
+    let (f, offer_id) = ready();
+    let opened = |repo_id: u64, maturity: u64| {
+        RepoOpened {
+            repo_id,
+            borrower: f.borrower.clone(),
+            offer_id,
+            lender: f.lender.clone(),
+            fund: f.shares.clone(),
+            shares: 10_000 * ONE,
+            principal: 10_000 * ONE,
+            rate_bps: RATE_BPS,
+            maturity,
+        }
+        .to_xdr(&f.env, &f.contract_id)
+    };
+    let valued = |repo_id: u64, nav: i128, nav_time: u64| {
+        RepoValued {
+            repo_id,
+            fund: f.shares.clone(),
+            nav,
+            nav_time,
+            fx: 0,
+            fx_applied: 0,
+            fx_time: 0,
+            price: nav,
+            haircut_bps: 200,
+        }
+        .to_xdr(&f.env, &f.contract_id)
+    };
+
+    // The NAV read is the reference's own reading: the reference stays.
+    let first = open(&f, offer_id);
+    assert_eq!(
+        own_events(&f),
+        std::vec![opened(first, T0 + 64 * HOUR), valued(first, NAV_EUR, T0)]
+    );
+
+    // An hour later the feed publishes 1.050001 EUR, below the model path:
+    // the opening moves the reference to it and says so.
+    advance(&f, HOUR);
+    let nav = NAV_EUR + 100_000_000;
+    publish_nav(&f, nav);
+    let second = open(&f, offer_id);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            opened(second, T0 + 65 * HOUR),
+            valued(second, nav, T0 + HOUR),
+            ReferenceUpdated {
+                fund: f.shares.clone(),
+                nav,
+                timestamp: T0 + HOUR
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!(
+        (state.reference_nav, state.reference_time),
+        (nav, T0 + HOUR)
+    );
+
+    // The same reading again: the reference does not move.
+    let third = open(&f, offer_id);
+    assert_eq!(
+        own_events(&f),
+        std::vec![opened(third, T0 + 65 * HOUR), valued(third, nav, T0 + HOUR)]
+    );
+}
+
+/// The same record for a fund priced across currencies: the rate read, the
+/// divisor applied and the rate's time. Below the FX reference the
+/// reference divides the NAV, above it the rate itself (decision S22).
+#[test]
+fn opening_a_cross_priced_repo_publishes_its_fx_leg() {
+    let (f, offer_id, _nav_feed, fx_feed) = cross_fund_at_the_band_limit();
+    let (shares, principal) = (1_000 * ONE, 1_000 * ONE);
+    for (rate, applied) in [
+        (EUR_USD * 9_900 / 10_000, EUR_USD),
+        (EUR_USD * 10_100 / 10_000, EUR_USD * 10_100 / 10_000),
+    ] {
+        // Only the rate is published again: the NAV, read at the time of
+        // the reference, leaves it where it is.
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &T0);
+        let repo_id =
+            f.client
+                .open_repo(&f.borrower, &offer_id, &f.shares, &shares, &principal, &DAY);
+        assert_eq!(
+            own_events(&f),
+            std::vec![
+                RepoOpened {
+                    repo_id,
+                    borrower: f.borrower.clone(),
+                    offer_id,
+                    lender: f.lender.clone(),
+                    fund: f.shares.clone(),
+                    shares,
+                    principal,
+                    rate_bps: RATE_BPS,
+                    maturity: T0 + DAY,
+                }
+                .to_xdr(&f.env, &f.contract_id),
+                RepoValued {
+                    repo_id,
+                    fund: f.shares.clone(),
+                    nav: NAV_USD,
+                    nav_time: T0,
+                    fx: rate,
+                    fx_applied: applied,
+                    fx_time: T0,
+                    price: eur_price_at(applied),
+                    haircut_bps: 250,
+                }
+                .to_xdr(&f.env, &f.contract_id)
+            ]
+        );
+    }
+}
+
 #[test]
 fn open_lends_exactly_the_ceiling_and_not_one_unit_more() {
     let (f, offer_id) = ready();

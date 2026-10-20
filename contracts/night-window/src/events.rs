@@ -485,3 +485,24 @@ pub struct Migrated {
     pub from: u32,
     pub to: u32,
 }
+
+// -- rc5: the valuation behind each loan (review finding oracle-4) ------------
+
+// Published by `open_repo` right after `RepoOpened`: the readings and the
+// price the loan was valued at, so that an opening can be evidenced from the
+// contract's own trail. Plain comments, not doc comments: these would be
+// carried into the WASM.
+#[contractevent]
+pub struct RepoValued {
+    #[topic]
+    pub repo_id: u64,
+    #[topic]
+    pub fund: Address,
+    pub nav: i128,        // NAV read, with the fund's NAV decimals
+    pub nav_time: u64,    // when the NAV feed observed it
+    pub fx: i128,         // rate read, 0 for a fund priced directly
+    pub fx_applied: i128, // divisor of the NAV (decision S22), 0 if direct
+    pub fx_time: u64,     // 0 for a fund priced directly
+    pub price: i128,      // share price in the loan currency, NAV decimals
+    pub haircut_bps: u32, // fund haircut plus FX haircut
+}
