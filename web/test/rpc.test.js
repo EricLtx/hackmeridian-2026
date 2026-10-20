@@ -373,39 +373,53 @@ test("a failing call skips an endpoint that is resting; with every other one res
   assert.equal(two.rpcInfo().host, "b.example");
 });
 
+// A session on virtual time (node:test mock timers, Date and setTimeout): a stand-in endpoint that answers or fails
+// on the network as `alive()` says, and a pass of the page (a height poll, then ten reads) every 15 s.
+const liveServer = (alive) => {
+  const at = () => Math.floor(Date.now() / 1000);
+  const failing = () => {
+    throw new TypeError("Failed to fetch");
+  };
+  return {
+    getHealth: async () => (alive() ? { status: "healthy", latestLedger: 100 + Math.floor(at() / 5), latestLedgerCloseTime: String(at() - 2) } : failing()),
+    simulateTransaction: async () => (alive() ? { ok: true } : failing()),
+  };
+};
+async function drive(chain, seconds, { onTick = () => {} } = {}) {
+  const start = Date.now();
+  const since = () => Math.round((Date.now() - start) / 1000);
+  const moves = [];
+  chain.onRpcChange = (c) => moves.push(`${since()}s:${c.reason}:${c.to}`);
+  const passes = [];
+  const pass = async () => {
+    const at = since();
+    await chain.pollHeights();
+    const results = await Promise.all(Array.from({ length: 10 }, () => chain.net(() => chain.server.simulateTransaction()).then(() => true, () => false)));
+    passes.push({ at, ok: results.filter(Boolean).length, host: chain.rpcInfo().host });
+  };
+  const flush = async () => {
+    for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+  for (let t = 0; t <= seconds * 1000; t += 50) {
+    onTick(t);
+    if (t % 15_000 === 0) pass();
+    mock.timers.tick(50);
+    await flush();
+  }
+  return { moves, passes };
+}
+
 test("an outage of every endpoint: at most two moves in a minute, the reads come back at the first pass after it, and the first endpoint takes them back", async () => {
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_792_500_000_000 });
   try {
     let outage = true;
-    const at = () => Math.floor(Date.now() / 1000);
-    const failing = () => {
-      throw new TypeError("Failed to fetch");
-    };
-    const server = () => ({
-      getHealth: async () => (outage ? failing() : { status: "healthy", latestLedger: 100 + Math.floor(at() / 5), latestLedgerCloseTime: String(at() - 2) }),
-      simulateTransaction: async () => (outage ? failing() : { ok: true }),
+    const chain = chainWith(fake("sdf.example", liveServer(() => !outage)), fake("gfm.example", liveServer(() => !outage)));
+    // The outage lasts 60 s, then both endpoints answer again.
+    const { moves, passes } = await drive(chain, 135, {
+      onTick: (t) => {
+        if (t === 60_000) outage = false;
+      },
     });
-    const chain = chainWith(fake("sdf.example", server()), fake("gfm.example", server()));
-    const start = Date.now();
-    const seconds = () => Math.round((Date.now() - start) / 1000);
-    const moves = [];
-    chain.onRpcChange = (c) => moves.push(`${seconds()}s:${c.reason}:${c.to}`);
-    const passes = [];
-    const pass = async () => {
-      await chain.pollHeights();
-      const results = await Promise.all(Array.from({ length: 10 }, () => chain.net(() => chain.server.simulateTransaction()).then(() => true, () => false)));
-      passes.push({ at: seconds(), ok: results.filter(Boolean).length, host: chain.rpcInfo().host });
-    };
-    const flush = async () => {
-      for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve));
-    };
-    // A pass every 15 s, as the page does; the outage lasts 60 s, then both endpoints answer again.
-    for (let t = 0; t <= 135_000; t += 50) {
-      if (t === 60_000) outage = false;
-      if (t % 15_000 === 0) pass();
-      mock.timers.tick(50);
-      await flush();
-    }
     console.log(`outage: moves ${moves.join(" ")}; passes ${JSON.stringify(passes)}`);
     const during = moves.filter((m) => Number.parseInt(m, 10) < 60);
     assert.ok(during.length <= 2, `moves during the outage: ${moves.join(" ")}`);
@@ -415,6 +429,54 @@ test("an outage of every endpoint: at most two moves in a minute, the reads come
   } finally {
     mock.timers.reset();
   }
+});
+
+test("the fallback dies while the first endpoint rests long: its answered height poll ends the rest for a failing call, and the reads are back within one refresh", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_792_500_000_000 });
+  try {
+    const a = fake("sdf.example", liveServer(() => true));
+    const b = fake("gfm.example", liveServer(() => false));
+    const chain = chainWith(a, b);
+    // The calls are on gfm: sdf was left 10 s ago after its stalls, and its rest has grown to 480 s.
+    chain.active = 1;
+    a.failedAt = Date.now() - 10_000;
+    a.returnedAt = Date.now() - 20_000;
+    a.restMs = 480_000;
+    const { moves, passes } = await drive(chain, 60);
+    console.log(`fallback dead, first endpoint resting 480 s: moves ${moves.join(" ")}; passes ${JSON.stringify(passes)}`);
+    const first = passes.find((p) => p.ok === 10);
+    assert.ok(first && first.at <= 15, `first good pass at ${first?.at} s: ${JSON.stringify(passes)}`);
+    assert.ok(passes.filter((p) => p.ok === 0).length <= 1, "at most one failing pass");
+    assert.deepEqual(moves, ["0s:error:sdf.example"]);
+    assert.equal(passes.at(-1).host, "sdf.example");
+    // A resting endpoint whose poll did not answer is no such target: the calls stay.
+    const dead = chainWith(fake("sdf.example", liveServer(() => false)), fake("gfm.example", liveServer(() => false)));
+    dead.active = 1;
+    dead.endpoints[0].failedAt = Date.now() - 10_000;
+    dead.endpoints[0].restMs = 480_000;
+    const stayed = await drive(dead, 30);
+    assert.deepEqual(stayed.moves, [], "nowhere to go: the calls stay");
+    assert.equal(dead.rpcInfo().host, "gfm.example");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a failure during a stay keeps a doubled rest; only the first failure after a return doubles it", () => {
+  const a = fake("a.example", {});
+  const b = fake("b.example", {});
+  const chain = chainWith(a, b);
+  const now = Date.now();
+  b.failedAt = now; // b rests, and its last poll did not answer
+  a.restMs = 240_000;
+  a.failedAt = now - 100_000;
+  a.returnedAt = now - 5_000; // calls came back to a 5 s ago, within its 240 s rest
+  assert.equal(chain.failover(new RpcTimeout(7000), 0), false, "nowhere to go: stay");
+  assert.equal(a.restMs, 480_000, "the failure soon after the return doubles the rest");
+  assert.equal(chain.failover(new RpcTimeout(7000), 0), false);
+  assert.equal(a.restMs, 480_000, "the next failure of the same stay keeps it");
+  assert.equal(chain.moveCount, 0);
+  assert.equal(restAfterFailure({ restMs: 480_000, failedAt: now - 1_000, returnedAt: now - 5_000 }, now), 480_000);
 });
 
 test("an HTTP 429 is back-pressure on the same endpoint, not a failover", async () => {

@@ -193,12 +193,15 @@ export const TIMEOUT_PAIR_MS = 30_000;
  * rests RETURN_QUIET_MS. An endpoint that fails within its rest period after
  * calls returned to it rests twice as long (60, 120, 240 s... up to
  * MAX_REST_MS); one that served calls quietly for longer starts again from
- * RETURN_QUIET_MS. On 20 October the public endpoint answered its height at
- * once but about 7 % of its calls took 6 to 15 s: a fixed rest returned to
- * it, and left it again, about once a minute.
+ * RETURN_QUIET_MS. A failure after one already recorded since the calls
+ * came (a stay with nowhere to go, `failover`) keeps the rest as it is. On
+ * 20 October the public endpoint answered its height at once but about 7 %
+ * of its calls took 6 to 15 s: a fixed rest returned to it, and left it
+ * again, about once a minute.
  */
 export function restAfterFailure({ restMs, failedAt, returnedAt } = {}, now = Date.now()) {
   const rest = Number.isFinite(restMs) && restMs > 0 ? restMs : RETURN_QUIET_MS;
+  if (Number.isFinite(failedAt) && Number.isFinite(returnedAt) && failedAt > returnedAt) return rest;
   const soon = Number.isFinite(failedAt) && Number.isFinite(returnedAt) && returnedAt >= failedAt && now - returnedAt < rest;
   return soon ? Math.min(rest * 2, MAX_REST_MS) : RETURN_QUIET_MS;
 }
@@ -723,12 +726,14 @@ export class Chain {
     if (limited && !exhausted) return false;
     if (from !== this.active || (since !== undefined && since !== this.moveCount)) return true;
     const now = Date.now();
-    const next = this.nextEndpoint(this.active, now);
+    let next = this.nextEndpoint(this.active, now);
     if (limited && next === null) return false;
     const previous = this.endpoints[this.active];
     previous.failures = (previous.failures ?? 0) + 1;
     previous.restMs = restAfterFailure(previous, now);
     previous.failedAt = now;
+    // Nowhere to go: a resting endpoint whose last height poll answered is still better than one that fails now.
+    if (next === null) next = this.restedAnswering(this.active);
     if (next === null) return false;
     this.moveTo(next, now);
     try {
@@ -738,6 +743,22 @@ export class Chain {
       // A failing listener never stops a call.
     }
     return true;
+  }
+
+  /**
+   * Among the endpoints other than `from`, all resting, the one whose rest
+   * ends soonest among those whose last height poll answered; null when
+   * none did. A healthy poll ends a rest early for this purpose only: the
+   * ordinary return of the calls (`checkHeights`) still waits the rest out.
+   * Without it, a fallback that died while the first endpoint rested long
+   * (rests grow to 480 s) kept the calls until that rest ended.
+   */
+  restedAnswering(from) {
+    const candidates = this.endpoints
+      .map((endpoint, index) => ({ endpoint, index }))
+      .filter(({ endpoint, index }) => index !== from && endpoint.pollOk === true)
+      .sort((x, y) => (x.endpoint.failedAt ?? 0) + (x.endpoint.restMs ?? RETURN_QUIET_MS) - ((y.endpoint.failedAt ?? 0) + (y.endpoint.restMs ?? RETURN_QUIET_MS)));
+    return candidates.length ? candidates[0].index : null;
   }
 
   /** The first endpoint after `from` that is not resting at `now`; null when every other one rests. */
@@ -791,29 +812,37 @@ export class Chain {
   async heights(budgetMs = HEIGHT_BUDGET_MS) {
     return Promise.all(
       this.endpoints.map(async (endpoint, index) => {
-        const until = Date.now() + budgetMs;
-        try {
-          const health = await withTimeout(endpoint.server.getHealth(), budgetMs);
-          endpoint.limitedPolls = 0;
-          if (Number.isSafeInteger(health?.latestLedger)) return heightRead(health.latestLedger, health.latestLedgerCloseTime);
-        } catch (error) {
-          // A 429 to the poll is no answer; RATE_LIMIT_STRIKES of them in a row from the endpoint in use leave it.
-          if (isRateLimited(error)) {
-            endpoint.limitedPolls = (endpoint.limitedPolls ?? 0) + 1;
-            if (index === this.active && rateLimitExhausted(error, endpoint.limitedPolls)) this.failover(error, index, { exhausted: true });
-          }
-          if (error instanceof RpcTimeout || isTransient(error)) return null;
-        }
-        const left = until - Date.now();
-        if (left <= 0) return null;
-        try {
-          const latest = await withTimeout(endpoint.server.getLatestLedger(), left);
-          return heightRead(latest?.sequence, latest?.closeTime);
-        } catch {
-          return null;
-        }
+        const read = await this.readHeight(endpoint, index, budgetMs);
+        // Whether the endpoint's last poll answered: a resting one that does is where calls may go when every other one rests (`failover`).
+        endpoint.pollOk = read !== null;
+        return read;
       }),
     );
+  }
+
+  /** One endpoint's height read for `heights`: `{ height, closeTime }`, or null when it did not answer within `budgetMs`. */
+  async readHeight(endpoint, index, budgetMs) {
+    const until = Date.now() + budgetMs;
+    try {
+      const health = await withTimeout(endpoint.server.getHealth(), budgetMs);
+      endpoint.limitedPolls = 0;
+      if (Number.isSafeInteger(health?.latestLedger)) return heightRead(health.latestLedger, health.latestLedgerCloseTime);
+    } catch (error) {
+      // A 429 to the poll is no answer; RATE_LIMIT_STRIKES of them in a row from the endpoint in use leave it.
+      if (isRateLimited(error)) {
+        endpoint.limitedPolls = (endpoint.limitedPolls ?? 0) + 1;
+        if (index === this.active && rateLimitExhausted(error, endpoint.limitedPolls)) this.failover(error, index, { exhausted: true });
+      }
+      if (error instanceof RpcTimeout || isTransient(error)) return null;
+    }
+    const left = until - Date.now();
+    if (left <= 0) return null;
+    try {
+      const latest = await withTimeout(endpoint.server.getLatestLedger(), left);
+      return heightRead(latest?.sequence, latest?.closeTime);
+    } catch {
+      return null;
+    }
   }
 
   /**
