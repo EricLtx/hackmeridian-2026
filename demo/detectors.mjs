@@ -32,13 +32,16 @@ export const LIMITS = {
   // without a move spans a weekend. A constant-NAV fund publishes the same
   // value by design: set the threshold to Infinity for it (`--nav-frozen-hours=`).
   navFrozenHours: 72,
-  // The keeper pays the rent. Its largest bill is one 30-day slice of the
-  // contract code, and the testnet rate moves: 7.15 XLM a day in the
-  // morning of 20 October 2026, 8.35 to 8.40 XLM a day in the afternoon,
-  // so about 250 XLM a slice for the rc4 code and 257 XLM for rc5's, about
-  // 2 % larger (review finding TOOL-6). 600 XLM covers two slices, the
-  // small entries' extensions and the fees.
-  keeperMinXlm: 600,
+  // The keeper pays the rent. The testnet rate moves: 7.15 XLM a day in the
+  // morning of 20 October 2026, 8.35 to 8.40 XLM a day in the afternoon, so
+  // about 250 XLM for a 30-day slice of the rc4 code and 257 XLM for rc5's,
+  // about 2 % larger (review finding TOOL-6). Its largest bill is an
+  // upgrade run (`npm run upgrade`): the new code's first 30-day slice and
+  // then the slices to 91 days, about 84 days of rent in all, 706 XLM at
+  // 8.40 XLM a day. 800 XLM covers one such run with the rate up to 9.5 XLM
+  // a day, and so the routine two slices, the small entries' extensions and
+  // the fees.
+  keeperMinXlm: 800,
   rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
   // A re-stamped frozen feed is bounded neither by the corridor nor by the
   // band (residual risk of Tamper.6 and Tamper.7). A variable NAV moves every
@@ -565,7 +568,7 @@ export const DETECTORS = {
     if (s.keeperXlm === null) return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} account not readable`, action: "check the account" }];
     const min = monitor.keeperMinXlmOverride ?? limits.keeperMinXlm;
     if (s.keeperXlm >= min) return [];
-    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM, two 30-day extensions of the contract code: one costs about 250 XLM on testnet (8.35 to 8.40 XLM a day on 20 October 2026), and the rate moves`, action: "top up the keeper from treasury" }];
+    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM, the rent of one upgrade run (about 84 days of the contract code, 706 XLM on testnet at 8.40 XLM a day on 20 October 2026) or of two 30-day extensions (about 250 XLM each), and the rate moves`, action: "top up the keeper from treasury" }];
   },
   events(s) {
     // Every repo opened inside the event window must have its repo_opened event (Repud.1).

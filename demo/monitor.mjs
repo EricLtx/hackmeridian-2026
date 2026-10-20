@@ -42,6 +42,7 @@ import {
   ROOT,
   RPC_URLS,
   STATE_DIR,
+  STATE_NAME,
   WASM_DIR,
   activeRpcUrl,
   codeKey,
@@ -72,7 +73,7 @@ import {
 import { FUND_SETTINGS, navAt } from "./config.mjs";
 import { plain } from "../indexer/lib/plain.mjs";
 import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, statusOf } from "./detectors.mjs";
-import { loadMonitor as loadMonitorFile, refreshMonitor as refreshMonitorFile, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
+import { loadMonitor as loadMonitorFile, monitorFileName, refreshMonitor as refreshMonitorFile, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
 
 const args = process.argv.slice(2);
 /** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
@@ -111,8 +112,10 @@ async function heartbeat() {
     console.error(`  (heartbeat not delivered: ${error.message})`);
   }
 }
-// A witness keeps its own state and alert files: it never shares the acting instance's.
-const MONITOR_FILE = path.join(STATE_DIR, WITNESS ? "monitor-witness.json" : "monitor.json");
+// A witness keeps its own state and alert files: it never shares the acting
+// instance's. A disposable instance (OPEN_WINDOW_STATE) has its own too,
+// which `npm run upgrade` names the same way.
+const MONITOR_FILE = path.join(STATE_DIR, WITNESS ? "monitor-witness.json" : monitorFileName(STATE_NAME));
 const ALERT_FILE = path.join(STATE_DIR, WITNESS ? "alerts-witness.jsonl" : "alerts.jsonl");
 /** The indexer's journal (indexer/README.md): the second source for the event trail, when a copy is kept on this machine. `INDEXER_STATE_DIR` points at a copy kept elsewhere (the indexer's `--state <dir>`). */
 const JOURNAL_DIR = process.env.INDEXER_STATE_DIR ?? path.join(ROOT, "indexer", ".state");

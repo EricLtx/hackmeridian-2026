@@ -457,12 +457,18 @@ test("feed-flat: an FX rate flat over 24 business hours warns; a second FX sourc
   assert.deepEqual(compare(null), []);
 });
 
-test("keeper: the float must cover two 30-day slices of the code, about 250 XLM each on testnet (TOOL-6)", () => {
-  assert.equal(LIMITS.keeperMinXlm, 600);
-  assert.deepEqual(run("keeper", snap({ keeperXlm: 600 })), []);
-  // 250 XLM, the old threshold, no longer pays one slice at the rate of 20 October afternoon.
-  const [low] = run("keeper", snap({ keeperXlm: 250 }));
-  assert.match(low.message, /float 250\.0 XLM is below 600 XLM, two 30-day extensions of the contract code: one costs about 250 XLM on testnet \(8\.35 to 8\.40 XLM a day on 20 October 2026\), and the rate moves$/);
+test("keeper: the float must cover one upgrade run, about 84 days of the code's rent at 8.40 XLM a day, and so two 30-day slices (TOOL-6)", () => {
+  assert.equal(LIMITS.keeperMinXlm, 800);
+  // An upgrade run: the first 30-day slice from the upload's 7 days, then 61 days more to 91.
+  const runDays = (30 - 7) + (91 - 30);
+  assert.equal(runDays, 84);
+  assert.ok(LIMITS.keeperMinXlm >= runDays * 8.4, "the run at the measured rate");
+  assert.ok(LIMITS.keeperMinXlm >= runDays * 9.5, "the run with the rate up to 9.5 XLM a day");
+  assert.ok(LIMITS.keeperMinXlm >= 2 * 30 * 8.4, "two routine slices");
+  assert.deepEqual(run("keeper", snap({ keeperXlm: 800 })), []);
+  // 600 XLM, the previous threshold, paid two slices but not a whole upgrade run (950 XLM before the slices were counted from the target, 706 now).
+  const [low] = run("keeper", snap({ keeperXlm: 600 }));
+  assert.match(low.message, /float 600\.0 XLM is below 800 XLM, the rent of one upgrade run \(about 84 days of the contract code, 706 XLM on testnet at 8\.40 XLM a day on 20 October 2026\) or of two 30-day extensions \(about 250 XLM each\), and the rate moves$/);
 });
 
 test("exposure: one opening per pass never warns; more than 20 within the last hour does", () => {

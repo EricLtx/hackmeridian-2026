@@ -164,21 +164,54 @@ test("the new code gets one 30-day slice right after the upload, and slices to 9
   const again = recorder({ executable: "f5".repeat(32), life: 45 });
   await upgrade.propose(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: again });
   assert.equal(again.calls.some(([kind]) => kind === "upload" || kind === "extend"), false);
-  // Apply: after the upgrade, 30-day slices until 90 days or more, never past 120.
+  // Apply: after the upgrade, the slices that reach 91 days, counted once from the target: three of 20.4 days from 29.9, never a fourth.
   const applied = recorder({ pending: { wasm_hash: Buffer.from(sha(SHIPPED), "hex"), eta: 1_000n }, held: sha(SHIPPED), life: 29.9 });
   const lines = [];
   applied.log = (line) => lines.push(line);
   await upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: applied });
-  assert.deepEqual(applied.calls.filter(([kind]) => kind === "extend"), [["extend", sha(SHIPPED), 29.9, 59.9], ["extend", sha(SHIPPED), 59.9, 89.9], ["extend", sha(SHIPPED), 89.9, 119.9]]);
+  assert.deepEqual(applied.calls.filter(([kind]) => kind === "extend"), [["extend", sha(SHIPPED), 29.9, 50.3], ["extend", sha(SHIPPED), 50.3, 70.6], ["extend", sha(SHIPPED), 70.6, 91]]);
   const extendedAfter = applied.calls.findIndex(([kind]) => kind === "extend");
   assert.ok(extendedAfter > applied.calls.findIndex(([kind, , fn]) => kind === "invoke" && fn === "upgrade"), "extended once installed");
-  assert.ok(lines.at(-1).startsWith(`code ${sha(SHIPPED).slice(0, 12)}… has 119.9 days to live (at least 90`), lines.at(-1));
+  assert.ok(lines.at(-1).startsWith(`code ${sha(SHIPPED).slice(0, 12)}… has 91.0 days to live (at least 90`), lines.at(-1));
+});
+
+test("the slices are counted once from the target, 91 days, and never overshoot to 120: an upgrade run rents about 84 days, 706 XLM at 8.40 XLM a day", () => {
+  const rent = (slices, from) => (slices.at(-1) - from) * 8.4;
+  // The default run: the upload's 7 days to 30 before the proposal, then from 30.00 (read a ledger or more later) to 91.
+  assert.deepEqual(upgrade.codeSlices(7, 30), [30]);
+  const afterUpgrade = upgrade.codeSlices(29.9998, 91);
+  assert.equal(afterUpgrade.length, 3);
+  assert.equal(afterUpgrade.at(-1), 91);
+  assert.ok(afterUpgrade.every((d, i) => d - (i ? afterUpgrade[i - 1] : 29.9998) <= 30 + 1e-9), "each slice at most 30 days, under the 400 XLM cap");
+  const total = rent([30], 7) + rent(afterUpgrade, 29.9998);
+  assert.ok(total > 700 && total < 710, `${total.toFixed(1)} XLM, not the 950 of 7 -> 30 -> 60 -> 90 -> 120`);
+  // --apply from 29.99 days: three slices to 91, 61 days of rent; from 89.99, one short slice, not a 30-day one.
+  assert.deepEqual(upgrade.codeSlices(29.99, 91).map((d) => Number(d.toFixed(2))), [50.33, 70.66, 91]);
+  assert.deepEqual(upgrade.codeSlices(89.99, 91), [91]);
+  // At or past the target: nothing to buy. The old loop bought a slice at 89.99.
+  assert.deepEqual(upgrade.codeSlices(91, 91), []);
+  assert.deepEqual(upgrade.codeSlices(100, 91), []);
+  assert.deepEqual(upgrade.codeSlices(null, 91), []);
+  assert.equal(upgrade.CODE_TTL_MARGIN_DAYS, 1);
+});
+
+test("a slice the rent made shorter is followed by one more round of counting, never an endless one", async () => {
+  // The recorder's extension grants only half of what is asked, as a fallback under the fee cap would.
+  const io = recorder({ executable: sha(SHIPPED), life: 60 });
+  io.extendCode = async (hex, fromDays, toDays) => {
+    io.calls.push(["extend", Number(fromDays.toFixed(1)), Number(toDays.toFixed(1))]);
+    const granted = fromDays + (toDays - fromDays) / 2;
+    io.codeLife = async () => granted;
+    return { days: granted, fee: 1n, seconds: 1, hash: "cd".repeat(32) };
+  };
+  await assert.rejects(upgrade.keepCodeAlive(io, sha(SHIPPED)), /still has .* days to live after two rounds of extensions/);
+  assert.deepEqual(io.calls.filter(([kind]) => kind === "extend"), [["extend", 60, 75.5], ["extend", 67.8, 91], ["extend", 79.4, 91]]);
 });
 
 test("--restore-code restores exactly the instance's own archived code, then extends it; a live code is only extended (TOOL-4)", async () => {
   const archived = recorder({ executable: sha(SHIPPED), life: null });
   assert.ok((await upgrade.restoreCode(state, { io: archived })) >= 90);
-  assert.deepEqual(archived.calls, [["executable"], ["restore", sha(SHIPPED)], ["extend", sha(SHIPPED), 7, 37], ["extend", sha(SHIPPED), 37, 67], ["extend", sha(SHIPPED), 67, 97]]);
+  assert.deepEqual(archived.calls, [["executable"], ["restore", sha(SHIPPED)], ["extend", sha(SHIPPED), 7, 35], ["extend", sha(SHIPPED), 35, 63], ["extend", sha(SHIPPED), 63, 91]]);
   const live = recorder({ executable: sha(SHIPPED), life: 100 });
   assert.equal(await upgrade.restoreCode(state, { io: live }), 100);
   assert.deepEqual(live.calls, [["executable"]]);

@@ -19,6 +19,15 @@ import path from "node:path";
 /** The lists of planned changes the monitor reports instead of answering: other processes add to them, the watch never removes from them. */
 export const ANNOUNCEMENTS = ["announced", "announcedStablecoins", "announcedAdmins", "announcedGuardians"];
 
+/**
+ * The name of the state file of the instance `stateName` (`OPEN_WINDOW_STATE`,
+ * `testnet` by default), in demo/.state/: `monitor.json` for the demo
+ * instance, `monitor-<name>.json` for a disposable one, so that a rehearsal
+ * or an offline run never writes into the demo instance's file. Every writer
+ * (the watch, `npm run upgrade`) names it this way.
+ */
+export const monitorFileName = (stateName) => (stateName === "testnet" ? "monitor.json" : `monitor-${stateName}.json`);
+
 /** The file's content, or null when it is missing or unreadable. */
 export function readMonitorFile(file) {
   try {

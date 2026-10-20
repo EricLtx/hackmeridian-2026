@@ -20,10 +20,13 @@
 // The code entry is kept alive (review finding TOOL-4): the upload leaves it
 // at the network's minimum time to live (7 days on testnet), so it is
 // extended by one 30-day slice right after the upload, and after the
-// upgrade in 30-day slices until it has the 90 days the monitor keeps. Once
+// upgrade in slices of at most 30 days, counted once from the 90 days the
+// monitor keeps plus a day of margin, so that the run buys 91 days of life
+// and not a slice more: about 84 days of rent in all, 706 XLM at 8.40 XLM a
+// day (20 October 2026), paid by the keeper (the operator without one). Once
 // archived, every invocation would need a restore of the code, which the
 // footprint rule of the tooling refuses: `--restore-code` restores exactly
-// that entry, under its own cap. The keeper pays (the operator without one).
+// that entry, under its own cap.
 //
 // Exits never wait for the migration: the contract keeps repurchase, seizure
 // and release open between `upgrade` and `migrate` (decision S6). New offers
@@ -38,6 +41,7 @@ import {
   CODE_SLICE_MAX_FEE,
   Operation,
   STATE_DIR,
+  STATE_NAME,
   UPLOAD_MAX_FEE,
   WASM_DIR,
   checkUpgradeWasm,
@@ -56,9 +60,10 @@ import {
   sv,
 } from "./lib.mjs";
 import { CODE_MAX_DAYS, CODE_STEP_DAYS, LEDGER_SECS, LIMITS } from "./detectors.mjs";
-import { acknowledgeUpgrade, announceUpgrade } from "./monitor-state.mjs";
+import { acknowledgeUpgrade, announceUpgrade, monitorFileName } from "./monitor-state.mjs";
 
-const MONITOR_FILE = path.join(STATE_DIR, "monitor.json");
+// The file the monitor's watch of this instance reads (monitor.mjs names it the same way).
+const MONITOR_FILE = path.join(STATE_DIR, monitorFileName(STATE_NAME));
 
 /** The WASM hash the ledger holds as the executable of `contractId`. */
 async function executableHash(contractId) {
@@ -196,19 +201,51 @@ export async function apply(state, { wasm, expect, env = process.env, io = chain
 }
 
 /**
- * Extends the code entry `hex` in 30-day slices until it has at least
- * `LIMITS.codeTtlDays` (90) to live, the policy the monitor keeps, then
- * prints its time to live and returns it in days (TOOL-4).
+ * Days of margin above `LIMITS.codeTtlDays` the run aims at: each slice is
+ * read back a ledger or more later, so a run aimed at exactly 90 days would
+ * read 89.99 and buy a whole slice more.
+ */
+export const CODE_TTL_MARGIN_DAYS = 1;
+
+/**
+ * The lives, in days, the slices that take a code entry from `life` days to
+ * at least `target` aim at: the fewest slices of at most `step` days, equal
+ * sized, counted once from the target. From 30 days to 91, three slices of
+ * 20.33 days (61 days of rent); from 7 days, three of 28. A code already at
+ * the target gets none. Pure, for the tests.
+ */
+export function codeSlices(life, target, step = CODE_STEP_DAYS) {
+  if (!Number.isFinite(life)) return [];
+  const need = target - life;
+  if (!(need > 0)) return [];
+  const count = Math.ceil(need / step);
+  return Array.from({ length: count }, (_, i) => (i === count - 1 ? target : life + (need * (i + 1)) / count));
+}
+
+/**
+ * Extends the code entry `hex` until it has at least `LIMITS.codeTtlDays`
+ * (90) to live, the policy the monitor keeps, then prints its time to live
+ * and returns it in days (TOOL-4). The slices are counted once from the
+ * target plus `CODE_TTL_MARGIN_DAYS`, so the run never buys a slice past
+ * it: an upgrade costs the rent of about 84 days, not of 113. A slice the
+ * rent made shorter (`extendCode` falls back under its cap) is followed by
+ * one more round of counting, never an endless one.
  */
 export async function keepCodeAlive(io, hex) {
   let life = await io.codeLife(hex);
   if (life === null) throw new Error(`the code ${hex.slice(0, 12)}… is archived or missing: npm run upgrade -- --restore-code`);
-  while (life < LIMITS.codeTtlDays) {
-    const r = await io.extendCode(hex, life, Math.min(life + CODE_STEP_DAYS, CODE_MAX_DAYS));
-    const before = life;
-    life = await io.codeLife(hex);
-    if (life === null || life <= before) throw new Error(`the code ${hex.slice(0, 12)}… did not gain a day of life from its extension; extend it by hand`);
-    io.log(`  code extended to ${life.toFixed(1)} days${r.fee == null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`}`);
+  const target = Math.min(LIMITS.codeTtlDays + CODE_TTL_MARGIN_DAYS, CODE_MAX_DAYS);
+  for (let round = 0; life < LIMITS.codeTtlDays; round += 1) {
+    if (round === 2) throw new Error(`the code ${hex.slice(0, 12)}… still has ${life.toFixed(1)} days to live after two rounds of extensions; the rent moves faster than the slices: extend it by hand`);
+    const plan = codeSlices(life, target);
+    io.log(`  ${plan.length} slice${plan.length === 1 ? "" : "s"} to ${target} days: ${plan.map((d) => d.toFixed(1)).join(", ")}`);
+    for (const toDays of plan) {
+      const r = await io.extendCode(hex, life, toDays);
+      const before = life;
+      life = await io.codeLife(hex);
+      if (life === null || life <= before) throw new Error(`the code ${hex.slice(0, 12)}… did not gain a day of life from its extension; extend it by hand`);
+      io.log(`  code extended to ${life.toFixed(1)} days${r.fee == null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`}`);
+    }
   }
   io.log(`code ${hex.slice(0, 12)}… has ${life.toFixed(1)} days to live (at least ${LIMITS.codeTtlDays}: the monitor's keeper extends it from there)`);
   return life;
