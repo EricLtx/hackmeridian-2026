@@ -241,6 +241,39 @@ async function readFund(f) {
   return { ...base, nav, stewardBackup, priceError, fxLeg, fx: fx ?? null };
 }
 
+/**
+ * A deferred delivery and why it waits. The simulated `release` (anyone may
+ * call it) says whether it would deliver now; for a seized position the
+ * lender's approval says whether it waits for that approval (rc5, F1)
+ * rather than for the token.
+ */
+async function describeRelease(repo, pending) {
+  const position = { id: repo.id, ...pending, status: statusOf(repo) };
+  position.deliverable = await read(state, C.openWindow, "release", [sv.u64(repo.id)]).catch(() => undefined);
+  if (position.status === "Defaulted") {
+    position.approved = await read(state, C.openWindow, "is_lender_approved", [sv.address(String(pending.fund)), sv.address(String(pending.to))]).catch(() => undefined);
+  }
+  return position;
+}
+
+/** The stablecoins this deployment knows and the offers hold, with the contract's balance in each (invariant I1). */
+async function readStablecoins(offers) {
+  const names = { [C.euro]: "tEUR", [C.euro2]: "tEURB" };
+  const tokens = [...new Set([C.euro, C.euro2, ...offers.map((o) => String(o.stablecoin))].filter(Boolean))];
+  return Promise.all(
+    tokens.map(async (token) => {
+      const owed = offers.filter((o) => String(o.stablecoin) === token).reduce((sum, o) => sum + BigInt(o.available), 0n);
+      const coin = { token, label: names[token] ?? `${token.slice(0, 6)}…`, owed };
+      try {
+        coin.held = BigInt(await read(state, token, "balance", [sv.address(C.openWindow)]));
+      } catch (error) {
+        coin.error = firstLine(error);
+      }
+      return coin;
+    }),
+  );
+}
+
 async function snapshot(monitor) {
   const now = await ledgerTime();
   const [paused, repos, offers] = await Promise.all([
@@ -281,9 +314,10 @@ async function snapshot(monitor) {
   const releases = [];
   for (const r of repos.filter((x) => statusOf(x) !== "Open")) {
     const pending = await read(state, C.openWindow, "pending_release", [sv.u64(r.id)]);
-    if (pending) releases.push({ id: r.id, ...pending });
+    if (pending) releases.push(await describeRelease(r, pending));
   }
   const liveOffers = offers.filter((o) => BigInt(o.available) > 0n);
+  const stablecoins = await readStablecoins(offers);
   const keyed = [
     ["contract instance", storageKey(C.openWindow)],
     ...funds.flatMap((f) => [
@@ -327,7 +361,7 @@ async function snapshot(monitor) {
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel };
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, releases, stablecoins, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel };
 }
 
 async function pass(monitor, { quiet = false } = {}) {
@@ -416,6 +450,18 @@ async function perform(action, s) {
         return "refresh reference";
       } catch (error) {
         console.log(`  ACTION   refresh_reference${label} refused: ${error.message}`);
+        return null;
+      }
+    }
+    case "release": {
+      // The simulation said it would deliver; a refusal since then is logged
+      // and the position goes back to waiting, warned about once.
+      try {
+        const r = await invoke(state, keeperRole(), C.openWindow, "release", [sv.u64(action.repoId)]);
+        console.log(`  ACTION   ${keeperRole()} released the shares of repo #${action.repoId} in ${r.seconds.toFixed(1)} s (${r.value ? "delivered" : "still refused"})  ${explorer(r.hash)}`);
+        return r.value ? "release" : null;
+      } catch (error) {
+        console.log(`  ACTION   release of repo #${action.repoId} refused: ${error.message}`);
         return null;
       }
     }

@@ -128,12 +128,63 @@ test("reconciliation: a balanced fund raises nothing", () => {
   assert.deepEqual(run("reconciliation", s).filter((a) => /units apart/.test(a.message)), []);
 });
 
-test("reconciliation: shares held back by the token are critical, and so is any I2 gap", () => {
-  const s = snap({ funds: [fund("fund 1", "CF1", { held: 31n })], openRepos: [repo(1, "CF1", 20)], releases: [{ id: 2, fund: "CF1", to: "GB", shares: 10n }] });
-  const out = run("reconciliation", s);
-  assert.deepEqual(out.map((a) => [a.level, a.action]), [["critical", "contact the issuer, then release"], ["critical", "pause"]]);
-  assert.match(out[0].message, /held back/);
-  assert.match(out[1].message, /1 units apart/);
+test("reconciliation: a share deficit is critical and pauses; a surplus is a warning with its size (econ-4)", () => {
+  const at = (held) => run("reconciliation", snap({ funds: [fund("fund 1", "CF1", { held })], openRepos: [repo(1, "CF1", 20)] }));
+  const [short] = at(19n);
+  assert.deepEqual([short.level, short.action, short.fund], ["critical", "pause", "CF1"]);
+  assert.match(short.message, /: 1 units apart, shares missing \(invariant I2\)$/);
+  // One donated unit, or shares paid in kind: no function can move them out.
+  const [surplus] = at(21n);
+  assert.equal(surplus.level, "warning");
+  assert.notEqual(surplus.action, "pause");
+  assert.match(surplus.message, /: 1 units apart, a surplus no function can move out/);
+  assert.deepEqual(at(20n), []);
+  const pause = decideActions([surplus], snap(), {}, { actor: "sentinel" }).actions;
+  assert.deepEqual(pause, []);
+  // A surplus lasts: warned when it appears or changes size, not every pass.
+  const monitor = {};
+  const pass = (held) => run("reconciliation", snap({ funds: [fund("fund 1", "CF1", { held })], openRepos: [repo(1, "CF1", 20)] }), monitor);
+  assert.equal(pass(21n).length, 1);
+  assert.equal(pass(21n).length, 0);
+  assert.equal(pass(22n).length, 1);
+  assert.equal(pass(20n).length, 0);
+  assert.equal(pass(21n).length, 1);
+});
+
+test("reconciliation: a stablecoin short of its offers is critical; a surplus is a warning (I1)", () => {
+  const coin = (held, owed) => run("reconciliation", snap({ stablecoins: [{ token: "CEUR", label: "tEUR", held, owed }] }));
+  const [short] = coin(99n, 100n);
+  assert.deepEqual([short.level, short.action, short.threat], ["critical", "pause", "DoS.8"]);
+  assert.match(short.message, /^tEUR: .*1 units short \(invariant I1\)$/);
+  const [extra] = coin(101n, 100n);
+  assert.equal(extra.level, "warning");
+  assert.deepEqual(coin(100n, 100n), []);
+  assert.equal(run("reconciliation", snap({ stablecoins: [{ token: "CX", label: "CX…", owed: 0n, error: "no such function" }] }))[0].level, "warning");
+});
+
+test("reconciliation: a waiting delivery warns once per reason, then stays silent until it changes (release keeper)", () => {
+  const monitor = {};
+  const at = (position) => run("reconciliation", snap({ funds: [fund("fund 1", "CF1", { held: 10n })], releases: [{ id: 4, fund: "CF1", to: "GBORROWER", shares: 10n, ...position }] }), monitor);
+  // The token refuses: one warning, then nothing while nothing changes.
+  let out = at({ status: "Repurchased", deliverable: false });
+  assert.deepEqual(out.map((a) => a.level), ["warning"]);
+  assert.match(out[0].message, /held back, the share token refuses the transfer/);
+  assert.deepEqual(at({ status: "Repurchased", deliverable: false }), []);
+  // A seized position whose lender is no longer approved names that reason (rc5).
+  out = at({ status: "Defaulted", deliverable: false, approved: false, to: "GLENDER" });
+  assert.match(out[0].message, /seized for a lender not approved for the fund/);
+  assert.equal(out[0].threat, "DoS.7");
+  assert.deepEqual(at({ status: "Defaulted", deliverable: false, approved: false, to: "GLENDER" }), []);
+  // Deliverable: listed every pass until released, with the keeper's action.
+  for (let pass = 0; pass < 2; pass += 1) {
+    out = at({ status: "Defaulted", deliverable: true, approved: true, to: "GLENDER" });
+    assert.deepEqual([out[0].action, out[0].repoId], ["release", 4]);
+  }
+  const { actions } = decideActions(out, snap(), {}, {});
+  assert.deepEqual(actions, [{ kind: "release", repoId: 4 }]);
+  // Delivered: forgotten, so a new deferral of the same id warns again.
+  run("reconciliation", snap({ releases: [] }), monitor);
+  assert.deepEqual(monitor.releaseSeen, {});
 });
 
 test("journal: an RPC event the journal covers but lacks warns; one it does not cover yet waits", () => {

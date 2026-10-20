@@ -180,26 +180,78 @@ export const DETECTORS = {
     }
     return out;
   },
-  reconciliation(s) {
-    // Invariant I2 (v3), per fund: shares held = shares of open repos + shares awaiting release.
+  reconciliation(s, monitor) {
+    // What the contract holds against what it owes. Only a deficit is
+    // critical: shares or stablecoins missing mean a clawback, a freeze or a
+    // fault, and new entries pause. A surplus is a transfer to the contract,
+    // which no function can move out: anyone holding the asset can make one,
+    // so it is a warning with its size and never a pause (econ-4).
     const out = [];
+    // A surplus lasts (nothing moves it out): warned when it appears or
+    // changes size, not every pass.
+    monitor.surplusSeen ??= {};
+    const surplus = (key, amount, alert) => {
+      if (monitor.surplusSeen[key] === String(amount)) return;
+      monitor.surplusSeen[key] = String(amount);
+      out.push(alert);
+    };
+    const balanced = (key) => delete monitor.surplusSeen[key];
+    // Invariant I2, per fund: shares held against the shares of open repos and of pending releases.
     for (const f of s.funds) {
+      if (f.held === undefined || f.held === null) continue; // unread: the funds detector reports it
       const locked = s.openRepos.filter((r) => String(r.fund) === f.shares).reduce((sum, r) => sum + BigInt(r.shares), 0n);
       const awaiting = s.releases.filter((r) => String(r.fund) === f.shares).reduce((sum, r) => sum + BigInt(r.shares), 0n);
-      for (const r of s.releases.filter((x) => String(x.fund) === f.shares)) {
-        out.push({
-          detector: "reconciliation", threat: "DoS.5", level: "critical",
-          message: `repo #${r.id}: ${units(r.shares, 7, 0)} shares held back, the share token refuses the transfer (issuer freeze or allowlist)${tag(s, f)}`,
-          action: "contact the issuer, then release",
-        });
-      }
-      if (f.held === undefined || f.held === null) continue; // unread: the funds detector reports it
       const held = BigInt(f.held);
-      if (held !== locked + awaiting) {
-        out.push({ detector: "reconciliation", threat: "DoS.5", level: "critical", message: `contract holds ${units(held, 7, 7)} shares, open repos and releases account for ${units(locked + awaiting, 7, 7)}: ${held - locked - awaiting} units apart (invariant I2)${tag(s, f)}`, action: "pause" });
+      const owed = locked + awaiting;
+      const accounts = `contract holds ${units(held, 7, 7)} shares, open repos and releases account for ${units(owed, 7, 7)}`;
+      if (held > owed) {
+        surplus(`shares:${f.shares}`, held - owed, { threat: "DoS.5", level: "warning", message: `${accounts}: ${held - owed} units apart, a surplus no function can move out (I2 holds as an inequality)${tag(s, f)}`, action: "find who sent the shares; no pause: a surplus harms no position" });
+        continue;
+      }
+      balanced(`shares:${f.shares}`);
+      if (held < owed) {
+        out.push({ threat: "DoS.5", level: "critical", message: `${accounts}: ${owed - held} units apart, shares missing (invariant I2)${tag(s, f)}`, action: "pause", fund: f.shares });
       }
     }
-    return out;
+    // Invariant I1, per stablecoin: the contract's balance against what the offers hold.
+    for (const c of s.stablecoins ?? []) {
+      if (c.error) {
+        out.push({ threat: "DoS.8", level: "warning", message: `${c.label}: the contract's balance is unreadable (${c.error})`, action: "check the endpoint and the token" });
+        continue;
+      }
+      if (c.held > c.owed) {
+        surplus(`coin:${c.token}`, c.held - c.owed, { threat: "DoS.8", level: "warning", message: `${c.label}: the contract holds ${units(c.held - c.owed, 7, 7)} more than its offers, which no function can move out (I1 holds as an inequality)`, action: "find who sent it; no pause" });
+        continue;
+      }
+      balanced(`coin:${c.token}`);
+      if (c.held < c.owed) {
+        out.push({ threat: "DoS.8", level: "critical", message: `${c.label}: the contract holds ${units(c.held, 7, 7)}, its offers ${units(c.owed, 7, 7)}: ${c.owed - c.held} units short (invariant I1)`, action: "pause", token: c.token });
+      }
+    }
+    // Deferred deliveries. A release that would return false is a waiting
+    // position, not an error: one warning per position and reason, then
+    // silence until its state changes. One that would deliver is the
+    // keeper's to release (anyone may), and stays listed until it is.
+    monitor.releaseSeen ??= {};
+    const pending = new Set();
+    for (const r of s.releases) {
+      pending.add(String(r.id));
+      const reason = r.deliverable === true ? "deliverable" : r.status === "Defaulted" && r.approved === false ? "unapproved" : "token";
+      const seen = `${r.to}:${r.shares}:${reason}`;
+      if (reason !== "deliverable" && monitor.releaseSeen[r.id] === seen) continue;
+      monitor.releaseSeen[r.id] = seen;
+      const f = s.funds.find((x) => x.shares === String(r.fund)) ?? { label: `fund ${String(r.fund).slice(0, 6)}` };
+      const head = `repo #${r.id}: ${units(r.shares, 7, 0)} shares held back`;
+      if (reason === "deliverable") {
+        out.push({ threat: "DoS.5", level: "warning", message: `${head} can be delivered now to ${String(r.to).slice(0, 6)}…${tag(s, f)}`, action: "release", repoId: r.id });
+      } else if (reason === "unapproved") {
+        out.push({ threat: "DoS.7", level: "warning", message: `${head}, seized for a lender not approved for the fund: the delivery waits for its approval (rc5)${tag(s, f)}`, action: "the steward approves the lender again, or the lender redirects the release to an approved holder (redirect_release)" });
+      } else {
+        out.push({ threat: "DoS.5", level: "warning", message: `${head}, the share token refuses the transfer (issuer freeze or allowlist)${tag(s, f)}`, action: "contact the issuer; once the token accepts, anyone releases (the keeper with --act)" });
+      }
+    }
+    for (const id of Object.keys(monitor.releaseSeen)) if (!pending.has(id)) delete monitor.releaseSeen[id];
+    return out.map((a) => ({ detector: "reconciliation", ...a }));
   },
   privileged(s, monitor) {
     const out = s.events
@@ -448,6 +500,11 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
   // rc5: an old price reference is stepped along the model by the keeper.
   for (const a of alerts.filter((x) => x.action === "refresh_reference" && x.fund)) {
     actions.push({ kind: "refresh_reference", fund: a.fund });
+  }
+  // A deferred delivery the simulated release says would go through: the
+  // keeper sends it (anyone may). A waiting one is never retried blindly.
+  for (const a of alerts.filter((x) => x.action === "release" && x.repoId !== undefined)) {
+    actions.push({ kind: "release", repoId: a.repoId });
   }
   return { actions, alerts: [] };
 }
