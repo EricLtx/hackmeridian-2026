@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { initialLang, pickLang, setLang, t, tn } from "../src/i18n.js";
 import { formatAge, formatAmount, formatDuration, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
 import { quantity, rate, term } from "../src/command.js";
-import { htmlKeys, jsKeys } from "../scripts/i18n-check.mjs";
+import { htmlKeys, jsKeys, tagsOf } from "../scripts/i18n-check.mjs";
 
 const ONE = 10_000_000n;
 const inLang = (code, fn) => {
@@ -110,6 +110,26 @@ test("the completeness check reads the texts marked in code and in pages", () =>
     ["Hello & welcome here", "Refresh now", "See <code>x/</code>"],
   );
   assert.equal(found.filter((f) => f.problem).length, 1);
+});
+
+test("a translation carries exactly the HTML tags of its source", () => {
+  const source = "Last hash of the chain: <code>{hash}</code>. Recompute it with <code>npm run verify</code>.";
+  assert.equal(tagsOf(source), tagsOf("Dernier hachage : <code>{hash}</code>. Recalculez-le avec <code>npm run verify</code>."), "same tags, another order of words");
+  // What a translation-only change could add: a link, an image, a redirect, a style; or a tag it drops.
+  for (const changed of [
+    'Dernier hachage : <code>{hash}</code>. <a href="https://clone.example">Recalculez</a> avec <code>npm run verify</code>.',
+    "Dernier hachage : <code>{hash}</code>. Recalculez-le avec <code>npm run verify</code>.<img/src=x onerror=alert(1)>",
+    'Dernier hachage : <code>{hash}</code><meta http-equiv="refresh" content="0;url=https://clone.example">. Recalculez-le avec <code>npm run verify</code>.',
+    "<style>Dernier hachage : <code>{hash}</code>. Recalculez-le avec <code>npm run verify</code>.",
+    "Dernier hachage : <code>{hash}</code>. Recalculez-le avec npm run verify.",
+    'Dernier hachage : <code class="x">{hash}</code>. Recalculez-le avec <code>npm run verify</code>.',
+  ]) {
+    assert.notEqual(tagsOf(changed), tagsOf(source), changed);
+  }
+  // Usage notation is not markup: its words are translated.
+  assert.equal(tagsOf("O <offer> <shares> <term> [amount]"), "");
+  assert.equal(tagsOf("POS [ALL|ME|<address>]"), tagsOf("POS [ALL|ME|<dirección>]"));
+  assert.equal(tagsOf("<kbd>O &lt;offer&gt;</kbd> prepares a loan"), "</kbd> <kbd>");
 });
 
 test("tc picks the entry of its context, then the plain entry, then English", async () => {
