@@ -384,6 +384,14 @@ test("ttl: 14 days for the entries, 90 for the code; a missing entry is critical
   assert.deepEqual(out.map((a) => a.kind), [undefined]);
 });
 
+test("ttl: an archived code entry is restored on purpose, never handed to the keeper to extend (TOOL-4)", () => {
+  const out = run("ttl", snap({ ttl: [{ label: "contract code", key: "kc", kind: "code", days: null }, { label: "repo #1", key: "k1", days: null }] }));
+  assert.deepEqual(out.map((a) => a.level), ["critical", "critical"]);
+  assert.match(out[0].action, /^restore it: npm run upgrade -- --restore-code/);
+  assert.equal(out[1].action, "extend");
+  assert.deepEqual(decideActions(out, snap(), {}, {}).actions.map((a) => a.kind), ["extend"]);
+});
+
 test("exposure: a fund or a currency past 80 % of its cap warns", () => {
   const s = snap({
     funds: [fund("fund 1", "CF1", { fundState: { reference_time: BigInt(NOW), outstanding: 800n, currency: "EUR" }, config: { nav_max_age_secs: 26n * 3600n, max_outstanding: 1000n } })],

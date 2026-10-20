@@ -450,7 +450,10 @@ export const DETECTORS = {
         threat: "DoS.2",
         level: t.days === null ? "critical" : "warning",
         message: t.days === null ? `${t.label} is archived or missing` : `${t.label} has ${t.days.toFixed(1)} days to live`,
-        action: "extend",
+        // An archived code entry cannot be extended, and every call's
+        // simulation then asks to restore it, which the tooling refuses: it
+        // is restored on purpose, under its own cap (TOOL-4).
+        action: t.days === null && t.kind === "code" ? "restore it: npm run upgrade -- --restore-code (the keeper cannot extend an archived entry)" : "extend",
         key: t.key,
         kind: t.kind,
         days: t.days,
