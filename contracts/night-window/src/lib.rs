@@ -2933,7 +2933,15 @@ fn prepare_fund(
 /// (`oracle::check_corridor`): after a long quiet spell or a long removal
 /// the check is no wider than one NAV age after the reference (verification
 /// of review finding arith-2, 20 October 2026). A fund whose NAV outgrew it
-/// is refreshed or re-anchored first.
+/// is refreshed or re-anchored first, while its current feed can be read; a
+/// fund with an active fallback is refreshed through the fallback when its
+/// primary feed dies. A fund without a fallback whose primary feed died
+/// cannot be refreshed or re-anchored, as both read that feed, nor given a
+/// fallback, which needs a fresh primary (review finding VAL-2, 20 October
+/// 2026). Its path: `remove_fund`; `set_fund` on the new feed, whose
+/// proposal defers this check to its apply; `propose_reanchor`, which reads
+/// the feed of that pending re-admission (`pricing_config`); then, after
+/// one delay, `apply_reanchor` followed by `apply_fund_change`.
 fn carry_nav_reference(
     current: Option<&FundConfig>,
     next: &FundConfig,

@@ -4633,6 +4633,153 @@ fn a_cross_fund_follows_the_fx_market_under_a_long_delay() {
     assert_eq!(cross_reanchor_after(MAX_TIMELOCK_SECS, 400), Ok(()));
 }
 
+/// Review finding VAL-2 (20 October 2026): a fund without a fallback whose
+/// NAV feed stops publishing after its admission. Eleven days later, the
+/// NAV accruing 4 % a year, a new feed reads outside the corridor around the
+/// old reference, which counts its growth over at most the NAV age bound
+/// with the current settings, and every route that reads the dead feed is
+/// refused: a replacement keeping it, a fallback (it needs a fresh
+/// primary), a refresh and a re-anchor. The way out, as the comment of
+/// `carry_nav_reference` describes it: remove the fund, propose its
+/// re-admission on the new feed and a re-anchor read from that proposal,
+/// then after one delay apply the re-anchor, then the re-admission.
+#[test]
+fn a_dead_nav_feed_without_fallback_is_replaced_through_a_removal() {
+    let (f, _) = ready();
+    let config = fund_config(&f);
+    let shares = Asset::Stellar(f.shares.clone());
+    advance(&f, 11 * DAY);
+    let now = f.env.ledger().timestamp();
+    let honest = accruing(NAV_EUR, 400, now);
+    let (b, b_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+    b_feed.set_price(&shares, &honest, &now);
+
+    let next = FundConfig {
+        oracle: b.clone(),
+        ..config.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &next),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    // A wider corridor does not help: the check uses the current settings.
+    let next_wide = FundConfig {
+        corridor_floor_bps: 50,
+        ..next.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &next_wide),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let wide = FundConfig {
+        corridor_floor_bps: 50,
+        ..config.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &wide),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &b)),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &honest, &0),
+        Err(Ok(Error::StalePrice))
+    );
+
+    f.client.remove_fund(&f.shares);
+    f.client.set_fund(&f.shares, &next);
+    f.client.propose_reanchor(&f.shares, &honest, &0);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let now = f.env.ledger().timestamp();
+    b_feed.set_price(&shares, &accruing(NAV_EUR, 400, now), &now);
+    // The re-admission alone still meets the old reference.
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    f.client.apply_reanchor(&f.shares);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares), Some(next));
+    f.client.quote(&f.shares, &ONE, &f.eurc);
+}
+
+/// Review finding VAL-2: how long a replacement on a new feed stays open
+/// after the only feed of a fund died, and what the removal route costs.
+/// Under the 48-hour default, a new feed proposed up to eight days after
+/// the last move of the reference still applies, and nine days is refused.
+/// Thirty days after the feed died, the removal route takes one delay, the
+/// re-admission and the re-anchor running side by side; under a 14-day
+/// delay too, with the fund's own corridor, since the re-anchor carries the
+/// reference to its apply (review finding VAL-1).
+#[test]
+fn a_dead_feed_is_replaced_within_eight_days_or_through_one_delay() {
+    let shares = |f: &Fixture| Asset::Stellar(f.shares.clone());
+    let replace_after = |days: u64| -> Result<(), Error> {
+        let (f, _) = ready();
+        let (b, b_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+        advance(&f, days * DAY);
+        let now = f.env.ledger().timestamp();
+        b_feed.set_price(&shares(&f), &accruing(NAV_EUR, 400, now), &now);
+        let next = FundConfig {
+            oracle: b,
+            ..fund_config(&f)
+        };
+        match f.client.try_set_fund(&f.shares, &next) {
+            Ok(Ok(())) => {}
+            Err(Ok(error)) => return Err(error),
+            _ => panic!("unexpected result"),
+        }
+        advance(&f, DEFAULT_TIMELOCK_SECS);
+        let now = f.env.ledger().timestamp();
+        b_feed.set_price(&shares(&f), &accruing(NAV_EUR, 400, now), &now);
+        match f.client.try_apply_fund_change(&f.shares) {
+            Ok(Ok(())) => {}
+            Err(Ok(error)) => return Err(error),
+            _ => panic!("unexpected result"),
+        }
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+        Ok(())
+    };
+    assert_eq!(replace_after(2), Ok(()));
+    assert_eq!(replace_after(8), Ok(()));
+    assert_eq!(replace_after(9), Err(Error::PriceOutOfBand));
+
+    for delay in [DEFAULT_TIMELOCK_SECS, 14 * DAY] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let (f, _) = ready_from(f);
+        let (b, b_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+        advance(&f, 30 * DAY);
+        let now = f.env.ledger().timestamp();
+        let honest = accruing(NAV_EUR, 400, now);
+        b_feed.set_price(&shares(&f), &honest, &now);
+        f.client.remove_fund(&f.shares);
+        f.client.set_fund(
+            &f.shares,
+            &FundConfig {
+                oracle: b,
+                ..fund_config(&f)
+            },
+        );
+        f.client.propose_reanchor(&f.shares, &honest, &0);
+        let started = f.env.ledger().timestamp();
+        advance(&f, delay);
+        let now = f.env.ledger().timestamp();
+        b_feed.set_price(&shares(&f), &accruing(NAV_EUR, 400, now), &now);
+        f.client.apply_reanchor(&f.shares);
+        f.client.apply_fund_change(&f.shares);
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+        assert_eq!(f.env.ledger().timestamp() - started, delay);
+    }
+}
+
 /// Re-anchor round, item 1: the signers sign the values. Readings away from
 /// them, a rate expected for a directly priced fund, or a value too large
 /// for the apply's arithmetic are refused at the proposal.
