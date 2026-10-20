@@ -78,7 +78,8 @@ export const server = servers.length === 1
       return async (...callArgs) => {
         for (let tried = 0; ; tried += 1) {
           try {
-            return await servers[activeRpc][prop](...callArgs);
+            // An endpoint that accepts the connection and never answers is a transient failure too: the next endpoint takes over.
+            return await withTimeout(servers[activeRpc][prop](...callArgs), RPC_TIMEOUT_MS, `${String(prop)} on ${RPC_URLS[activeRpc]}`);
           } catch (error) {
             if (tried >= servers.length - 1 || !(isTransient(error) || /Account not found/i.test(error?.message ?? ""))) throw error;
             const from = RPC_URLS[activeRpc];
@@ -250,17 +251,36 @@ function asError(thrown) {
   return Object.assign(new Error(message), { cause: thrown });
 }
 
-function isTransient(error) {
-  const text = `${error?.message ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
-  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|\b(429|50[0-4])\b/i.test(text);
+/**
+ * How long one RPC call may take before it counts as unanswered. The SDK's
+ * client sets no HTTP timeout: an endpoint that accepts the connection and
+ * never answers would otherwise hold a read, or a submission's second
+ * opinion, forever (round-2 check of TOOL-1, 20 October 2026).
+ */
+export const RPC_TIMEOUT_MS = 30_000;
+
+/** `promise`, or a transient error `"<what>: no answer in N s"` once `ms` have passed. */
+function withTimeout(promise, ms, what) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(`${what}: no answer in ${ms / 1000} s`), { code: "ETIMEDOUT" })), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
-/** Runs `call`; on a transient network error, retries up to three times. */
+function isTransient(error) {
+  const text = `${error?.message ?? ""} ${error?.code ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
+  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|no answer in \d+ s|\b(429|50[0-4])\b/i.test(text);
+}
+
+/** Runs `call`, each try bounded by `RPC_TIMEOUT_MS`; on a transient network error, retries up to three times. */
 export async function net(call, label = "rpc") {
   let delay = 1000;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await call();
+      return await withTimeout(call(), RPC_TIMEOUT_MS, label);
     } catch (error) {
       if (attempt >= 4 || !isTransient(error)) throw error;
       process.stderr.write(`  (network: ${label}, retry ${attempt} in ${delay / 1000} s)\n`);
@@ -303,10 +323,10 @@ export async function ledgerTime() {
   return closed;
 }
 
-/** `getTransaction`, swallowing network errors: returns null when the RPC cannot answer. */
+/** `getTransaction`, swallowing network errors: returns null when the RPC cannot answer, within `RPC_TIMEOUT_MS`. */
 async function lookup(hash, client = server) {
   try {
-    return await client.getTransaction(hash);
+    return await withTimeout(client.getTransaction(hash), RPC_TIMEOUT_MS, "getTransaction");
   } catch {
     return null;
   }
@@ -362,18 +382,22 @@ async function refusedVerdict(sent, hash, label) {
  * active endpoint does not know the transaction. "Nothing changed" is said
  * on the word of two endpoints: the second one must have answered NOT_FOUND
  * itself. When it could not answer, the operator checks the explorer before
- * rerunning. With a single endpoint configured, its word is taken.
+ * rerunning. With a single endpoint configured, its word is taken. When the
+ * active endpoint itself could not answer (`activeSilent`), nothing is
+ * known of the transaction: never "nothing changed", the explorer decides.
  */
-async function expiredVerdict(hash, label) {
+async function expiredVerdict(hash, label, activeSilent = false) {
   const second = await secondOpinion(hash);
   const nothing = `${label}: expired before landing; nothing changed on chain, rerun the step`;
-  if (!second) return new Error(nothing);
+  const check = `check it in the explorer before rerunning the step ${explorer(hash)}`;
+  const active = activeSilent ? `${activeRpcUrl()} could not answer whether transaction ${hash} landed` : `${activeRpcUrl()} does not know transaction ${hash}`;
+  if (!second) return new Error(activeSilent ? `${label}: expired on this machine's clock, but ${active}, and it is the only endpoint configured; ${check}` : nothing);
   const status = second.answer?.status;
   if (status === "SUCCESS" || status === "FAILED") {
-    return new Error(`${label}: ${activeRpcUrl()} does not know transaction ${hash}, ${second.url} says ${status}: the endpoints disagree; check it in the explorer before rerunning the step ${explorer(hash)}`);
+    return new Error(`${label}: ${active}, ${second.url} says ${status}: ${activeSilent ? "take that reading and" : "the endpoints disagree;"} ${check}`);
   }
-  if (status === "NOT_FOUND") return new Error(`${nothing} (${second.url} does not know it either)`);
-  return new Error(`${label}: expired on this machine's clock, and ${activeRpcUrl()} does not know transaction ${hash}, but ${second.url} could not answer: not confirmed by a second endpoint; check it in the explorer before rerunning the step ${explorer(hash)}`);
+  if (status === "NOT_FOUND") return new Error(activeSilent ? `${label}: expired on this machine's clock; ${active}, ${second.url} does not know it; ${check}` : `${nothing} (${second.url} does not know it either)`);
+  return new Error(`${label}: expired on this machine's clock, and ${active}, but ${second.url} could not answer: not confirmed by a second endpoint; ${check}`);
 }
 
 /**
@@ -428,7 +452,9 @@ async function submit(tx, label, started = Date.now()) {
       const last = await lookup(hash);
       if (last?.status === "SUCCESS") return done(last);
       if (last?.status === "FAILED") throw await failedVerdict(last, hash, label);
-      if (last) throw await expiredVerdict(hash, label);
+      // NOT_FOUND, or an active endpoint that could not answer: the window
+      // has closed, and the step never waits past it in silence.
+      throw await expiredVerdict(hash, label, last === null);
     }
     await sleep(1000);
   }

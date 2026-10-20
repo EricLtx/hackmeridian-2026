@@ -483,6 +483,21 @@ test("a transport failure of the second simulation, once its retries are spent, 
   assert.match(verdict ?? "", /^governor co_signed_test: the simulation made with the signed entries was refused, https:\/\/rpc\.stub\.invalid did not answer it \(fetch failed\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
 });
 
+test("a single endpoint that takes the submission and never answers a lookup: the window closes on this clock, the explorer is asked for, the step never hangs", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  server.getTransaction = () => new Promise(() => {});
+  let verdict;
+  lib.invoke(state, "steward", OW, "mint_test", []).then(() => { verdict = "landed"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 400 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(sent.length, 1);
+  assert.match(verdict ?? "", /^steward mint_test: expired on this machine's clock, but https:\/\/rpc\.stub\.invalid could not answer whether transaction [0-9a-f]{64} landed, and it is the only endpoint configured; check it in the explorer before rerunning the step https:\/\/stellar\.expert/);
+  assert.doesNotMatch(verdict, /nothing changed/);
+});
+
 test("a JSON-RPC error the SDK throws as a bare object from the second simulation is never the verdict either (TOOL-1)", async () => {
   const args = [lib.sv.address(FOREIGN)];
   answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];

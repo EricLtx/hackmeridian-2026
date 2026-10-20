@@ -172,6 +172,34 @@ test("a submission the active endpoint refuses with ERROR is read against the se
   assert.equal(sent.length, 2);
 });
 
+test("a second endpoint that accepts the connection and never answers is 'could not answer' after RPC_TIMEOUT_MS, never a hang", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  assert.equal(lib.RPC_TIMEOUT_MS, 30_000);
+  one.getTransaction = async () => ({ status: "NOT_FOUND" });
+  two.getTransaction = () => new Promise(() => {});
+  const begun = Date.now();
+  const verdict = await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", []));
+  assert.match(verdict, /two\.stub\.invalid could not answer: not confirmed by a second endpoint; check it in the explorer/);
+  assert.doesNotMatch(verdict, /nothing changed/);
+  // The window (60 s) plus its margin (30 s), plus one unanswered call of 30 s: well under the fake clock's limit of the loop.
+  assert.ok(Date.now() - begun < 150_000, `${(Date.now() - begun) / 1000} s`);
+  // The same silence on the second endpoint's latest ledger refuses a co-signer's signature instead of hanging.
+  two.getLatestLedger = () => new Promise(() => {});
+  auth = [stewardEntry(callOf(OW, "co_signed_test", args))];
+  const refused = await verdictOf(t, () => lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }));
+  assert.match(refused, /https:\/\/two\.stub\.invalid did not give its latest ledger \(ledger: no answer in 30 s\).*nothing signed \(rpc-1\)/);
+  assert.equal(sent.length, 1);
+});
+
+test("an active endpoint that never answers is left for the second one, as any transient failure", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  // The active endpoint takes the submission, then never answers a lookup: the proxy moves to the second endpoint, which has the transaction.
+  one.getTransaction = () => new Promise(() => {});
+  two.getTransaction = async () => ({ status: "SUCCESS", returnValue: xdr.ScVal.scvVoid() });
+  assert.equal(await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", [])), "landed");
+  assert.equal(lib.activeRpcUrl(), "https://two.stub.invalid", "the second endpoint is active now");
+});
+
 test("with two endpoints, a JSON-RPC error object thrown by the second simulation ends with the signed-entries tail, whichever endpoint answered (TOOL-1)", async () => {
   auth = [stewardEntry(callOf(OW, "co_signed_test", args))];
   for (const s of [one, two]) {
