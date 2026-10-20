@@ -56,6 +56,11 @@ pub struct ReanchorCancelled {
     pub by: Address,
 }
 
+/// The references a re-anchor installed, not the proposal's readings: the
+/// NAV read at the apply, carried along the model path from the proposed
+/// NAV and never below it, timed at that reading, and the FX rate the two
+/// signers proposed. Since rc5 `nav` and `nav_time` may differ from those
+/// of `ReanchorProposed` (review finding VAL-1, 20 October 2026).
 #[contractevent]
 pub struct Reanchored {
     #[topic]
@@ -490,7 +495,8 @@ pub struct Migrated {
 
 // Published by `open_repo` right after `RepoOpened`: the readings and the
 // price the loan was valued at, so that an opening can be evidenced from the
-// contract's own trail. Plain comments, not doc comments: these would be
+// contract's own trail, including which NAV feed priced it (review finding
+// VAL-5, 20 October 2026). Plain comments, not doc comments: these would be
 // carried into the WASM.
 #[contractevent]
 pub struct RepoValued {
@@ -500,6 +506,7 @@ pub struct RepoValued {
     pub fund: Address,
     pub nav: i128,        // NAV read, with the fund's NAV decimals
     pub nav_time: u64,    // when the NAV feed observed it
+    pub fallback: bool,   // the fallback feed supplied the NAV
     pub fx: i128,         // rate read, 0 for a fund priced directly
     pub fx_applied: i128, // divisor of the NAV (decision S22), 0 if direct
     pub fx_time: u64,     // 0 for a fund priced directly

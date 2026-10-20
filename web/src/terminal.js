@@ -6,7 +6,7 @@
 // and signs through the same chain functions as the guided view: nothing
 // here writes to the chain on its own.
 
-import { rpcChangeText, sv } from "./chain.js";
+import { rpcChangeText, sv, unverifiedText } from "./chain.js";
 import { COMMANDS, NOTATION, completions, parseCommand } from "./command.js";
 import {
   bandItems,
@@ -56,7 +56,7 @@ export function createTerminal(ctx) {
     feeds: new Map(),
     pending: null,
     schema: null,
-    market: { repos: new Map(), next: 1, dues: new Map(), releases: new Map(), toCheck: new Set(), loaded: false },
+    market: { repos: new Map(), next: 1, unreadable: new Set(), dues: new Map(), releases: new Map(), toCheck: new Set(), loaded: false },
     tape: { events: [], nextLedger: null, error: null },
     scope: "auto",
     ticket: null,
@@ -162,16 +162,27 @@ export function createTerminal(ctx) {
 
   async function refreshMarket() {
     const m = T.market;
-    const fresh = await S.chain.repos(m.next);
+    // A repo the boundary refuses is skipped and counted: the scan goes on past it (WEB-5).
+    const { repos: fresh, unreadable } = await S.chain.readRepos(m.next);
     for (const r of fresh) {
       m.repos.set(r.id, r);
+      m.unreadable.delete(r.id);
       m.next = Math.max(m.next, r.id + 1);
       if (r.status !== "Open") m.toCheck.add(r.id);
     }
+    for (const id of unreadable) m.unreadable.add(id);
     const freshIds = new Set(fresh.map((r) => r.id));
     const stale = [...m.repos.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
-    for (const r of await Promise.all(stale.map((x) => S.chain.repo(x.id).catch(() => null)))) {
+    // One that cannot be read again keeps its last reading and is counted, as the guided view counts it.
+    const again = await Promise.all(stale.map((x) => S.chain.repo(x.id).then((r) => ({ id: x.id, r }), (error) => ({ id: x.id, error }))));
+    for (const { id, r, error } of again) {
+      if (error) {
+        console.warn(`repo #${id} could not be read again: ${error?.message ?? error}`);
+        m.unreadable.add(id);
+        continue;
+      }
       if (!r) continue;
+      m.unreadable.delete(id);
       if (r.status !== "Open") m.toCheck.add(r.id);
       m.repos.set(r.id, r);
     }
@@ -460,7 +471,10 @@ export function createTerminal(ctx) {
     const open = rows.filter((r) => r.state === "OPEN" || r.state === "LATE");
     const closed = rows.filter((r) => !(r.state === "OPEN" || r.state === "LATE")).slice(0, CLOSED_ROWS);
     const totals = positionTotals(rows);
-    $("t-pos-meta").textContent = `${scopeLabel()} · ${t("{n} open", { n: totals.open })}${totals.late ? `, ${t("{n} past term", { n: totals.late })}` : ""}`;
+    const unreadable = T.market.unreadable.size;
+    $("t-pos-meta").textContent = `${scopeLabel()} · ${t("{n} open", { n: totals.open })}${totals.late ? `, ${t("{n} past term", { n: totals.late })}` : ""}${
+      unreadable ? ` · ${tn("{n} repo could not be read", "{n} repos could not be read", unreadable)}` : ""
+    }`;
     if (!T.market.loaded) {
       setHTML($("t-pos"), `<p class="t-empty">${esc(t("Reading the repos…"))}</p>`);
       return;
@@ -638,24 +652,45 @@ export function createTerminal(ctx) {
     setHTML($("t-status"), parts.join(""));
   }
 
+  /**
+   * Draws one panel on its own: a value it cannot show leaves a short note in
+   * that panel, and the other panels still draw (WEB-5). The band came first,
+   * so one repo without its principal used to stop every panel, the ticket
+   * included.
+   */
+  function drawPanel(id, draw, inline = false) {
+    try {
+      draw();
+    } catch (error) {
+      console.warn("terminal panel", id, error);
+      const box = $(id);
+      const note = esc(t(UNSHOWABLE));
+      if (box) setHTML(box, inline ? `<span class="tb-item t-bad">${note}</span>` : `<p class="t-empty t-bad">${note}</p>`);
+    }
+  }
+
   function render() {
     if (!T.active || !S.dep) return;
-    // A language switch re-labels the ticket and the quote on screen.
+    // A language switch re-labels the ticket and the quote on screen; a view that cannot be rebuilt keeps its labels.
     if (T.viewsLang !== lang()) {
-      if (T.ticket?.rebuild) T.ticket.view = T.ticket.rebuild();
-      if (T.quote && T.quoteRebuild) T.quote = T.quoteRebuild();
+      try {
+        if (T.ticket?.rebuild) T.ticket.view = T.ticket.rebuild();
+        if (T.quote && T.quoteRebuild) T.quote = T.quoteRebuild();
+      } catch (error) {
+        console.warn("terminal views", error);
+      }
       T.viewsLang = lang();
     }
     const input = $("t-input");
     if (input && input.placeholder !== t("HELP")) input.placeholder = t("HELP");
-    renderBand();
-    renderConsole();
-    renderBook();
-    renderTicket();
-    renderPositions();
-    renderFunds();
-    renderTape();
-    renderStatus();
+    drawPanel("t-band", renderBand, true);
+    drawPanel("t-console", renderConsole);
+    drawPanel("t-book", renderBook);
+    drawPanel("t-ticket", renderTicket);
+    drawPanel("t-pos", renderPositions);
+    drawPanel("t-funds", renderFunds);
+    drawPanel("t-tape", renderTape);
+    drawPanel("t-status", renderStatus, true);
     for (const id of ["t-book-panel", "t-ticket-panel", "t-pos-panel", "t-funds-panel", "t-tape-panel"]) {
       $(id)?.classList.toggle("is-focus", T.focused === id);
     }
@@ -711,7 +746,9 @@ export function createTerminal(ctx) {
     const watched = async (onStatus) => {
       try {
         const result = await action(onStatus);
-        outcome = { ok: true, text: message(result) };
+        outcome = result?.unverified
+          ? { ok: true, unverified: true, text: `${sentence(message(result))} ${unverifiedText(result.unverified.host)}` }
+          : { ok: true, text: message(result) };
         return result;
       } catch (error) {
         outcome = { ok: false, text: describeError(error, context).text, unconfirmed: error?.name === "TxUnconfirmed" };
@@ -735,7 +772,11 @@ export function createTerminal(ctx) {
     render();
     say("out", t("{title}: asking Freighter to sign…", { title: ticket.view.title }));
     const outcome = await ticket.run();
-    if (outcome?.ok) {
+    if (outcome?.ok && outcome.unverified) {
+      // Applied according to one endpoint only: signing the ticket again could apply it twice.
+      say("warn", t("{reason} The ticket is closed: check the transaction before preparing it again.", { reason: outcome.text }));
+      T.ticket = null;
+    } else if (outcome?.ok) {
       say("ok", outcome.text);
       T.ticket = null;
     } else if (outcome?.unconfirmed) {

@@ -12,26 +12,17 @@
 // October 2026, S22 on the first demo fund). The tool names those funds first.
 // The rules of rc5 (20 October 2026) are checked too: the haircut covers the
 // NAV corridor, the stablecoins of the fund's currency have 7 decimals, and
-// its feeds publish with 6 decimals or more.
+// its feeds publish with 6 to 18 decimals. So is what rc5 enforces from
+// the moment it is installed (review finding TOOL-8): the live NAV against
+// the corridor around the stored reference, whose growth stops one NAV age
+// bound after the reference (a NAV past the top fails closed until a
+// two-key re-anchor), and the code's time to live against the 90 days the
+// monitor keeps. The rules live in inventory-rules.mjs.
 
 import fs from "node:fs";
 import path from "node:path";
 import { asset, codeKey, fmt, ledgerEntries, ledgerTime, loadState, read, storageKey, STATE_DIR, sv } from "./lib.mjs";
-
-/** Admission rules of rc5, as contracts/night-window/src/lib.rs checks them. */
-const RC5 = {
-  stablecoinDecimals: 7, // STABLECOIN_DECIMALS
-  minFeedDecimals: 6, // MIN_FEED_DECIMALS: NAV, FX and fallback feeds
-  yearSecs: 31_536_000n, // math::YEAR_SECS
-};
-/**
- * Smallest haircut, in basis points, that covers a fund's NAV corridor (the
- * rc5 cross-invariant, `corridor_haircut_bps` in lib.rs): a true NAV at the
- * corridor's bottom and a wrong reading at its top lie two floors plus one
- * NAV age bound of growth apart, the growth rounded up.
- */
-const corridorHaircutBps = (cfg) =>
-  2n * BigInt(cfg.corridor_floor_bps) + (BigInt(cfg.max_yield_bps) * BigInt(cfg.nav_max_age_secs) + RC5.yearSecs - 1n) / RC5.yearSecs;
+import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues, reanchorHaircutBps, reanchorIssues } from "./inventory-rules.mjs";
 
 const JSON_OUT = process.argv.includes("--json");
 const state = loadState();
@@ -80,9 +71,13 @@ async function main() {
   ]);
   const codeTtl = wasmHash ? await ledgerEntries([codeKey(wasmHash)]).catch(() => null) : null;
   const codeLive = codeTtl?.entries?.[0]?.liveUntil ?? null;
+  // The code's time to live against the 90 days the monitor keeps (TOOL-8).
+  const codeDays = codeLive && codeTtl ? daysToLive(codeLive, codeTtl.latest) : null;
+  const codeIssues = codeTtl ? codeTtlIssues(codeDays) : [];
 
   console.log(`Open Window instance ${ow}`);
-  console.log(`  contract version ${version}, schema ${schema}, executable ${wasmHash ?? "?"}${codeLive ? `, code live until ledger ${codeLive}` : ""}`);
+  console.log(`  contract version ${version}, schema ${schema}, executable ${wasmHash ?? "?"}${codeLive ? `, code live until ledger ${codeLive} (${codeDays.toFixed(1)} days)` : ""}`);
+  for (const i of codeIssues) console.log(`  ! ${i}`);
   console.log(`  time delay ${hours(delay)}, term ceiling ${hours(maxTerm)}${pendingUpgrade ? `, UPGRADE PENDING to ${Buffer.from(pendingUpgrade.wasm_hash).toString("hex").slice(0, 12)}… at ${new Date(Number(pendingUpgrade.eta) * 1000).toISOString()}` : ""}`);
   console.log("\nRoles");
   const roles = { governor: admin, guardian, "guardian backup": guardianBackup, trustee, sentinel, "sole lender": soleLender };
@@ -110,7 +105,7 @@ async function main() {
 
   console.log("\nFunds");
   const register = [];
-  let findings = 0;
+  let findings = codeIssues.length;
   for (const f of fundsOf()) {
     const [cfg, st, backup, pending, fallback] = await Promise.all([
       read(state, ow, "get_fund", [sv.address(f.shares)]),
@@ -130,6 +125,9 @@ async function main() {
     const approved = soleLender ? await read(state, ow, "is_lender_approved", [sv.address(f.shares), sv.address(soleLender)]) : null;
     const fallbackDecimals = fallback ? await read(state, String(fallback.oracle), "decimals").then(Number, () => null) : null;
     const corridorBps = corridorHaircutBps(cfg);
+    // The re-anchor cover under the delay in force (rc5 round 2): the
+    // contract refuses a re-anchor of this fund below it.
+    const reanchorBps = reanchorHaircutBps(cfg, delay);
     const issues = [];
     // Envelope: what `set_fund` and `set_fund_limits` check today.
     if (Number(cfg.haircut_bps) < Number(envelope.min_haircut_bps)) issues.push(`haircut ${pct(cfg.haircut_bps)} below the envelope minimum ${pct(envelope.min_haircut_bps)}`);
@@ -149,25 +147,35 @@ async function main() {
     // stablecoin's when it is registered. A fund admitted before keeps
     // running until then.
     if (BigInt(cfg.haircut_bps) < corridorBps) issues.push(`rc5: haircut ${pct(cfg.haircut_bps)} below the ${pct(corridorBps)} its NAV corridor needs (two floors plus one NAV age bound of yield); the next set_fund_limits or replacement is refused until a compliant configuration is applied through the delay`);
+    issues.push(...reanchorIssues(cfg, delay));
     const feeds = [["NAV feed", Number(st.nav_decimals)]];
     if (fx) feeds.push(["FX feed", Number(st.fx_decimals)]);
     if (fallback) feeds.push(["fallback feed", fallbackDecimals]);
-    for (const [feed, decimals] of feeds) {
-      if (decimals === null) issues.push(`rc5: the ${feed} does not answer decimals(); it must publish with ${RC5.minFeedDecimals} decimals or more`);
-      else if (decimals < RC5.minFeedDecimals) issues.push(`rc5: the ${feed} publishes with ${decimals} decimals, under ${RC5.minFeedDecimals}: its bounds round inward to whole units of the feed, and a replacement or a fallback naming it is refused`);
-    }
+    for (const [feed, decimals] of feeds) issues.push(...feedDecimalsIssues(feed, decimals));
     for (const coin of stablecoins.filter((c) => c.currency === String(cfg.currency) && offPrecision(c))) {
       issues.push(`rc5: the ${coin.currency} stablecoin ${short(coin.token)} has ${coin.liveDecimals ?? coin.decimals} decimals, not ${RC5.stablecoinDecimals}: this fund's caps add raw units across the coins of its currency, and rc5 registers only ${RC5.stablecoinDecimals}-decimal coins`);
     }
+    issues.push(...fallbackIssues(cfg, fallback));
     if (!backup) issues.push("no steward backup registered: a lost steward key could not be recovered (D4)");
     if (soleLender && approved === false) issues.push("the sole lender is not approved on this fund: no offer can list it");
     if (navAge !== null && navAge > Number(cfg.nav_max_age_secs)) issues.push(`NAV is ${hours(navAge)} old, beyond the ${hours(cfg.nav_max_age_secs)} bound: entries on this fund are refused until a fresh publication`);
     if (st.frozen) issues.push("fund frozen by its steward: no new repo");
+    // rc5 applies its corridor around the stored reference from the moment
+    // it is installed: the live NAV against its top, and the days left at
+    // the yield cap if nothing moves the reference (TOOL-8).
+    const headroom = nav
+      ? corridorHeadroom({ referenceNav: st.reference_nav, referenceTime: st.reference_time, navPrice: nav.price, navTime: nav.timestamp, floorBps: cfg.corridor_floor_bps, maxYieldBps: cfg.max_yield_bps, navMaxAgeSecs: cfg.nav_max_age_secs, now })
+      : null;
+    if (headroom) issues.push(...corridorIssues(headroom));
     findings += issues.length;
     console.log(`  ${f.label} ${f.symbol} ${f.shares} (${f.tokenCode})`);
     console.log(`    steward ${cfg.steward}, backup ${backup ?? "none"}; currency ${cfg.currency}; source ${sourceName}; haircut ${pct(cfg.haircut_bps)}${fx ? `, FX haircut ${pct(fx.haircut_bps)}, FX band ${pct(fx.band_bps)}, FX age ≤ ${hours(fx.max_age_secs)}` : ""}`);
-    console.log(`    corridor floor ${pct(cfg.corridor_floor_bps)}, yield ≤ ${pct(cfg.max_yield_bps)}, NAV age ≤ ${hours(cfg.nav_max_age_secs)}${navAge !== null ? ` (now ${hours(navAge)} old)` : " (no NAV read)"}; the corridor needs a haircut ≥ ${pct(corridorBps)}`);
+    console.log(`    corridor floor ${pct(cfg.corridor_floor_bps)}, yield ≤ ${pct(cfg.max_yield_bps)}, NAV age ≤ ${hours(cfg.nav_max_age_secs)}${navAge !== null ? ` (now ${hours(navAge)} old)` : " (no NAV read)"}; the corridor needs a haircut ≥ ${pct(corridorBps)}, a re-anchor under the ${Number(delay)} s delay ≥ ${pct(reanchorBps)}`);
     console.log(`    feed decimals: NAV ${st.nav_decimals}${fx ? `, FX ${st.fx_decimals}` : ""}${fallback ? `, fallback ${fallbackDecimals ?? "?"}` : ""}`);
+    if (headroom) {
+      const days = Number.isFinite(headroom.daysAtMaxYield) ? `about ${headroom.daysAtMaxYield.toFixed(1)} days` : "no limit";
+      console.log(`    price reference ${hours(headroom.referenceAgeSecs)} old against the ${hours(cfg.nav_max_age_secs)} NAV age bound${headroom.referenceStale ? " (the corridor no longer grows with the NAV)" : ""}; live NAV ${headroom.inside ? "inside" : "OUTSIDE"} the rc5 corridor, ${headroom.headroomBps.toFixed(2)} bps under its top, ${days} at the ${pct(cfg.max_yield_bps)} yield cap`);
+    }
     console.log(`    outstanding ${fmt(BigInt(st.outstanding))} / cap ${fmt(BigInt(cfg.max_outstanding))}, per repo ≤ ${fmt(BigInt(cfg.max_principal_per_repo))}${pending ? `; CHANGE PENDING until ${new Date(Number(pending.eta) * 1000).toISOString()}` : ""}${soleLender ? `; sole lender ${approved ? "approved" : "NOT approved"}` : ""}`);
     for (const i of issues) console.log(`    ! ${i}`);
     if (!issues.length) console.log("    ok: within the envelope and the admission rules");
@@ -189,6 +197,12 @@ async function main() {
       maxYieldBps: Number(cfg.max_yield_bps),
       navMaxAgeSecs: Number(cfg.nav_max_age_secs),
       corridorHaircutBps: Number(corridorBps),
+      reanchorHaircutBps: Number(reanchorBps),
+      referenceNav: String(st.reference_nav),
+      referenceTime: Number(st.reference_time),
+      corridor: headroom
+        ? { low: String(headroom.low), high: String(headroom.high), inside: headroom.inside, headroomBps: headroom.headroomBps, daysAtMaxYield: Number.isFinite(headroom.daysAtMaxYield) ? headroom.daysAtMaxYield : null, referenceAgeSecs: headroom.referenceAgeSecs }
+        : null,
       maxPrincipalPerRepo: String(cfg.max_principal_per_repo),
       maxOutstanding: String(cfg.max_outstanding),
       outstanding: String(st.outstanding),
@@ -198,7 +212,7 @@ async function main() {
       issues,
     });
   }
-  console.log(`\n${findings ? `${findings} finding(s): fix each one through the time delay before an upgrade that tightens a rule, or accept it in writing.` : "No finding: every admitted fund is within the envelope and the admission rules."}`);
+  console.log(`\n${findings ? `${findings} finding(s): fix each one through the time delay before an upgrade that tightens a rule, or accept it in writing.` : "No finding: every admitted fund is within the envelope and the admission rules, and the code has its 90 days."}`);
 
   if (JSON_OUT) {
     const out = {
@@ -210,6 +224,8 @@ async function main() {
       schemaVersion: Number(schema),
       executable: wasmHash,
       codeLiveUntilLedger: codeLive,
+      codeDaysToLive: codeDays,
+      codeIssues,
       timelockDelaySecs: Number(delay),
       maxTermSecs: Number(maxTerm),
       roles: Object.fromEntries(Object.entries(roles).map(([k, v]) => [k, v ?? null])),

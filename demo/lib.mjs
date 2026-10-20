@@ -6,8 +6,9 @@
 // through `read`, a simulation that never submits.
 //
 // Submission gives a definitive answer: either the transaction landed, or its
-// validity window has closed and it never will. "Timed out, maybe later" is
-// never reported, so a rerun cannot duplicate a step that landed late.
+// validity window has closed, on this machine's clock, and it never will.
+// "Timed out, maybe later" is never reported, so a rerun cannot duplicate a
+// step that landed late.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -29,12 +30,20 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
+import { LIMITS } from "./detectors.mjs";
+import { checkStateName } from "./monitor-state.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(here, "..");
 export const STATE_DIR = path.join(here, ".state");
-/** Name of the state file: `testnet` for the demo instance; `OPEN_WINDOW_STATE=<name>` points the tooling at a disposable instance (rehearsals), whose deployment facts stay out of `web/public/`. */
-export const STATE_NAME = process.env.OPEN_WINDOW_STATE ?? "testnet";
+/**
+ * Name of the state file: `testnet` for the demo instance;
+ * `OPEN_WINDOW_STATE=<name>` points the tooling at a disposable instance
+ * (rehearsals), whose deployment facts stay out of `web/public/`. Letters,
+ * digits, `_` and `-` only (`checkStateName`): the name goes into file
+ * names, and a bad one is refused here, at import, before any file is read.
+ */
+export const STATE_NAME = checkStateName(process.env.OPEN_WINDOW_STATE ?? "testnet");
 export const STATE_FILE = path.join(STATE_DIR, `${STATE_NAME}.json`);
 export const WASM_DIR = path.join(ROOT, "target", "wasm32v1-none", "release");
 
@@ -60,6 +69,8 @@ const servers = RPC_URLS.map((url) => new rpc.Server(url));
 let activeRpc = 0;
 /** The endpoint currently in use. */
 export const activeRpcUrl = () => RPC_URLS[activeRpc];
+/** Its index in `RPC_URLS`, for a reading that must come from it alone (`endpointClient`). */
+export const activeEndpoint = () => activeRpc;
 /**
  * The RPC client. With one endpoint it is the plain client; with several, a
  * proxy that fails over to the next endpoint on a transient error, so every
@@ -74,7 +85,8 @@ export const server = servers.length === 1
       return async (...callArgs) => {
         for (let tried = 0; ; tried += 1) {
           try {
-            return await servers[activeRpc][prop](...callArgs);
+            // An endpoint that accepts the connection and never answers is a transient failure too: the next endpoint takes over.
+            return await withTimeout(servers[activeRpc][prop](...callArgs), RPC_TIMEOUT_MS, `${String(prop)} on ${RPC_URLS[activeRpc]}`);
           } catch (error) {
             if (tried >= servers.length - 1 || !(isTransient(error) || /Account not found/i.test(error?.message ?? ""))) throw error;
             const from = RPC_URLS[activeRpc];
@@ -239,17 +251,43 @@ function decodeSimulationError(text) {
 // exponential backoff. Submissions go through `submit`, which never gives up
 // before the transaction's validity window has closed.
 
-function isTransient(error) {
-  const text = `${error?.message ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
-  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|\b(429|50[0-4])\b/i.test(text);
+/** An Error for whatever was thrown: the SDK throws a JSON-RPC `{ code, message }` answer as a bare object. */
+function asError(thrown) {
+  if (thrown instanceof Error) return thrown;
+  const message = typeof thrown?.message === "string" ? thrown.message : typeof thrown === "string" ? thrown : JSON.stringify(thrown);
+  return Object.assign(new Error(message), { cause: thrown });
 }
 
-/** Runs `call`; on a transient network error, retries up to three times. */
+/**
+ * How long one RPC call may take before it counts as unanswered. The SDK's
+ * client sets no HTTP timeout: an endpoint that accepts the connection and
+ * never answers would otherwise hold a read, or a submission's second
+ * opinion, forever (round-2 check of TOOL-1, 20 October 2026).
+ */
+export const RPC_TIMEOUT_MS = 30_000;
+
+/** `promise`, or a transient error `"<what>: no answer in N s"` once `ms` have passed. */
+function withTimeout(promise, ms, what) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error(`${what}: no answer in ${ms / 1000} s`), { code: "ETIMEDOUT" })), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+function isTransient(error) {
+  const text = `${error?.message ?? ""} ${error?.code ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
+  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|no answer in \d+ s|\b(429|50[0-4])\b/i.test(text);
+}
+
+/** Runs `call`, each try bounded by `RPC_TIMEOUT_MS`; on a transient network error, retries up to three times. */
 export async function net(call, label = "rpc") {
   let delay = 1000;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await call();
+      return await withTimeout(call(), RPC_TIMEOUT_MS, label);
     } catch (error) {
       if (attempt >= 4 || !isTransient(error)) throw error;
       process.stderr.write(`  (network: ${label}, retry ${attempt} in ${delay / 1000} s)\n`);
@@ -292,13 +330,81 @@ export async function ledgerTime() {
   return closed;
 }
 
-/** `getTransaction`, swallowing network errors: returns null when the RPC cannot answer. */
-async function lookup(hash) {
+/** `getTransaction`, swallowing network errors: returns null when the RPC cannot answer, within `RPC_TIMEOUT_MS`. */
+async function lookup(hash, client = server) {
   try {
-    return await server.getTransaction(hash);
+    return await withTimeout(client.getTransaction(hash), RPC_TIMEOUT_MS, "getTransaction");
   } catch {
     return null;
   }
+}
+
+/**
+ * Seconds past a transaction's `maxTime`, on this machine's clock, before it
+ * counts as expired: room for the skew between this clock and the network's
+ * (the transaction's `maxTime` was set from this clock) and for the last
+ * ledger that may still close inside the window to reach the endpoint.
+ */
+export const EXPIRY_MARGIN_SECS = 30;
+
+/**
+ * What a second endpoint, when one is configured, knows of transaction
+ * `hash`: `{ url, answer }`, `answer` null when it could not answer; null
+ * with a single endpoint. Asked of that endpoint directly, never through the
+ * failover client, so the active endpoint never vouches for itself.
+ */
+async function secondOpinion(hash) {
+  const index = secondEndpoint();
+  if (index === null) return null;
+  return { url: RPC_URLS[index], answer: await lookup(hash, servers[index]) };
+}
+
+/** The verdict when the active endpoint reports transaction `hash` FAILED. */
+async function failedVerdict(known, hash, label) {
+  const code = resultCode(known.resultXdr);
+  const second = await secondOpinion(hash);
+  const check = `check it in the explorer before rerunning the step ${explorer(hash)}`;
+  if (!second) return new Error(`${label}: transaction failed (${code}) according to ${activeRpcUrl()}, the only endpoint configured; ${check}`);
+  if (second.answer?.status === "SUCCESS") return new Error(`${label}: ${activeRpcUrl()} reports transaction ${hash} FAILED (${code}), ${second.url} says SUCCESS: the endpoints disagree; ${check}`);
+  if (second.answer?.status === "FAILED") return new Error(`${label}: transaction failed (${code}), confirmed by ${second.url} ${explorer(hash)}`);
+  const why = second.answer ? `does not know it` : `could not answer`;
+  return new Error(`${label}: transaction failed (${code}) according to ${activeRpcUrl()}; ${second.url} ${why}; ${check}`);
+}
+
+/** The verdict when the active endpoint refuses the submission with status ERROR. */
+async function refusedVerdict(sent, hash, label) {
+  const code = resultCode(sent.errorResult);
+  const second = await secondOpinion(hash);
+  if (!second) return new Error(`${label}: submission refused (${code})`);
+  const check = `check it in the explorer before rerunning the step ${explorer(hash)}`;
+  if (second.answer?.status === "SUCCESS" || second.answer?.status === "FAILED") {
+    return new Error(`${label}: ${activeRpcUrl()} refused the submission (${code}), ${second.url} says the transaction ${hash} is ${second.answer.status}: the endpoints disagree; ${check}`);
+  }
+  if (second.answer) return new Error(`${label}: submission refused (${code}) by ${activeRpcUrl()}; ${second.url} does not know the transaction either`);
+  return new Error(`${label}: submission refused (${code}) by ${activeRpcUrl()}; ${second.url} could not answer; ${check}`);
+}
+
+/**
+ * The verdict when the window has closed on this machine's clock and the
+ * active endpoint does not know the transaction. "Nothing changed" is said
+ * on the word of two endpoints: the second one must have answered NOT_FOUND
+ * itself. When it could not answer, the operator checks the explorer before
+ * rerunning. With a single endpoint configured, its word is taken. When the
+ * active endpoint itself could not answer (`activeSilent`), nothing is
+ * known of the transaction: never "nothing changed", the explorer decides.
+ */
+async function expiredVerdict(hash, label, activeSilent = false) {
+  const second = await secondOpinion(hash);
+  const nothing = `${label}: expired before landing; nothing changed on chain, rerun the step`;
+  const check = `check it in the explorer before rerunning the step ${explorer(hash)}`;
+  const active = activeSilent ? `${activeRpcUrl()} could not answer whether transaction ${hash} landed` : `${activeRpcUrl()} does not know transaction ${hash}`;
+  if (!second) return new Error(activeSilent ? `${label}: expired on this machine's clock, but ${active}, and it is the only endpoint configured; ${check}` : nothing);
+  const status = second.answer?.status;
+  if (status === "SUCCESS" || status === "FAILED") {
+    return new Error(`${label}: ${active}, ${second.url} says ${status}: ${activeSilent ? "take that reading and" : "the endpoints disagree;"} ${check}`);
+  }
+  if (status === "NOT_FOUND") return new Error(activeSilent ? `${label}: expired on this machine's clock; ${active}, ${second.url} does not know it; ${check}` : `${nothing} (${second.url} does not know it either)`);
+  return new Error(`${label}: expired on this machine's clock, and ${active}, but ${second.url} could not answer: not confirmed by a second endpoint; ${check}`);
 }
 
 /**
@@ -307,11 +413,22 @@ async function lookup(hash) {
  * closed without it landing. A lost response, a resend refused because the
  * first copy already applied, or a congested queue are all resolved by
  * looking the transaction up by hash.
+ *
+ * The window is judged on this machine's clock, never on a close time the
+ * endpoint reports (review finding TOOL-1, 20 October 2026): an endpoint
+ * that holds the signed transaction back and claims a later ledger would
+ * otherwise have the step called expired, rerun, and then land both. No
+ * verdict rests on the active endpoint alone when a second one is
+ * configured: "nothing changed" needs the second endpoint's own NOT_FOUND,
+ * and a FAILED or an ERROR it reports is read against the second endpoint,
+ * since a failed transaction consumes its sequence number and a rerun on a
+ * lie would land both.
  */
 async function submit(tx, label, started = Date.now()) {
   const hash = Buffer.from(tx.hash()).toString("hex");
   const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
   const done = (result) => ({ result, hash, seconds: (Date.now() - started) / 1000, fee: feeCharged(result) });
+  const expired = () => maxTime > 0 && Date.now() / 1000 > maxTime + EXPIRY_MARGIN_SECS;
 
   // 1. Get the transaction into the queue, or learn that it already applied.
   let delay = 1000;
@@ -325,29 +442,26 @@ async function submit(tx, label, started = Date.now()) {
     if (sent?.status === "PENDING" || sent?.status === "DUPLICATE") break;
     const known = await lookup(hash);
     if (known?.status === "SUCCESS") return done(known);
-    if (known?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(known.resultXdr)}) ${explorer(hash)}`);
-    if (sent?.status === "ERROR") throw new Error(`${label}: submission refused (${resultCode(sent.errorResult)})`);
-    if (maxTime && Date.now() / 1000 > maxTime + 10) break; // expired: settle it in step 2
+    if (known?.status === "FAILED") throw await failedVerdict(known, hash, label);
+    if (sent?.status === "ERROR") throw await refusedVerdict(sent, hash, label);
+    if (expired()) break; // settled in step 2
     process.stderr.write(`  (network: ${label} ${sent?.status ?? "no answer"}, resending in ${delay / 1000} s)\n`);
     await sleep(delay);
     delay = Math.min(delay * 2, 8000);
   }
 
-  // 2. Wait for the outcome until the ledger has closed past the validity window.
+  // 2. Wait for the outcome until this machine's clock is past the validity window.
   for (;;) {
     const result = await lookup(hash);
     if (result?.status === "SUCCESS") return done(result);
-    if (result?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(result.resultXdr)}) ${explorer(hash)}`);
-    let closed = 0;
-    try {
-      closed = await ledgerTime();
-    } catch {
-      // RPC unreachable: keep polling.
-    }
-    if (maxTime && closed > maxTime + 5) {
+    if (result?.status === "FAILED") throw await failedVerdict(result, hash, label);
+    if (expired()) {
       const last = await lookup(hash);
       if (last?.status === "SUCCESS") return done(last);
-      if (last) throw new Error(`${label}: expired before landing; nothing changed on chain, rerun the step`);
+      if (last?.status === "FAILED") throw await failedVerdict(last, hash, label);
+      // NOT_FOUND, or an active endpoint that could not answer: the window
+      // has closed, and the step never waits past it in silence.
+      throw await expiredVerdict(hash, label, last === null);
     }
     await sleep(1000);
   }
@@ -489,13 +603,16 @@ const INCLUSION_FEE = "2000000";
  */
 export const MAX_RESOURCE_FEE = 250_000_000n;
 /**
- * One 30-day slice of the contract code entry: about 215 XLM of rent at the
- * testnet rate measured on 20 October 2026 (7.15 XLM a day for the 1.88 MB
- * the network counts for the code). 300 XLM leaves 40 % for the rate to
- * rise and stays under the 429 XLM a transaction fee can carry.
+ * One 30-day slice of the contract code entry. The testnet rent moves: 7.15
+ * XLM a day in the morning of 20 October 2026, 8.35 to 8.40 XLM a day in
+ * the afternoon, so about 250 XLM a slice for the rc4 code and 257 XLM for
+ * rc5's, about 2 % larger (review finding TOOL-6). 400 XLM leaves about half
+ * as much again for the rate to rise, and stays under the 429.49 XLM a
+ * transaction fee can carry (a uint32 in stroops) with the inclusion bid on
+ * top. Beyond it, `extendCode` falls back to a shorter slice.
  */
-export const CODE_SLICE_MAX_FEE = 3_000_000_000n;
-/** An upload creates the code entry with the network's minimum time to live: about 50 XLM for night_window.wasm on testnet. */
+export const CODE_SLICE_MAX_FEE = 4_000_000_000n;
+/** An upload creates the code entry with the network's minimum time to live: about 60 XLM for night_window.wasm on testnet (20 October 2026). */
 export const UPLOAD_MAX_FEE = 1_000_000_000n;
 
 async function build(sourcePublicKey, operation) {
@@ -616,22 +733,151 @@ export function expectedSigners(state, sourceRole, func, cosigners = []) {
   return expected;
 }
 
+/** How a refusal ends while nothing has left this machine signed. */
+export const NOTHING_SIGNED = "nothing signed";
+
+/**
+ * How a refusal ends once authorization entries were signed and sent to the
+ * RPC in the second simulation: the transaction itself was not signed, but
+ * those signatures are out, until their expiry ledger.
+ */
+const signedForSimulation = (count, expiry) =>
+  `the transaction was not signed or sent, but ${count} authorization ${count === 1 ? "entry" : "entries"} signed for its simulation reached the RPC, valid until ledger ${expiry}`;
+
+/**
+ * The refusal of the simulation made with the signed entries. Once entries
+ * went out signed, the endpoint's own text is never the tool's verdict: a
+ * hostile endpoint writes what it likes there, "nothing signed" included
+ * (review finding TOOL-1, 20 October 2026). The verdict names the endpoint
+ * and ends with the tail that says what went out; the endpoint's words go to
+ * stderr, marked as its own, and stay in the error's `detail`. A contract
+ * error keeps its name and code, so a caller still tells a refusal apart.
+ */
+function refusedAfterSigning(error, label, tail) {
+  const said = String((error instanceof ContractError ? error.detail : error.message) ?? "").split("\n")[0].slice(0, 200);
+  process.stderr.write(`  (${activeRpcUrl()} answered the simulation made with the signed entries: ${said})\n`);
+  const why = error instanceof ContractError
+    ? `the contract refused it with ${error.name} (#${error.code})`
+    : isTransient(error)
+      ? `${activeRpcUrl()} did not answer it (${said})`
+      : `${activeRpcUrl()} refused it, in its own words (printed above, kept in the error's detail)`;
+  error.detail = error.detail ?? said;
+  error.message = `${label}: the simulation made with the signed entries was refused, ${why}; ${tail} (rpc-1)`;
+  return error;
+}
+
 /**
  * Refuses an authorization entry that is not for the operation's own call,
  * or an address-credential entry for an address the operation does not
  * expect. A signature over another call could be replayed in a transaction
  * the RPC builds (rpc-1); one from an unexpected role is never needed.
+ *
+ * The transaction's source never signs an entry of its own (review finding
+ * TOOL-1, 20 October 2026): an honest endpoint records the source's
+ * authority as source-account credentials, which only this transaction
+ * carries. An address credential for the source would be a signature that
+ * any transaction, from any fee payer, could carry until its expiry.
+ *
+ * Below the root, the only node signed is a transfer by the entry's signer
+ * of a token of this deployment into the Open Window contract (review
+ * finding TOOL-5): see `checkSubInvocations`.
+ *
+ * `source` is the source's G-address, `tail` ends the message, `tokens`
+ * names the token a call pulls without naming it in its arguments (the
+ * repo's stablecoin under `repurchase`).
  */
-export function checkAuthEntries(state, entries, func, expected, label) {
+export function checkAuthEntries(state, entries, func, expected, label, { source = null, tail = NOTHING_SIGNED, tokens = [] } = {}) {
+  const pulls = pullsOf(func, tokens);
   for (const entry of entries) {
     const root = entry.rootInvocation.function;
     if (!isOwnCall(root, func)) {
-      throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; nothing signed (rpc-1)`);
+      throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; ${tail} (rpc-1)`);
     }
+    let signer = source;
     if (isAddressCredential(entry)) {
       const address = credentialAddress(entry);
-      if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; nothing signed (rpc-1)`);
+      if (source && address === source) {
+        throw new Error(`${label}: the simulation asks the transaction's source, ${roleOf(state, address)}, to sign this call apart from the transaction, which an honest endpoint never does and which another transaction could replay; ${tail} (rpc-1)`);
+      }
+      if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; ${tail} (rpc-1)`);
+      signer = address;
     }
+    checkSubInvocations(state, entry.rootInvocation, signer, pulls, label, tail);
+  }
+}
+
+/** The address an ScVal holds, or null for any other value. */
+const addressOf = (value) => (value?.type === "scvAddress" ? Address.fromScAddress(value.address).toString() : null);
+
+/** The i128 an ScVal holds, as a BigInt, or null for any other value. */
+const i128Of = (value) => (value?.type === "scvI128" ? BigInt(scValToNative(value)) : null);
+
+/**
+ * The calls of the Open Window contract that pull a token from a signer
+ * into the contract (token_io::pull), with the argument that names the
+ * token and the one that names the amount. `repurchase` reads both from
+ * the repo in storage: the caller declares the token (`tokens`), and the
+ * amount is the repayment the contract computes.
+ */
+const PULLS = {
+  create_offer: { token: 1, amount: 2 }, // lender, stablecoin, amount, rate, term, funds
+  open_repo: { token: 2, amount: 3 }, // borrower, offer_id, fund, shares, principal, term
+  repurchase: { token: null, amount: null }, // repo_id
+};
+
+/**
+ * The pulls the operation `func` may make: token contract -> the amount it
+ * names, or null when the contract computes it. Empty for a call that pulls
+ * nothing, whatever the caller `declared`.
+ */
+function pullsOf(func, declared = []) {
+  const pulls = new Map();
+  if (func.type !== "hostFunctionTypeInvokeContract") return pulls;
+  const call = armOf(func);
+  const rule = PULLS[String(call.functionName)];
+  if (!rule) return pulls;
+  if (rule.token !== null) {
+    const token = addressOf(call.args[rule.token]);
+    if (token) pulls.set(token, rule.amount === null ? null : i128Of(call.args[rule.amount]));
+  } else {
+    for (const token of declared) pulls.set(token, null);
+  }
+  return pulls;
+}
+
+/**
+ * Walks the tree below an entry's root, at every depth. The only node it
+ * accepts is `transfer(from, to, amount)` from the entry's `signer` to the
+ * Open Window contract, on a token the root call pulls (`pulls`, from
+ * `pullsOf`): the fund's shares under `open_repo`, the offer's stablecoin
+ * under `create_offer`, the repo's stablecoin under `repurchase`; at the
+ * amount the call names, where it names one; and once per token. Any other
+ * node, a transfer elsewhere, of another token, of another amount, a second
+ * one, or another function, is the signer's authority over a call some
+ * contract on the path could make in its name: a compromised feed or token,
+ * say, moving the signer's funds, locking them in the contract with no
+ * record, or taking a token's admin role (review finding TOOL-5 and its
+ * residual, 20 October 2026). Refused before a signature.
+ */
+function checkSubInvocations(state, node, signer, pulls, label, tail, seen = new Set()) {
+  const ow = state.contracts?.openWindow;
+  const refusal = (fn, why) => new Error(`${label}: the simulation asks ${signer ? roleOf(state, signer) : "the signer"} to authorize ${describeCall(fn)} inside this call, which ${why}; ${tail} (rpc-1)`);
+  for (const sub of node.subInvocations ?? []) {
+    const fn = sub.function;
+    const call = fn.type === "sorobanAuthorizedFunctionTypeContractFn" ? armOf(fn) : null;
+    const token = call ? Address.fromScAddress(call.contractAddress).toString() : null;
+    const shaped = call && String(call.functionName) === "transfer" && call.args.length === 3
+      && addressOf(call.args[0]) === signer && addressOf(call.args[1]) === ow;
+    if (!shaped) throw refusal(fn, "is not a transfer of its own tokens into Open Window");
+    if (!pulls.has(token)) {
+      throw refusal(fn, pulls.size === 0 ? "pulls no token from its signer" : `pulls ${[...pulls.keys()].map((t) => `${t.slice(0, 8)}…`).join(", ")}, not that token`);
+    }
+    if (seen.has(token)) throw refusal(fn, "pulls that token once, not twice");
+    seen.add(token);
+    const named = pulls.get(token);
+    const amount = i128Of(call.args[2]);
+    if (named !== null && amount !== named) throw refusal(fn, `moves ${amount} units of it where the call names ${named}`);
+    checkSubInvocations(state, sub, signer, pulls, label, tail, seen);
   }
 }
 
@@ -663,17 +909,20 @@ function foreignWrite(key, known) {
  * contracts, of the contracts and accounts it names and of the local roles
  * (balances, trustlines, signature nonces), never contract code; an upload
  * writes only the code it uploads. Restoring a stranger's archived entry is
- * how a simulation makes the payer buy rent it never needed.
+ * how a simulation makes the payer buy rent it never needed. `extra` names
+ * addresses the call writes to without naming them, such as the holder a
+ * `release` delivers to (review finding TOOL-9): their entries may be
+ * written, and they sign nothing.
  */
-export function checkFootprint(state, ready, func, expected, label) {
-  const known = { addresses: new Set(expected) };
+export function checkFootprint(state, ready, func, expected, label, tail = NOTHING_SIGNED, extra = []) {
+  const known = { addresses: new Set([...expected, ...extra]) };
   for (const id of Object.values(state.contracts ?? {})) if (typeof id === "string" && id.startsWith("C")) known.addresses.add(id);
   for (const role of Object.keys(state.keys ?? {})) known.addresses.add(publicKeyOf(state, role));
   // The SDK's hash() returns a Uint8Array: hex through a Buffer.
   if (func.type === "hostFunctionTypeUploadContractWasm") known.code = new Set([Buffer.from(hash(Buffer.from(func.wasm))).toString("hex")]);
   for (const key of sorobanDataOf(ready).resources.footprint.readWrite) {
     const why = foreignWrite(key, known);
-    if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; nothing signed (rpc-1)`);
+    if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; ${tail} (rpc-1)`);
   }
 }
 
@@ -697,28 +946,74 @@ export function checkExtendFootprint(ready, keys, label) {
 /**
  * Refuses a transaction whose resource fee is above `cap`, or whose total fee
  * is anything but the inclusion bid plus that resource fee: the fee signed is
- * the fee checked.
+ * the fee checked. A consistent fee that is only too high carries `feeAsked`
+ * (stroops), so that a caller may size a cheaper call (`extendCode`).
  */
-export function checkFee(ready, cap, label) {
+export function checkFee(ready, cap, label, tail = NOTHING_SIGNED) {
   const resourceFee = BigInt(sorobanDataOf(ready).resourceFee.toString());
   const beyondInclusion = BigInt(ready.fee) - BigInt(INCLUSION_FEE);
   if (resourceFee > cap || beyondInclusion > cap || beyondInclusion !== resourceFee) {
-    const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
-    throw new Error(`${label}: the simulation asks ${xlm(beyondInclusion > resourceFee ? beyondInclusion : resourceFee)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; nothing signed (rpc-1)`);
+    throw feeAboveCap(beyondInclusion > resourceFee ? beyondInclusion : resourceFee, cap, label, tail, beyondInclusion === resourceFee);
   }
 }
 
-/** Signs every address-credential entry with the matching local key. */
-async function signAuth(state, entries) {
-  const { sequence } = await net(() => server.getLatestLedger(), "ledger");
+/** The refusal of a fee above `cap`; `sized` when the fee is consistent and only too high, which `feeAsked` then carries. */
+function feeAboveCap(asked, cap, label, tail, sized = true) {
+  const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
+  const error = new Error(`${label}: the simulation asks ${xlm(asked)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; ${tail} (rpc-1)`);
+  if (sized) error.feeAsked = asked;
+  return error;
+}
+
+/**
+ * Refuses a simulation whose resource fee is above `cap` before the SDK
+ * assembles it: a fee beyond the 429.49 XLM a transaction can carry would
+ * not even assemble, and the refusal must still say what was asked.
+ */
+function checkSimulatedFee(sim, cap, label, tail = NOTHING_SIGNED) {
+  const asked = BigInt(sim.minResourceFee ?? "0");
+  if (asked > cap) throw feeAboveCap(asked, cap, label, tail);
+}
+
+/** Ledgers an authorization signature stays valid: about 8 minutes. */
+const AUTH_VALIDITY_LEDGERS = 100;
+
+/**
+ * The ledger the authorization signatures expire at: 100 ledgers past the
+ * lower of the latest ledgers of the active endpoint and of a second one
+ * (review finding TOOL-1, 20 October 2026). The expiry is part of what is
+ * signed, and one endpoint alone could announce a ledger far ahead to
+ * stretch a signature's life. Two endpoints further apart than
+ * `LIMITS.rpcLedgerGap`, or a second endpoint that does not answer, refuse
+ * the signature. With a single endpoint configured, its word is taken.
+ */
+export async function signatureExpiry(label) {
+  const active = Number((await net(() => server.getLatestLedger(), "ledger")).sequence);
+  if (!Number.isSafeInteger(active) || active <= 0) throw new Error(`${label}: ${activeRpcUrl()} gave no latest ledger; ${NOTHING_SIGNED} (rpc-1)`);
+  const index = secondEndpoint();
+  if (index === null) return active + AUTH_VALIDITY_LEDGERS;
+  let second;
+  try {
+    second = Number((await net(() => servers[index].getLatestLedger(), "ledger")).sequence);
+  } catch (error) {
+    throw new Error(`${label}: ${RPC_URLS[index]} did not give its latest ledger (${String(error?.message ?? error).split("\n")[0].slice(0, 80)}), so the expiry of the signatures cannot be checked; ${NOTHING_SIGNED} (rpc-1); retry, or list one endpoint in STELLAR_RPC_URLS to sign on its word alone`);
+  }
+  if (!Number.isSafeInteger(second) || Math.abs(active - second) > LIMITS.rpcLedgerGap) {
+    throw new Error(`${label}: ${activeRpcUrl()} is at ledger ${active} and ${RPC_URLS[index]} at ${second}, more than ${LIMITS.rpcLedgerGap} apart: the expiry of the signatures cannot be trusted; ${NOTHING_SIGNED} (rpc-1)`);
+  }
+  return Math.min(active, second) + AUTH_VALIDITY_LEDGERS;
+}
+
+/** Signs every address-credential entry with the matching local key, valid until ledger `expiry`. */
+async function signAuth(state, entries, expiry) {
   return Promise.all(
     entries.map(async (entry) => {
       if (!isAddressCredential(entry)) return entry;
       const address = credentialAddress(entry);
       const keys = signersForAddress(state, address);
-      if (keys.length === 1) return authorizeEntry(entry, keys[0], sequence + 100, PASSPHRASE);
+      if (keys.length === 1) return authorizeEntry(entry, keys[0], expiry, PASSPHRASE);
       const signer = async (_preimage, payload) => ({ signatureScVal: multisigSignature(keys, payload), address });
-      return authorizeEntry(entry, signer, sequence + 100, PASSPHRASE);
+      return authorizeEntry(entry, signer, expiry, PASSPHRASE);
     }),
   );
 }
@@ -730,11 +1025,17 @@ async function signAuth(state, entries) {
  * the seconds including simulation and signing, and the fee in stroops.
  *
  * Before anything is signed, the simulation must authorize only this call,
- * by its source, the addresses it names and the declared `cosigners`; write
- * only entries the call touches; and ask at most `maxResourceFee` (25 XLM by
- * default). Otherwise it throws and nothing leaves this machine.
+ * by its source, the addresses it names and the declared `cosigners`, with
+ * nothing below it but the signers' own transfers into Open Window of the
+ * token the call pulls (named in its arguments, or declared in `tokens`
+ * for `repurchase`), at the amount it names; write only entries the call touches;
+ * and ask at most `maxResourceFee` (25 XLM by default). Otherwise it throws
+ * and nothing leaves this machine. The entries of the co-signers are signed
+ * before the second simulation, which checks them: a refusal after that
+ * point says what went out. `extraAddresses` are addresses whose entries the
+ * call may write without naming them (footprint only: they never sign).
  */
-export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE } = {}) {
+export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE, tokens = [], extraAddresses = [] } = {}) {
   const begun = Date.now();
   const source = keypair(state, sourceRole);
   let tx = await build(source.publicKey(), operation);
@@ -744,20 +1045,31 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
 
   const recorded = normalizeAuth(sim.result?.auth);
-  checkAuthEntries(state, recorded, func, expected, label);
+  checkAuthEntries(state, recorded, func, expected, label, { source: source.publicKey(), tokens });
+  let tail = NOTHING_SIGNED;
   if (recorded.some(isAddressCredential)) {
-    const signed = await signAuth(state, recorded);
+    const expiry = await signatureExpiry(label);
+    const signed = await signAuth(state, recorded, expiry);
+    tail = signedForSimulation(signed.filter(isAddressCredential).length, expiry);
     tx = await build(source.publicKey(), Operation.invokeHostFunction({ func, auth: signed }));
-    sim = await net(() => server.simulateTransaction(tx), "simulate");
-    if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+    // Whatever ends this simulation ends it with the tail: a refusal in the
+    // answer, a JSON-RPC error the SDK throws as a bare object, or a
+    // transport failure once net() has retried.
+    try {
+      sim = await net(() => server.simulateTransaction(tx), "simulate");
+    } catch (error) {
+      throw refusedAfterSigning(asError(error), label, tail);
+    }
+    if (rpc.Api.isSimulationError(sim)) throw refusedAfterSigning(simulationError(sim), label, tail);
   }
 
+  checkSimulatedFee(sim, maxResourceFee, label, tail);
   const ready = rpc.assembleTransaction(tx, sim).build();
   // The assembled transaction keeps our entries when we signed some, else it
   // takes the simulation's: check what is actually there.
-  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label);
-  checkFootprint(state, ready, func, expected, label);
-  checkFee(ready, maxResourceFee, label);
+  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label, { source: source.publicKey(), tail, tokens });
+  checkFootprint(state, ready, func, expected, label, tail, extraAddresses);
+  checkFee(ready, maxResourceFee, label, tail);
   signTx(state, sourceRole, ready);
   const { result, hash: txHash, seconds, fee } = await submit(ready, label);
   return {
@@ -774,7 +1086,11 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
  * Calls a contract function in a transaction. `options.cosigners` names the
  * roles the contract requires besides the source and the addresses in
  * `args` (the steward on record for `propose_fallback`, the trustee for
- * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap.
+ * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap;
+ * `options.tokens` names the token a call pulls into Open Window without
+ * naming it in its arguments (the repo's stablecoin under `repurchase`);
+ * `options.extraAddresses` names addresses the call writes to without
+ * naming them (the holder a `release` delivers to), never signers.
  */
 export function invoke(state, sourceRole, contractId, fn, args = [], options = {}) {
   const operation = Operation.invokeContractFunction({ contract: contractId, function: fn, args });
@@ -860,6 +1176,96 @@ export async function deploySac(state, sourceRole, classicAsset) {
 export { Asset, Operation, Keypair, StrKey };
 
 // ---------------------------------------------------------------------------
+// The WASM an upgrade installs (review finding STATE-2, 20 October 2026)
+// ---------------------------------------------------------------------------
+//
+// `stellar contract build` writes target/wasm32v1-none/release/, unless
+// CARGO_TARGET_DIR sends it elsewhere, and links the contract with the stack
+// NIGHT_WINDOW_STACK_SIZE names when it is set (the CI canary's 8 KiB, an
+// experiment's 1 KiB): an upgrade could install a WASM nobody reviewed.
+// These checks run before any network call.
+
+/** The stack night_window.wasm ships with: 64 KiB, first in linear memory (contracts/night-window/build.rs). */
+export const SHIPPED_STACK_BYTES = 65_536;
+
+/** The variables that change the WASM `stellar contract build` writes, or where it writes it. */
+export const BUILD_VARIABLES = ["NIGHT_WINDOW_STACK_SIZE", "CARGO_TARGET_DIR"];
+
+/** An unsigned or signed LEB128 number at `at`: `[value, next]`. */
+function leb128(bytes, at, signed = false) {
+  let value = 0n;
+  let shift = 0n;
+  for (let next = at; ; next += 1) {
+    if (next >= bytes.length) throw new Error("not a whole WASM module");
+    const byte = bytes[next];
+    value |= BigInt(byte & 0x7f) << shift;
+    shift += 7n;
+    if ((byte & 0x80) === 0) {
+      if (signed && shift < 64n && (byte & 0x40) !== 0) value |= -1n << shift;
+      return [Number(value), next + 1];
+    }
+  }
+}
+
+/**
+ * The initial linear memory (pages of 64 KiB) and the initial stack pointer
+ * of a WASM module: its memory section and its first global, read as the
+ * contract's layout test does (`memory_layout` in test_perf.rs).
+ */
+export function wasmMemoryLayout(bytes) {
+  const wasm = Buffer.from(bytes);
+  if (wasm.length < 8 || wasm.readUInt32LE(0) !== 0x6d736100) throw new Error("not a WASM module");
+  let pages = null;
+  let stack = null;
+  for (let at = 8; at < wasm.length; ) {
+    const id = wasm[at];
+    const [size, body] = leb128(wasm, at + 1);
+    if (id === 5) {
+      const [, flags] = leb128(wasm, body); // number of memories
+      const [, min] = leb128(wasm, flags);
+      [pages] = leb128(wasm, min);
+    }
+    // The first global: value type, mutability, then `i32.const <value>`.
+    if (id === 6) {
+      const [, first] = leb128(wasm, body);
+      if (wasm[first + 2] === 0x41) [stack] = leb128(wasm, first + 3, true);
+    }
+    at = body + size;
+  }
+  return { pages, stack };
+}
+
+/** Refuses to go on while a variable that changes the build is set in `env`: unset it, rebuild in a clean shell, and run again. */
+export function checkBuildEnv(env = process.env) {
+  for (const name of BUILD_VARIABLES) {
+    const value = env[name];
+    if (value === undefined || value === "") continue;
+    throw new Error(`${name} is set (${value}): ${name === "CARGO_TARGET_DIR" ? "`stellar contract build` writes there, while this script reads target/" : "`stellar contract build` links night_window.wasm with that stack, not the shipped 64 KiB"}; unset it, rebuild in a clean shell and run again; nothing uploaded or signed`);
+  }
+}
+
+/**
+ * The WASM an upgrade may upload, propose or install: built in a clean
+ * environment, linked with the shipped stack, and exactly the build the
+ * operator expects (`--expect=<sha256>`, the hash of `stellar contract
+ * build` at the release tag). Returns `{ hash, hex, size, stack, pages }`;
+ * throws before any network call.
+ */
+export function checkUpgradeWasm(bytes, expectedHex, env = process.env) {
+  checkBuildEnv(env);
+  if (!expectedHex) throw new Error("--expect=<sha256> is required: the sha256 of night_window.wasm built at the release tag, which the instance must run; nothing uploaded or signed");
+  const expected = String(expectedHex).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error(`--expect takes a sha256 in hex, 64 characters, not ${expectedHex}; nothing uploaded or signed`);
+  const digest = Buffer.from(hash(Buffer.from(bytes)));
+  const hex = digest.toString("hex");
+  const { pages, stack } = wasmMemoryLayout(bytes);
+  const stackNote = stack === SHIPPED_STACK_BYTES ? "" : `, linked with a ${stack ?? "unknown"}-byte stack`;
+  if (hex !== expected) throw new Error(`the built night_window.wasm is ${hex}${stackNote}, not the expected ${expected}: rebuild at the release tag in a clean shell; nothing uploaded or signed`);
+  if (stack !== SHIPPED_STACK_BYTES) throw new Error(`night_window.wasm ${hex} starts its stack pointer at ${stack ?? "an unknown value"}, not the shipped ${SHIPPED_STACK_BYTES} bytes: it was linked with another stack; nothing uploaded or signed`);
+  return { hash: digest, hex, size: bytes.length, stack, pages };
+}
+
+// ---------------------------------------------------------------------------
 // Ledger entries and their time to live (monitoring)
 // ---------------------------------------------------------------------------
 
@@ -926,8 +1332,85 @@ export async function extendTtl(state, sourceRole, keys, ledgers, { maxResourceF
     .build();
   const sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+  checkSimulatedFee(sim, maxResourceFee, label);
   const ready = rpc.assembleTransaction(tx, sim).build();
   checkExtendFootprint(ready, keys, label);
+  checkFee(ready, maxResourceFee, label);
+  signTx(state, sourceRole, ready);
+  const { hash: txHash, seconds, fee } = await submit(ready, label);
+  return { hash: txHash, seconds, fee };
+}
+
+/** Ledgers in a day, at five seconds a ledger. */
+export const LEDGERS_PER_DAY = 17_280;
+
+/**
+ * Extends the contract code entry `key` to `toDays` of life, from about
+ * `fromDays` now, paying at most `maxResourceFee` (one slice). The rent is
+ * the network's and moves: when the slice asks more than the cap, a shorter
+ * one is tried once, sized on the rate per day that simulation showed, with
+ * a tenth to spare (review finding TOOL-6, 20 October 2026). Returns the
+ * extension's `{ hash, seconds, fee }` and `days`, the life it asked for.
+ */
+export async function extendCode(state, sourceRole, key, { fromDays, toDays, maxResourceFee = CODE_SLICE_MAX_FEE }) {
+  const extend = async (days) => ({ ...(await extendTtl(state, sourceRole, [key], Math.floor(days * LEDGERS_PER_DAY), { maxResourceFee })), days });
+  try {
+    return await extend(toDays);
+  } catch (error) {
+    const added = toDays - fromDays;
+    if (error.feeAsked === undefined || !Number.isFinite(fromDays) || !(added > 0)) throw error;
+    // Rent is proportional to the days added: the slice that fits, nine tenths of the cap.
+    const days = Math.floor((added * Number(maxResourceFee) * 9) / (10 * Number(error.feeAsked)));
+    if (days < 1) throw error;
+    process.stderr.write(`  (${String(error.message).split(";")[0]}: a ${days}-day slice instead)\n`);
+    return extend(fromDays + days);
+  }
+}
+
+/**
+ * The most a restore of the contract code may cost: it rents the entry
+ * again for the network's minimum time to live and writes it back, about
+ * what an upload costs (60 XLM for night_window.wasm on testnet, 20 October
+ * 2026).
+ */
+export const CODE_RESTORE_MAX_FEE = 1_000_000_000n;
+
+/**
+ * Refuses a restore whose footprint is not exactly the requested keys,
+ * read-write, with nothing read-only: the payer restores what it was asked
+ * to, never a stranger's entry (rpc-1).
+ */
+export function checkRestoreFootprint(ready, keys, label) {
+  const { readOnly, readWrite } = sorobanDataOf(ready).resources.footprint;
+  const asked = new Set(keys.map((k) => k.toXDR("base64")));
+  const got = new Set(readWrite.map((k) => k.toXDR("base64")));
+  if (readOnly.length || got.size !== asked.size || [...got].some((k) => !asked.has(k))) {
+    throw new Error(`${label}: the simulation restores other entries than the ${keys.length} asked; ${NOTHING_SIGNED} (rpc-1)`);
+  }
+}
+
+/**
+ * Restores archived persistent entries: a RestoreFootprint on exactly
+ * `keys`, paid by `sourceRole`, at most `maxResourceFee`. `send` refuses the
+ * automatic restore of a contract's code that an invocation's simulation
+ * asks for (a footprint that writes code); this is the explicit restore of
+ * the instance's own code, under its own cap (review finding TOOL-4,
+ * 20 October 2026). Returns `{ hash, seconds, fee }`.
+ */
+export async function restoreEntries(state, sourceRole, keys, { maxResourceFee = MAX_RESOURCE_FEE } = {}) {
+  const label = `${sourceRole} restore`;
+  const source = keypair(state, sourceRole);
+  const account = await net(() => server.getAccount(source.publicKey()), "account");
+  const tx = new TransactionBuilder(account, { fee: INCLUSION_FEE, networkPassphrase: PASSPHRASE })
+    .addOperation(Operation.restoreFootprint({}))
+    .setSorobanData(new SorobanDataBuilder().setReadWrite(keys).build())
+    .setTimeout(TX_VALIDITY_SECS)
+    .build();
+  const sim = await net(() => server.simulateTransaction(tx), "simulate");
+  if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+  checkSimulatedFee(sim, maxResourceFee, label);
+  const ready = rpc.assembleTransaction(tx, sim).build();
+  checkRestoreFootprint(ready, keys, label);
   checkFee(ready, maxResourceFee, label);
   signTx(state, sourceRole, ready);
   const { hash: txHash, seconds, fee } = await submit(ready, label);

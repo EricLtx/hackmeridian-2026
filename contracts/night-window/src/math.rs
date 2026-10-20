@@ -68,9 +68,28 @@ impl Price {
 
     /// Cross price: `self` and `quote` are both expressed in the same base
     /// (for instance USD); the result is `self` expressed in units of
-    /// `quote`'s asset (for instance EUR), with `self`'s decimals.
+    /// `quote`'s asset (for instance EUR), with `self`'s decimals:
+    /// `self.mantissa * 10^d / quote.mantissa`, rounded down, with `d` the
+    /// quote's decimals, without forming that product (review finding
+    /// VAL-3, 20 October 2026: at 18 and 18 decimals it exceeded i128 above
+    /// 170 per share). With `self.mantissa = q * quote.mantissa + r`, the
+    /// result is `q * 10^d + floor(r * 10^d / quote.mantissa)`: the first
+    /// term is at most the result, and the second goes through a wide
+    /// product where `r * 10^d` does not fit (second round of the finding:
+    /// an 18-decimal rate above 170 overflowed it for some NAVs). The result
+    /// is the direct formula's wherever that one fits in i128; the only
+    /// overflow left is a result that does not fit.
     pub fn divided_by(self, quote: Price) -> Result<Price, Error> {
-        let mantissa = mul_div_floor(self.mantissa, pow10(quote.decimals)?, quote.mantissa)?;
+        let unit = pow10(quote.decimals)?;
+        let (whole, rest) = (
+            self.mantissa.checked_div(quote.mantissa).ok_or(OVERFLOW)?,
+            self.mantissa.checked_rem(quote.mantissa).ok_or(OVERFLOW)?,
+        );
+        let mantissa = whole
+            .checked_mul(unit)
+            .ok_or(OVERFLOW)?
+            .checked_add(mul_div_floor_wide(rest, unit, quote.mantissa)?)
+            .ok_or(OVERFLOW)?;
         Price::new(mantissa, self.decimals)
     }
 }
@@ -85,6 +104,96 @@ pub fn mul_div_floor(a: i128, b: i128, c: i128) -> Result<i128, Error> {
         .ok_or(OVERFLOW)?
         .checked_div(c)
         .ok_or(OVERFLOW)
+}
+
+/// `2^64`: a 128-bit value splits into two limbs of this base.
+const LIMB: u128 = 1 << 64;
+/// `2^127`: the top bit of a 128-bit value.
+const TOP: u128 = 1 << 127;
+
+/// `a * b / c`, rounded down, for `a` and `b` non-negative and `c`
+/// positive, through a 256-bit product where the direct one does not fit
+/// (review finding VAL-3, second round, 20 October 2026): the only overflow
+/// left is a quotient that does not fit in i128. A negative input or a zero
+/// `c` is an overflow too, never a trap, on either path: the direct
+/// division would otherwise truncate a negative quotient towards zero.
+pub fn mul_div_floor_wide(a: i128, b: i128, c: i128) -> Result<i128, Error> {
+    if a < 0 || b < 0 || c <= 0 {
+        return Err(OVERFLOW);
+    }
+    if let Some(product) = a.checked_mul(b) {
+        return product.checked_div(c).ok_or(OVERFLOW);
+    }
+    let unsigned = |value: i128| u128::try_from(value).map_err(|_| OVERFLOW);
+    let (a, b, c) = (unsigned(a)?, unsigned(b)?, unsigned(c)?);
+    let (high, low) = wide_product(a, b)?;
+    // The quotient fits in 128 bits exactly when the high half is below
+    // the divisor.
+    if high >= c {
+        return Err(OVERFLOW);
+    }
+    i128::try_from(wide_quotient(high, low, c)?).map_err(|_| OVERFLOW)
+}
+
+/// The two 64-bit limbs of a 128-bit value, `(high, low)`.
+fn limbs(value: u128) -> Result<(u128, u128), Error> {
+    Ok((
+        value.checked_div(LIMB).ok_or(OVERFLOW)?,
+        value.checked_rem(LIMB).ok_or(OVERFLOW)?,
+    ))
+}
+
+/// `a * b` as two 128-bit halves, `(high, low)`, from the four products of
+/// the operands' limbs: with `a = a1 * 2^64 + a0` and `b = b1 * 2^64 + b0`,
+/// the product is `a1 b1 * 2^128 + (a1 b0 + a0 b1) * 2^64 + a0 b0`, each
+/// term carried into the half above it.
+fn wide_product(a: u128, b: u128) -> Result<(u128, u128), Error> {
+    let ((a1, a0), (b1, b0)) = (limbs(a)?, limbs(b)?);
+    let (ll1, ll0) = limbs(a0.checked_mul(b0).ok_or(OVERFLOW)?)?;
+    let (lh1, lh0) = limbs(a0.checked_mul(b1).ok_or(OVERFLOW)?)?;
+    let (hl1, hl0) = limbs(a1.checked_mul(b0).ok_or(OVERFLOW)?)?;
+    let hh = a1.checked_mul(b1).ok_or(OVERFLOW)?;
+    // The middle limb, under 3 x 2^64, and its carry.
+    let (mid1, mid0) = limbs(
+        ll1.checked_add(lh0)
+            .and_then(|middle| middle.checked_add(hl0))
+            .ok_or(OVERFLOW)?,
+    )?;
+    let low = mid0
+        .checked_mul(LIMB)
+        .and_then(|shifted| shifted.checked_add(ll0))
+        .ok_or(OVERFLOW)?;
+    let high = hh
+        .checked_add(lh1)
+        .and_then(|high| high.checked_add(hl1))
+        .and_then(|high| high.checked_add(mid1))
+        .ok_or(OVERFLOW)?;
+    Ok((high, low))
+}
+
+/// `(high, low) / c`, rounded down, for `high < c`, so that the quotient
+/// fits in 128 bits: restoring division, one bit of the low half at a time.
+/// The remainder stays below `c`, so doubling it never overflows.
+fn wide_quotient(high: u128, low: u128, c: u128) -> Result<u128, Error> {
+    let (mut remainder, mut low, mut quotient) = (high, low, 0u128);
+    for _ in 0..128 {
+        let (carry, rest) = if low >= TOP {
+            (1, low.checked_sub(TOP).ok_or(OVERFLOW)?)
+        } else {
+            (0, low)
+        };
+        low = rest.checked_mul(2).ok_or(OVERFLOW)?;
+        remainder = remainder
+            .checked_mul(2)
+            .and_then(|doubled| doubled.checked_add(carry))
+            .ok_or(OVERFLOW)?;
+        quotient = quotient.checked_mul(2).ok_or(OVERFLOW)?;
+        if remainder >= c {
+            remainder = remainder.checked_sub(c).ok_or(OVERFLOW)?;
+            quotient = quotient.checked_add(1).ok_or(OVERFLOW)?;
+        }
+    }
+    Ok(quotient)
 }
 
 /// `a * b / c`, rounded up. Callers pass non-negative values.

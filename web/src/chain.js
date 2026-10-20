@@ -46,8 +46,17 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const RPC_TIMEOUT_MS = 7000;
 const EVENTS_TIMEOUT_MS = 12000;
 const SEND_TIMEOUT_MS = 10000;
-/** Seconds past a write's validity window that a second endpoint gets to see it before its silence counts. */
+/** Seconds past a write's validity window that a second endpoint that answers gets to see it. */
 const CONFIRM_GRACE_SECS = 30;
+/**
+ * How long the other endpoints may stay silent (no answer at all) before a
+ * write the endpoint in use reports applied ends as unverified: two of the
+ * public endpoint's slowest answers (13 to 15 s on 20 October).
+ */
+export const SILENT_MS = 30_000;
+
+/** The sentence of a write applied according to one endpoint, which no other endpoint could confirm. */
+export const unverifiedText = (host) => t("Applied according to {host}; no second endpoint could confirm it.", { host });
 
 /** An RPC call that did not answer within its bound. */
 export class RpcTimeout extends Error {
@@ -101,6 +110,51 @@ function isTransient(error) {
   return /fetch|load failed|network|connection was lost|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|\b(429|50[0-4])\b/i.test(text);
 }
 
+/** An endpoint that asks to slow down (HTTP 429): Gateway.fm allows 30 requests per second per IP, shared behind a venue's NAT. */
+function isRateLimited(error) {
+  return error?.response?.status === 429 || /status code 429\b/.test(String(error?.message ?? ""));
+}
+
+/**
+ * The clock for durations: the rests, the rate window, the pair of
+ * timeouts, the poll budget, the silence of a cross-check. Monotonic, so a
+ * step of the wall clock (a sleep and wake, an NTP correction) holds no
+ * call and ends no rest; the wall clock serves only against ledger times.
+ */
+const monotonic = () => (typeof performance === "object" && typeof performance.now === "function" ? performance.now() : Date.now());
+
+/** The wait before a call an endpoint refused with HTTP 429 goes there again, when it gives no usable Retry-After. */
+const RATE_LIMIT_WAIT_MS = 1000;
+/** The longest Retry-After honoured: an endpoint cannot hold a call longer than a timeout would. */
+const MAX_RETRY_AFTER_MS = 5000;
+/**
+ * HTTP 429 answers in a row, within one call or over the height polls, after
+ * which the endpoint in use is not slowing a burst but refusing: the calls
+ * move to another endpoint (`failover` with `exhausted`) instead of failing
+ * with the status text until the 429s stop, which on 20 October could have
+ * lasted the whole rest of the other endpoint (up to MAX_REST_MS).
+ */
+export const RATE_LIMIT_STRIKES = 3;
+
+/** The Retry-After of a 429 in seconds when the browser can read it (the endpoint must expose the header), else NaN. */
+function retryAfterSecs(error) {
+  const headers = error?.response?.headers;
+  const raw = typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"];
+  const seconds = raw === null || raw === undefined || raw === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : Number.NaN;
+}
+
+/** The wait a 429 asks for: its Retry-After, capped at MAX_RETRY_AFTER_MS, else about a second. */
+function retryAfterMs(error) {
+  const seconds = retryAfterSecs(error);
+  return Number.isNaN(seconds) ? RATE_LIMIT_WAIT_MS : Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+}
+
+/** Whether the `strikes`-th 429 in a row, or one asking to wait longer than a timeout would, means the endpoint refuses rather than slows a burst. */
+function rateLimitExhausted(error, strikes) {
+  return strikes >= RATE_LIMIT_STRIKES || retryAfterSecs(error) * 1000 > MAX_RETRY_AFTER_MS;
+}
+
 /** Ledgers the endpoint in use may trail the highest one before calls move to another endpoint. */
 export const STALE_LEDGERS = 10;
 /** Ledgers within which an endpoint counts as level with the highest: each one is read at a slightly different moment. */
@@ -109,30 +163,176 @@ export const LEVEL_LEDGERS = 1;
  * How long an endpoint whose call failed or timed out rests before calls may
  * return to it, even level: a public RPC that answers its height but is slow
  * to simulate (8.5 s on 20 October) would otherwise be left and rejoined at
- * every pass.
+ * every pass. It is the first rest; see `restAfterFailure`.
  */
 export const RETURN_QUIET_MS = 60_000;
-const HEIGHT_TIMEOUT_MS = 4000;
+/** The longest rest of an endpoint that keeps failing soon after calls return to it. */
+export const MAX_REST_MS = 600_000;
+/**
+ * Calls in flight on one endpoint at most; the others wait for a slot. One
+ * board pass sent 31 requests within a second to Gateway.fm, whose limit is
+ * 30 per second per IP.
+ */
+export const MAX_IN_FLIGHT = 6;
+/**
+ * Calls sent to one endpoint within any one second, at most; the others
+ * wait their turn, in order. MAX_IN_FLIGHT caps concurrency, not rate: six
+ * calls of about 120 ms allow about 48 a second, and a pass sent up to 44
+ * in one second to Gateway.fm on 20 October, which allows 30 POST per
+ * second per IP, shared with every client behind the same NAT, and sends
+ * no Retry-After. Under this budget the page causes no 429 of its own and
+ * leaves room for the others on the same IP. The reads, the sends and the
+ * cross-checks of a write count; the height polls, two per pass, do not.
+ */
+export const RATE_PER_SECOND = 20;
+const RATE_WINDOW_MS = 1000;
+/**
+ * Within how long a second timeout on the endpoint in use moves the reads
+ * away from it. The public endpoint stalls 7 to 15 s on 1.5 to 2 % of its
+ * calls, server side: one stall moved the whole page, and the rests then
+ * brought it back and forth. A read that times out once goes to the same
+ * endpoint once more; the send of a transaction still moves at once.
+ */
+export const TIMEOUT_PAIR_MS = 30_000;
+/**
+ * Height polls of the first endpoint answered in a row, each within
+ * RETURN_POLL_MS, before the calls return to it once its rest is over. The
+ * public endpoint's stalls come in clusters: a return met the next stall
+ * at once, a pair of switches at every return. A poll that does not answer
+ * in time, or a failed call that moves the calls away, starts the count
+ * again.
+ */
+export const RETURN_POLLS = 2;
+export const RETURN_POLL_MS = 2000;
+
+/**
+ * The rest of an endpoint that just failed a call, in milliseconds, from
+ * its `{ restMs, failedAt, returnedAt }` (its rest so far, its previous
+ * failure, when calls last came to it) and the time `now`. A first failure
+ * rests RETURN_QUIET_MS. An endpoint that fails within its rest period after
+ * calls returned to it rests twice as long (60, 120, 240 s... up to
+ * MAX_REST_MS); one that served calls quietly for longer starts again from
+ * RETURN_QUIET_MS. A failure after one already recorded since the calls
+ * came (a stay with nowhere to go, `failover`) keeps the rest as it is. On
+ * 20 October the public endpoint answered its height at once but about 7 %
+ * of its calls took 6 to 15 s: a fixed rest returned to it, and left it
+ * again, about once a minute.
+ */
+export function restAfterFailure({ restMs, failedAt, returnedAt } = {}, now = monotonic()) {
+  const rest = Number.isFinite(restMs) && restMs > 0 ? restMs : RETURN_QUIET_MS;
+  if (Number.isFinite(failedAt) && Number.isFinite(returnedAt) && failedAt > returnedAt) return rest;
+  const soon = Number.isFinite(failedAt) && Number.isFinite(returnedAt) && returnedAt >= failedAt && now - returnedAt < rest;
+  return soon ? Math.min(rest * 2, MAX_REST_MS) : RETURN_QUIET_MS;
+}
+
+/** Whether `endpoint` is inside its rest after a failed call, at time `now`. */
+const resting = (endpoint, now = monotonic()) => now - (endpoint.failedAt ?? -Infinity) < (endpoint.restMs ?? RETURN_QUIET_MS);
+
+/** One of the MAX_IN_FLIGHT slots of `endpoint`: resolves a function that gives it back, once one is free. */
+function slotOn(endpoint) {
+  endpoint.inFlight ??= 0;
+  endpoint.waiting ??= [];
+  return new Promise((resolve) => {
+    const grant = () => {
+      let given = false;
+      resolve(() => {
+        if (given) return;
+        given = true;
+        const next = endpoint.waiting.shift();
+        if (next) next(); // the slot passes to the next call waiting
+        else endpoint.inFlight -= 1;
+      });
+    };
+    if (endpoint.inFlight < MAX_IN_FLIGHT) {
+      endpoint.inFlight += 1;
+      grant();
+    } else endpoint.waiting.push(grant);
+  });
+}
+
+/**
+ * Resolves when one more call may be sent to `endpoint` under
+ * RATE_PER_SECOND: the sends of the last second are kept, and a call past
+ * the budget waits for the oldest of them to leave the window. Turns are
+ * given in the order asked; `clock` gives the time in milliseconds.
+ * Resolves a function the caller runs right before its call: the send is
+ * then stamped at its own time, not at the turn's, so that the window
+ * holds on the wire whatever ran between the two (a later stamp only
+ * lengthens the waits after it).
+ */
+function turnOn(endpoint, clock = monotonic) {
+  const turn = (endpoint.turns ?? Promise.resolve()).then(async () => {
+    endpoint.sentAt ??= [];
+    for (;;) {
+      const now = clock();
+      while (endpoint.sentAt.length && now - endpoint.sentAt[0].at >= RATE_WINDOW_MS) endpoint.sentAt.shift();
+      if (endpoint.sentAt.length < RATE_PER_SECOND) {
+        const stamp = { at: now };
+        endpoint.sentAt.push(stamp);
+        return () => {
+          stamp.at = Math.max(stamp.at, clock());
+        };
+      }
+      await sleep(endpoint.sentAt[0].at + RATE_WINDOW_MS - now + 1);
+    }
+  });
+  endpoint.turns = turn;
+  return turn;
+}
+
+/**
+ * How long the height poll may hold a refresh pass: per endpoint, getHealth
+ * and the getLatestLedger asked after it share this one budget, and the
+ * page waits no longer for the whole poll (`pollHeights`). The public
+ * endpoint's getHealth took 4.6 to 9.1 s at times on 20 October: such an
+ * answer is skipped for that pass, not waited for.
+ */
+export const HEIGHT_BUDGET_MS = 1500;
+/**
+ * Seconds the endpoint in use may go without closing a ledger, by its own
+ * close time against the local clock, before another endpoint's greater
+ * height may take its calls: a height is only what an endpoint claims.
+ */
+export const STALE_SECS = 60;
+/** Seconds within which the first endpoint's own latest close time counts as current: calls return to it, whatever another endpoint claims. */
+export const FRESH_SECS = 15;
+
+/** A height read: `{ height, closeTime }`, the close time in Unix seconds or null when the endpoint gave none; null for no usable height. */
+function heightRead(height, closeTime) {
+  if (!Number.isSafeInteger(height)) return null;
+  const at = Number(closeTime);
+  return { height, closeTime: Number.isFinite(at) && at > 0 ? at : null };
+}
 
 /**
  * Which endpoint calls should use, from the latest ledger each one reports
- * (null for one that did not answer): the first endpoint whenever it is
- * level with the highest; else the one in use, unless it trails the highest
- * by more than STALE_LEDGERS, in which case the first endpoint that is
- * level. An endpoint that did not answer is no reason to move: a failing
- * call moves on its own (`failover`). Returns `{ index, reason, behind }`,
- * reason "behind" or "level" when calls should move, else null.
+ * and its close time (`{ height, closeTime }`, null for one that did not
+ * answer), against the local clock `now` in seconds. The first endpoint
+ * whenever it is level with the highest or current by its own close time
+ * (FRESH_SECS); else the one in use, unless it trails the highest by more
+ * than STALE_LEDGERS and its own latest close time is older than
+ * STALE_SECS, in which case the first endpoint that is level. Another
+ * endpoint's height alone thus neither takes the calls nor keeps them: an
+ * endpoint that over-reports cannot capture them. An endpoint that did not
+ * answer is no reason to move: a failing call moves on its own
+ * (`failover`). Returns `{ index, reason, behind }`, reason "behind" or
+ * "level" when calls should move, else null.
  */
-export function pickEndpoint(heights, active) {
-  const known = heights.filter((h) => Number.isSafeInteger(h));
+export function pickEndpoint(reads, active, now = Date.now() / 1000) {
+  const height = (i) => (Number.isSafeInteger(reads[i]?.height) ? reads[i].height : null);
+  const age = (i) => (Number.isFinite(reads[i]?.closeTime) ? now - reads[i].closeTime : null);
+  const known = reads.map((_, i) => height(i)).filter((h) => h !== null);
   const stay = { index: active, reason: null, behind: 0 };
   if (!known.length) return stay;
   const highest = Math.max(...known);
-  const level = (i) => Number.isSafeInteger(heights[i]) && highest - heights[i] <= LEVEL_LEDGERS;
-  if (active !== 0 && level(0)) return { index: 0, reason: "level", behind: 0 };
-  const mine = heights[active];
-  if (!Number.isSafeInteger(mine) || highest - mine <= STALE_LEDGERS) return stay;
-  const best = heights.findIndex((_, i) => level(i));
+  const level = (i) => height(i) !== null && highest - height(i) <= LEVEL_LEDGERS;
+  const current = (i) => age(i) !== null && age(i) <= FRESH_SECS;
+  if (active !== 0 && (level(0) || current(0))) return { index: 0, reason: "level", behind: 0 };
+  const mine = height(active);
+  if (mine === null || highest - mine <= STALE_LEDGERS) return stay;
+  // Old by its own clock too, or no proof that it lags: a close time is checked against the local clock, not another endpoint's word.
+  if (!(age(active) > STALE_SECS)) return stay;
+  const best = reads.findIndex((_, i) => level(i));
   return best >= 0 && best !== active ? { index: best, reason: "behind", behind: highest - mine } : stay;
 }
 
@@ -141,6 +341,7 @@ export function rpcChangeText({ from, to, reason, behind = 0 }) {
   if (reason === "timeout") return t("RPC {from} did not answer in time: switched to {to}.", { from, to });
   if (reason === "behind") return t("RPC {from} is {n} ledgers behind: switched to {to}.", { from, to, n: behind });
   if (reason === "level") return t("RPC {to} has caught up: switched back to it.", { to });
+  if (reason === "rate-limited") return t("RPC {from} keeps refusing requests as too many: switched to {to}.", { from, to });
   return t("RPC {from} failed: switched to {to}.", { from, to });
 }
 
@@ -169,6 +370,9 @@ function resultCode(transactionResult) {
     return "unknown";
   }
 }
+
+/** The failure of transaction `hash`, from a getTransaction answer that reports it FAILED. */
+const txFailed = (result, hash) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
 
 function feeCharged(result) {
   try {
@@ -353,10 +557,14 @@ const REPO_INTS = ["offer_id", "shares", "principal", "rate_bps", "opened_at", "
 const REPO_ADDRESSES = ["borrower", "lender", "fund", "stablecoin"];
 const OFFER_INTS = ["available", "rate_bps", "max_term"];
 const OFFER_ADDRESSES = ["lender", "stablecoin"];
+const QUOTE_INTS = ["max_principal", "price", "price_decimals", "haircut_bps"];
 const STATUSES = new Set(["Open", "Repurchased", "Defaulted"]);
 
+// Every field of a repo, an offer and a quote must be there: one missing would reach the page as
+// undefined, then BigInt() or a format at render, outside the guards of the board's tiles (WEB-5).
 const normalizeRepo = (id, repo) => {
   checkShape(repo, { ints: REPO_INTS, addresses: REPO_ADDRESSES, what: "repo" });
+  need(repo, [...REPO_INTS, ...REPO_ADDRESSES, "status"], "repo");
   const status = Array.isArray(repo.status) ? repo.status[0] : repo.status;
   if (!STATUSES.has(status)) throw new TypeError("unexpected repo.status from the chain");
   // The scanned id comes last: a decoded field named id cannot replace it.
@@ -365,9 +573,17 @@ const normalizeRepo = (id, repo) => {
 
 const normalizeOffer = (id, offer) => {
   checkShape(offer, { ints: OFFER_INTS, addresses: OFFER_ADDRESSES, what: "offer" });
+  need(offer, [...OFFER_INTS, ...OFFER_ADDRESSES, "funds", "sponsor"], "offer");
   if (!Array.isArray(offer.funds) || !offer.funds.every((f) => typeof f === "string" && STRKEY.test(f))) throw new TypeError("unexpected offer.funds from the chain");
-  return { ...offer, id, sponsor: offer.sponsor === true };
+  return { ...offer, id, sponsor: isBool(offer.sponsor, "offer.sponsor") };
 };
+
+/** A quote as the contract returns it (Quote): its four figures, all present and integers, decimals from 0 to 38. */
+export function checkQuote(value) {
+  checkShape(value, { ints: QUOTE_INTS, what: "quote" });
+  need(value, QUOTE_INTS, "quote");
+  return checkDecimals(value, "quote");
+}
 
 /** Decoded Soroban values as plain JSON, as the indexer writes them: big integers as strings, bytes as hex. */
 export function plain(value) {
@@ -404,8 +620,14 @@ export class Chain {
     const urls = [deployment.rpcUrl, ...(Array.isArray(deployment.rpcFallbacks) ? deployment.rpcFallbacks : [])].filter(Boolean);
     this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: rpcServer(url), lastMs: null, failures: 0 }));
     this.active = 0;
+    /** Moves between endpoints so far: a call started before the last one is no reason to move again (`failover`). */
+    this.moveCount = 0;
+    /** The clock for durations (`monotonic`); tests on virtual time replace it. */
+    this.clock = monotonic;
     /** Pause between two looks at a submitted transaction, in milliseconds. */
     this.pollMs = 1000;
+    /** How long the other endpoints may stay silent before a write ends unverified (SILENT_MS). */
+    this.silentMs = SILENT_MS;
     /**
      * Called with `{ from, to, reason, behind }` when calls move to another endpoint: reason
      * "timeout" or "error" (a failing call), "behind" (it lagged by `behind` ledgers) or "level" (back to the first).
@@ -507,18 +729,45 @@ export class Chain {
    * made on endpoint `from`. Many calls run at once: only the first failure
    * on the endpoint in use switches; the others find the switch done and
    * retry on the new endpoint, so the interface never bounces between them.
-   * False when there is no other endpoint or the error is not the network's.
+   * The endpoint left rests (`restAfterFailure`); the next one is the first
+   * after it that is not resting. With every other one resting (an outage
+   * of them all), the calls stay where they are, the failure is recorded
+   * so that the endpoint in use rests too, and the caller retries at its
+   * own pace: a move waits for the shortest remaining rest, instead of one
+   * at every failure, back and forth ("failed" both ways, 11 times a
+   * minute). When the outage ends, the first endpoint takes the calls back
+   * on the usual level rule (`checkHeights`). False when there is no other
+   * endpoint, the error is not the network's, or it is an HTTP 429:
+   * back-pressure, which `net` waits out on the same endpoint. A 429 the
+   * caller marks `exhausted` (RATE_LIMIT_STRIKES in a row, or a Retry-After
+   * longer than a timeout) is a failure like any other, but its stay is not
+   * recorded as a failure: the caller keeps waiting as the endpoint asks. `since` is
+   * the `moveCount` when the call started: a call that started before the
+   * last move, such as a 12 s scan of events launched before a round trip
+   * away and back, reports a failure of the past, so it follows the calls
+   * (true) rather than moving them again.
    */
-  failover(error, from = this.active) {
+  failover(error, from = this.active, { exhausted = false, since } = {}) {
     if (this.endpoints.length < 2) return false;
     if (!(error instanceof RpcTimeout) && !isTransient(error)) return false;
-    if (from !== this.active) return true;
+    const limited = isRateLimited(error);
+    if (limited && !exhausted) return false;
+    if (from !== this.active || (since !== undefined && since !== this.moveCount)) return true;
+    const now = this.clock();
+    let next = this.nextEndpoint(this.active, now);
+    if (limited && next === null) return false;
     const previous = this.endpoints[this.active];
-    previous.failures += 1;
-    previous.failedAt = Date.now();
-    this.active = (this.active + 1) % this.endpoints.length;
+    previous.failures = (previous.failures ?? 0) + 1;
+    previous.restMs = restAfterFailure(previous, now);
+    previous.failedAt = now;
+    previous.quickPolls = 0;
+    // Nowhere to go: a resting endpoint whose last height poll answered is still better than one that fails now.
+    if (next === null) next = this.restedAnswering(this.active);
+    if (next === null) return false;
+    this.moveTo(next, now);
     try {
-      this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
+      const reason = error instanceof RpcTimeout ? "timeout" : limited ? "rate-limited" : "error";
+      this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason });
     } catch {
       // A failing listener never stops a call.
     }
@@ -526,84 +775,215 @@ export class Chain {
   }
 
   /**
-   * The latest ledger of every endpoint, read at once within a short bound:
-   * a sequence per endpoint, null for one that did not answer. `getHealth`
-   * carries it in about 200 bytes, where `getLatestLedger` now ships the
-   * whole ledger's metadata (about 330 KB on testnet); an endpoint that calls
-   * itself unhealthy (its last ledger is old) is asked `getLatestLedger`,
-   * since a lagging endpoint is what the comparison looks for.
+   * Among the endpoints other than `from`, all resting, the one whose rest
+   * ends soonest among those whose last height poll answered; null when
+   * none did. A healthy poll ends a rest early for this purpose only: the
+   * ordinary return of the calls (`checkHeights`) still waits the rest out.
+   * Without it, a fallback that died while the first endpoint rested long
+   * (rests grow to 480 s) kept the calls until that rest ended.
    */
-  async heights() {
+  restedAnswering(from) {
+    const candidates = this.endpoints
+      .map((endpoint, index) => ({ endpoint, index }))
+      .filter(({ endpoint, index }) => index !== from && endpoint.pollOk === true)
+      .sort((x, y) => (x.endpoint.failedAt ?? 0) + (x.endpoint.restMs ?? RETURN_QUIET_MS) - ((y.endpoint.failedAt ?? 0) + (y.endpoint.restMs ?? RETURN_QUIET_MS)));
+    return candidates.length ? candidates[0].index : null;
+  }
+
+  /** The first endpoint after `from` that is not resting at `now`; null when every other one rests. */
+  nextEndpoint(from, now = this.clock()) {
+    const count = this.endpoints.length;
+    for (let step = 1; step < count; step += 1) {
+      const index = (from + step) % count;
+      if (!resting(this.endpoints[index], now)) return index;
+    }
+    return null;
+  }
+
+  /**
+   * Sends calls to endpoint `index` from `now` on: the time counts for its
+   * rest if it fails soon after (`restAfterFailure`). Its count of 429
+   * polls starts again: what it answered before calls left it is no reason
+   * to leave it again on one 429.
+   */
+  moveTo(index, now = this.clock()) {
+    this.active = index;
+    this.moveCount += 1;
+    this.endpoints[index].returnedAt = now;
+    this.endpoints[index].limitedPolls = 0;
+    this.endpoints[index].timedOutAt = null;
+  }
+
+  /**
+   * Whether a timeout of a current read (`since` is the move count it
+   * started at) on endpoint `index`, the one in use, is its first within
+   * TIMEOUT_PAIR_MS: it is recorded, and the read goes there once more
+   * instead of moving. A second one within that time is left to `failover`.
+   */
+  firstTimeout(index, since, now = this.clock()) {
+    if (index !== this.active || since !== this.moveCount) return false;
+    const endpoint = this.endpoints[index];
+    if (now - (endpoint.timedOutAt ?? -Infinity) <= TIMEOUT_PAIR_MS) return false;
+    endpoint.timedOutAt = now;
+    return true;
+  }
+
+  /**
+   * The latest ledger of every endpoint and its close time, read at once
+   * within a short bound: `{ height, closeTime }` per endpoint, null for one
+   * that did not answer. `getHealth` carries both in about 200 bytes, where
+   * `getLatestLedger` now ships the whole ledger's metadata (about 330 KB on
+   * testnet); an endpoint that calls itself unhealthy (its last ledger is
+   * old) is asked `getLatestLedger`, since a lagging endpoint is what the
+   * comparison looks for. Both calls share one budget per endpoint,
+   * `budgetMs`: the poll ends within it whatever the endpoints do.
+   */
+  async heights(budgetMs = HEIGHT_BUDGET_MS) {
     return Promise.all(
-      this.endpoints.map(async (endpoint) => {
-        try {
-          const health = await withTimeout(endpoint.server.getHealth(), HEIGHT_TIMEOUT_MS);
-          if (Number.isSafeInteger(health?.latestLedger)) return health.latestLedger;
-        } catch (error) {
-          if (error instanceof RpcTimeout || isTransient(error)) return null;
-        }
-        try {
-          const latest = await withTimeout(endpoint.server.getLatestLedger(), HEIGHT_TIMEOUT_MS);
-          return Number.isSafeInteger(latest?.sequence) ? latest.sequence : null;
-        } catch {
-          return null;
-        }
+      this.endpoints.map(async (endpoint, index) => {
+        const started = this.clock();
+        const read = await this.readHeight(endpoint, index, budgetMs);
+        // Whether the endpoint's last poll answered: a resting one that does is where calls may go when every other one rests (`failover`).
+        endpoint.pollOk = read !== null;
+        // Polls answered in a row within RETURN_POLL_MS: the calls return to the first endpoint after RETURN_POLLS of them.
+        endpoint.quickPolls = read !== null && this.clock() - started <= RETURN_POLL_MS ? (endpoint.quickPolls ?? 0) + 1 : 0;
+        return read;
       }),
     );
   }
 
+  /** One endpoint's height read for `heights`: `{ height, closeTime }`, or null when it did not answer within `budgetMs`. */
+  async readHeight(endpoint, index, budgetMs) {
+    const until = this.clock() + budgetMs;
+    try {
+      const health = await withTimeout(endpoint.server.getHealth(), budgetMs);
+      endpoint.limitedPolls = 0;
+      if (Number.isSafeInteger(health?.latestLedger)) return heightRead(health.latestLedger, health.latestLedgerCloseTime);
+    } catch (error) {
+      // A 429 to the poll is no answer; RATE_LIMIT_STRIKES of them in a row from the endpoint in use leave it.
+      if (isRateLimited(error)) {
+        endpoint.limitedPolls = (endpoint.limitedPolls ?? 0) + 1;
+        if (index === this.active && rateLimitExhausted(error, endpoint.limitedPolls)) this.failover(error, index, { exhausted: true });
+      }
+      if (error instanceof RpcTimeout || isTransient(error)) return null;
+    }
+    const left = until - this.clock();
+    if (left <= 0) return null;
+    try {
+      const latest = await withTimeout(endpoint.server.getLatestLedger(), left);
+      return heightRead(latest?.sequence, latest?.closeTime);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `checkHeights`, but a pass never waits longer than `budgetMs` for it.
+   * A move it decides later still applies: every call reads the endpoint in
+   * use when it runs. Resolves the reads, or null when the budget ran out.
+   */
+  async pollHeights(budgetMs = HEIGHT_BUDGET_MS) {
+    let timer;
+    const bound = new Promise((resolve) => {
+      timer = setTimeout(resolve, budgetMs, null);
+    });
+    try {
+      return await Promise.race([this.checkHeights(budgetMs), bound]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /**
    * Moves calls away from an endpoint that answers but lags: compares every
-   * endpoint's latest ledger and applies `pickEndpoint`, so a fallback is
-   * left for the first endpoint once that one is level again, and, when it
-   * was left after a failed call, has rested RETURN_QUIET_MS. The page runs
-   * it before each refresh: the pass, its clock included, then reads an
-   * endpoint that is current. Never throws; returns the heights read.
+   * endpoint's latest ledger and close time and applies `pickEndpoint`, so a
+   * fallback is left for the first endpoint once that one is level or
+   * current again, and, when it was left after a failed call, has rested
+   * (`restAfterFailure`) and answered RETURN_POLLS polls in a row. The page
+   * runs it before each refresh, within HEIGHT_BUDGET_MS (`pollHeights`):
+   * the pass, its clock included, then reads an endpoint that is current.
+   * Never throws; returns the reads.
    */
-  async checkHeights() {
+  async checkHeights(budgetMs = HEIGHT_BUDGET_MS) {
     if (this.endpoints.length < 2) return [];
-    const heights = await this.heights();
-    // An endpoint that just failed a call is no target yet, however level it is (RETURN_QUIET_MS).
-    const now = Date.now();
-    const candidates = heights.map((height, i) => (now - (this.endpoints[i].failedAt ?? -Infinity) < RETURN_QUIET_MS ? null : height));
-    const { index, reason, behind } = pickEndpoint(candidates, this.active);
+    const reads = await this.heights(budgetMs);
+    // An endpoint that failed a call is no target before its rest is over, however level it is; nor is the
+    // first endpoint, for a return, before it has answered RETURN_POLLS polls in a row.
+    const now = this.clock();
+    const candidates = reads.map((read, i) => (resting(this.endpoints[i], now) || (i === 0 && this.active !== 0 && (this.endpoints[0].quickPolls ?? 0) < RETURN_POLLS) ? null : read));
+    const { index, reason, behind } = pickEndpoint(candidates, this.active, Date.now() / 1000);
     if (reason && index !== this.active) {
       const previous = this.endpoints[this.active];
-      this.active = index;
+      this.moveTo(index, now);
       try {
         this.onRpcChange?.({ from: previous.host, to: this.endpoints[index].host, reason, behind });
       } catch {
         // A failing listener never stops a refresh.
       }
     }
-    return heights;
+    return reads;
   }
 
   /**
-   * Runs `call` on the endpoint in use, within `timeoutMs`. A timeout or a
-   * transient network failure moves at once to the next endpoint when there
-   * is one, else waits and retries; at most `attempts` calls.
+   * Runs `call` on the endpoint in use, within `timeoutMs`, holding one of
+   * its MAX_IN_FLIGHT slots and its turn under RATE_PER_SECOND; a call that
+   * waited while calls moved goes to the endpoint now in use. A transient
+   * network failure moves at once to the next endpoint when there is one,
+   * else waits and retries; a timeout does so on the second one within
+   * TIMEOUT_PAIR_MS on the endpoint in use, the first going there once more
+   * (`firstTimeout`). An HTTP 429 is back-pressure: the call waits as asked
+   * (`retryAfterMs`) and goes to the same endpoint again; the
+   * RATE_LIMIT_STRIKES-th in a row, or one asking to wait longer than a
+   * timeout, is a failure that moves to another endpoint when one is not
+   * resting (`failover`), else the call keeps waiting. At most `attempts`
+   * calls.
    */
   async net(call, { timeoutMs = RPC_TIMEOUT_MS, attempts = 4 } = {}) {
     let delay = 800;
     let moves = 0;
-    for (let attempt = 1; ; attempt += 1) {
+    let strikes = 0;
+    for (let attempt = 1; ; ) {
       const index = this.active;
       const endpoint = this.endpoints[index];
-      const started = Date.now();
+      const release = await slotOn(endpoint);
+      const sending = index === this.active ? await turnOn(endpoint, this.clock) : null;
+      if (index !== this.active) {
+        // Calls moved while this one waited: it follows them, and that counts as its move, so that it
+        // backs off rather than bouncing back when the new endpoint fails it too.
+        release();
+        moves += 1;
+        continue;
+      }
+      const started = this.clock();
+      const since = this.moveCount;
+      let error;
       try {
+        sending();
         const result = await withTimeout(call(), timeoutMs);
-        endpoint.lastMs = Date.now() - started;
+        endpoint.lastMs = this.clock() - started;
         endpoint.failures = 0;
         return result;
-      } catch (error) {
-        if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
-        // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
-        if (moves < this.endpoints.length - 1 && this.failover(error, index)) moves += 1;
-        else {
-          await sleep(delay);
-          delay *= 2;
-        }
+      } catch (caught) {
+        error = caught;
+      } finally {
+        release();
+      }
+      if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
+      attempt += 1;
+      if (isRateLimited(error)) {
+        strikes += 1;
+        if (rateLimitExhausted(error, strikes) && moves < this.endpoints.length - 1 && this.failover(error, index, { exhausted: true, since })) {
+          moves += 1;
+          strikes = 0;
+        } else await sleep(retryAfterMs(error));
+      }
+      // A single stall of the endpoint in use: the read goes there once more; the second timeout within TIMEOUT_PAIR_MS moves.
+      else if (error instanceof RpcTimeout && this.firstTimeout(index, since)) continue;
+      // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
+      else if (moves < this.endpoints.length - 1 && this.failover(error, index, { since })) moves += 1;
+      else {
+        await sleep(delay);
+        delay *= 2;
       }
     }
   }
@@ -655,9 +1035,7 @@ export class Chain {
 
   /** What `shares` of `fund` (default: the interface's fund) secure now, fully checked by the contract. */
   quote(shares, fund = this.fund) {
-    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]).then((q) =>
-      checkDecimals(checkShape(q, { ints: ["max_principal", "price", "price_decimals", "haircut_bps"], what: "quote" }), "quote"),
-    );
+    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]).then(checkQuote);
   }
 
   async offers() {
@@ -666,11 +1044,36 @@ export class Chain {
     return offers;
   }
 
-  /** Repos from `from` on, until the first id with no repo. */
-  async repos(from = 1) {
-    const repos = (await this.scan("get_repo", from)).map(({ id, value }) => normalizeRepo(id, value));
+  /**
+   * Repos from `from` on, until the first id with no repo: `{ repos,
+   * unreadable }`, the ones that pass the boundary and the ids of those a
+   * field was missing from, each warned once on the console. One malformed
+   * repo, of any account, thus stops neither the scan nor the pass that
+   * asked for it (WEB-5): it is skipped and counted, and the page says so.
+   * A repo read on its own (`repo`) still needs every field.
+   */
+  async readRepos(from = 1) {
+    const repos = [];
+    const unreadable = [];
+    for (const { id, value } of await this.scan("get_repo", from)) {
+      try {
+        repos.push(normalizeRepo(id, value));
+      } catch (error) {
+        unreadable.push(id);
+        this.warnedRepos ??= new Set();
+        if (!this.warnedRepos.has(id)) {
+          this.warnedRepos.add(id);
+          console.warn(`repo #${id} skipped: ${error?.message ?? error}`);
+        }
+      }
+    }
     await this.learnCoins(repos.map((r) => r.stablecoin));
-    return repos;
+    return { repos, unreadable };
+  }
+
+  /** The readable repos from `from` on (`readRepos`). */
+  async repos(from = 1) {
+    return (await this.readRepos(from)).repos;
   }
 
   async repo(id) {
@@ -765,8 +1168,6 @@ export class Chain {
    * it does not replace it.
    */
   async repoOpenings(borrower, startLedger = null) {
-    const health = await this.net(() => this.server.getHealth());
-    const start = Math.max(startLedger ?? health.oldestLedger, health.oldestLedger);
     const filters = [
       {
         type: "contract",
@@ -774,21 +1175,44 @@ export class Chain {
         topics: [[sv.symbol("repo_opened").toXDR("base64"), "*", sv.address(borrower).toXDR("base64")]],
       },
     ];
-    const openings = new Map();
-    let request = { startLedger: Math.min(start, health.latestLedger), filters, limit: 100 };
-    let latest = health.latestLedger;
-    // Each response covers a bounded ledger range; follow the cursor to the tip.
-    for (let page = 0; page < 40; page += 1) {
-      const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
-      for (const event of response.events) {
-        openings.set(Number(scValToNative(event.topic[1])), { txHash: event.txHash, ledger: event.ledger });
+    return this.onOneEndpoint(async () => {
+      const health = await this.net(() => this.server.getHealth());
+      const start = Math.max(startLedger ?? health.oldestLedger, health.oldestLedger);
+      const openings = new Map();
+      let request = { startLedger: Math.min(start, health.latestLedger), filters, limit: 100 };
+      let latest = health.latestLedger;
+      // Each response covers a bounded ledger range; follow the cursor to the tip.
+      for (let page = 0; page < 40; page += 1) {
+        const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
+        for (const event of response.events) {
+          openings.set(Number(scValToNative(event.topic[1])), { txHash: event.txHash, ledger: event.ledger });
+        }
+        latest = response.latestLedger;
+        if (!response.cursor || response.cursor === request.cursor) break;
+        if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
+        request = { cursor: response.cursor, filters, limit: 100 };
       }
-      latest = response.latestLedger;
-      if (!response.cursor || response.cursor === request.cursor) break;
-      if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
-      request = { cursor: response.cursor, filters, limit: 100 };
+      return { openings, nextLedger: latest };
+    });
+  }
+
+  /**
+   * Runs `read`, a read whose later calls depend on an earlier one: a scan
+   * of events takes its ledger bounds from the `getHealth` of the endpoint
+   * in use, and another endpoint keeps another range. When the calls moved
+   * while `read` ran and it failed ("startLedger must be within the ledger
+   * range" from the endpoint that now answers), it runs once more from the
+   * start, on the endpoint now in use.
+   */
+  async onOneEndpoint(read) {
+    for (let attempt = 0; ; attempt += 1) {
+      const since = this.moveCount;
+      try {
+        return await read();
+      } catch (error) {
+        if (attempt > 0 || this.moveCount === since) throw error;
+      }
     }
-    return { openings, nextLedger: latest };
   }
 
   /**
@@ -831,22 +1255,24 @@ export class Chain {
    * event name taken out of the topics. Returns `{ events, nextLedger }`.
    */
   async contractEvents(startLedger = null, { maxPages = 20 } = {}) {
-    const health = await this.net(() => this.server.getHealth());
-    const wanted = startLedger ?? health.oldestLedger;
-    const start = Math.min(Math.max(wanted, health.oldestLedger), health.latestLedger);
     const filters = [{ type: "contract", contractIds: [this.contracts.openWindow] }];
-    const events = [];
-    let request = { startLedger: start, filters, limit: 100 };
-    let latest = health.latestLedger;
-    for (let page = 0; page < maxPages; page += 1) {
-      const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
-      for (const raw of response.events) events.push(decodeEvent(raw));
-      latest = response.latestLedger;
-      if (!response.cursor || response.cursor === request.cursor) break;
-      if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
-      request = { cursor: response.cursor, filters, limit: 100 };
-    }
-    return { events, nextLedger: latest };
+    return this.onOneEndpoint(async () => {
+      const health = await this.net(() => this.server.getHealth());
+      const wanted = startLedger ?? health.oldestLedger;
+      const start = Math.min(Math.max(wanted, health.oldestLedger), health.latestLedger);
+      const events = [];
+      let request = { startLedger: start, filters, limit: 100 };
+      let latest = health.latestLedger;
+      for (let page = 0; page < maxPages; page += 1) {
+        const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
+        for (const raw of response.events) events.push(decodeEvent(raw));
+        latest = response.latestLedger;
+        if (!response.cursor || response.cursor === request.cursor) break;
+        if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
+        request = { cursor: response.cursor, filters, limit: 100 };
+      }
+      return { events, nextLedger: latest };
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -887,7 +1313,8 @@ export class Chain {
   }
 
   /**
-   * Calls a contract function from `signer`. Returns `{ value, hash, seconds, fee }`.
+   * Calls a contract function from `signer`. Returns `{ value, hash, seconds, fee }`,
+   * plus `unverified` when no second endpoint could confirm it (`submit`).
    * `onStatus({ stage, text, hash })` follows each step for the interface.
    */
   async invoke(signer, fn, args, onStatus = () => {}) {
@@ -904,8 +1331,8 @@ export class Chain {
     const ready = rpc.assembleTransaction(tx, sim).build();
     checkFee(ready, { estimate: estimateOf(sim) });
     const signed = await this.signWith(signer, ready, onStatus);
-    const { result, hash, seconds, fee } = await this.submit(signed, onStatus);
-    return { value: result.returnValue ? scValToNative(result.returnValue) : undefined, hash, seconds, fee };
+    const { result, hash, seconds, fee, unverified } = await this.submit(signed, onStatus);
+    return { value: result.returnValue ? scValToNative(result.returnValue) : undefined, hash, seconds, fee, ...(unverified ? { unverified } : {}) };
   }
 
   /** Submits one classic operation (a trustline) from `signer`. */
@@ -937,14 +1364,35 @@ export class Chain {
     }
   }
 
+  /** `getTransaction` on one given endpoint, within RPC_TIMEOUT_MS; null when it does not answer. */
+  async transactionOn(endpoint, hash) {
+    try {
+      (await turnOn(endpoint, this.clock))();
+      return await withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS);
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Asks the endpoints other than `via` whether `hash` succeeded, so that one
    * endpoint's word never shows a write as confirmed: an RPC can report
    * SUCCESS for a transaction it never forwarded. Returns another endpoint's
-   * SUCCESS answer, or null when there is no other endpoint. Throws
-   * TxUnconfirmed when another endpoint reports a failure, does not know the
-   * transaction once its ledgers are past the validity window, or stays
-   * silent until shortly after it.
+   * SUCCESS answer, null when there is no other endpoint, or `{ unverified }`
+   * (the hosts asked) when none of them answered at all within `silentMs`,
+   * or by the end of the window: silence is not a contradiction, and the
+   * write is then shown as applied according to `via` alone, never as
+   * confirmed.
+   *
+   * A contradiction throws TxUnconfirmed: another endpoint reports a
+   * failure, or does not know the transaction once its own ledgers are past
+   * the validity window. Neither is taken on that endpoint's word alone:
+   * `via` is asked again first, and must still report the success (a
+   * failure it reports too is the transaction's failure, TxFailed) and, for
+   * a transaction the other endpoint does not know, must itself have closed
+   * a ledger past the window; otherwise the wait goes on. An endpoint that
+   * answers but has not seen the transaction shortly after the window ends
+   * it as TxUnconfirmed too.
    */
   async confirmElsewhere(hash, via, maxTime, onStatus = () => {}) {
     const others = this.endpoints.filter((_, i) => i !== via);
@@ -952,23 +1400,30 @@ export class Chain {
     const hosts = others.map((e) => e.host).join(", ");
     onStatus({ stage: "confirming", text: t("Submitted, confirming: waiting for a second RPC endpoint ({host}) to see it.", { host: hosts }), hash });
     const deadline = (maxTime || Math.floor(Date.now() / 1000) + TX_VALIDITY_SECS) + CONFIRM_GRACE_SECS;
+    const asked = this.clock();
+    let heard = false;
     for (;;) {
-      const answers = await Promise.all(
-        others.map((endpoint) =>
-          withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS).then(
-            (answer) => ({ endpoint, answer }),
-            () => ({ endpoint, answer: null }),
-          ),
-        ),
-      );
+      const answers = await Promise.all(others.map(async (endpoint) => ({ endpoint, answer: await this.transactionOn(endpoint, hash) })));
+      if (answers.some(({ answer }) => typeof answer?.status === "string")) heard = true;
       const success = answers.find(({ answer }) => answer?.status === "SUCCESS");
       if (success) return success.answer;
       const failure = answers.find(({ answer }) => answer?.status === "FAILED");
-      if (failure) throw new TransactionError("TxUnconfirmed", t("{host} reports it failed.", { host: failure.endpoint.host }), hash);
       // Past the window, an endpoint that has closed later ledgers would know a transaction that landed.
       const unknown = answers.find(({ answer }) => answer?.status === "NOT_FOUND" && maxTime && Number(answer.latestLedgerCloseTime) > maxTime + 5);
-      if (unknown) throw new TransactionError("TxUnconfirmed", t("{host} does not know it, and its validity window has passed.", { host: unknown.endpoint.host }), hash);
-      if (Date.now() / 1000 > deadline) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
+      if (failure || unknown) {
+        const again = await this.transactionOn(this.endpoints[via], hash);
+        if (again?.status === "FAILED") throw txFailed(again, hash);
+        if (typeof again?.status === "string") {
+          if (failure) throw new TransactionError("TxUnconfirmed", t("{host} reports it failed.", { host: failure.endpoint.host }), hash);
+          // The other endpoint's close time counts once the endpoint in use has reached the same side of the window.
+          if (Number(again.latestLedgerCloseTime) > maxTime + 5) {
+            throw new TransactionError("TxUnconfirmed", t("{host} does not know it, and its validity window has passed.", { host: unknown.endpoint.host }), hash);
+          }
+        }
+      }
+      const late = Date.now() / 1000 > deadline;
+      if (!heard && (late || this.clock() - asked >= this.silentMs)) return { unverified: hosts };
+      if (late) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
       await sleep(this.pollMs);
     }
   }
@@ -977,20 +1432,28 @@ export class Chain {
    * Sends a signed transaction and returns once it has landed. Throws only
    * on a definitive outcome: failed on chain, refused by the network, or
    * expired (the ledger closed past the validity window without it); or
-   * TxUnconfirmed when a second endpoint does not confirm the success the
-   * first one reports (`confirmElsewhere`).
+   * TxUnconfirmed when a second endpoint contradicts the success the first
+   * one reports (`confirmElsewhere`). Returns `{ result, hash, seconds, fee }`,
+   * plus `unverified: { host, others }` when the other endpoints stayed
+   * silent: applied according to `host` alone, never confirmed.
    */
   async submit(tx, onStatus = () => {}) {
-    const started = Date.now();
+    const started = this.clock();
     const hash = toHex(tx.hash());
     const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
     const done = async (answer) => {
-      const confirmed = (await this.confirmElsewhere(hash, answer.via, maxTime, onStatus)) ?? answer;
-      const seconds = (Date.now() - started) / 1000;
+      const confirmed = await this.confirmElsewhere(hash, answer.via, maxTime, onStatus);
+      const seconds = (this.clock() - started) / 1000;
+      if (confirmed?.unverified) {
+        const host = this.endpoints[answer.via]?.host ?? "";
+        onStatus({ stage: "unverified", text: unverifiedText(host), hash });
+        return { result: answer, hash, seconds, fee: feeCharged(answer), unverified: { host, others: confirmed.unverified } };
+      }
+      const result = confirmed ?? answer;
       onStatus({ stage: "confirmed", text: t("Confirmed in {seconds} s.", { seconds: formatUnits(BigInt(Math.round(seconds * 10)), 1) }), hash });
-      return { result: confirmed, hash, seconds, fee: feeCharged(confirmed) };
+      return { result, hash, seconds, fee: feeCharged(result) };
     };
-    const failed = (result) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
+    const failed = (result) => txFailed(result, hash);
     const until = maxTime ? new Date(maxTime * 1000).toLocaleTimeString(locale()) : null;
 
     // 1. Into the queue, or learn that it already applied.
@@ -999,12 +1462,14 @@ export class Chain {
       onStatus({ stage: "submitting", text: t("Sending to the network."), hash });
       let sent = null;
       const via = this.active;
+      const since = this.moveCount;
       try {
-        sent = await withTimeout(this.server.sendTransaction(tx), SEND_TIMEOUT_MS);
+        (await turnOn(this.endpoints[via], this.clock))();
+        sent = await withTimeout(this.endpoints[via].server.sendTransaction(tx), SEND_TIMEOUT_MS);
       } catch (error) {
         // Lost or late response: the transaction may be queued. The lookup settles it, and the next
         // send goes to the other endpoint; the same signed transaction cannot apply twice.
-        this.failover(error, via);
+        this.failover(error, via, { since });
       }
       if (sent?.status === "PENDING" || sent?.status === "DUPLICATE") break;
       const known = await this.lookup(hash);

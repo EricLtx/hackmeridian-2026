@@ -1,0 +1,93 @@
+// The inventory's rc5 rules on hand-made numbers, and on fund 1's as read
+// from testnet on 20 October 2026 (review finding TOOL-8): no network.
+
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { NEAR_TOP_DAYS, PROPOSAL_GRACE_SECS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues, reanchorHaircutBps, reanchorIssues } from "../inventory-rules.mjs";
+
+const DAY = 86_400;
+/** Fund 1 (tMMF): 10 bps floor, 5 % yield cap, 26 h NAV age bound; its reference and its NAV on 20 October 2026. */
+const TMMF = { corridor_floor_bps: 10, max_yield_bps: 500, nav_max_age_secs: 26 * 3600 };
+const FUND1 = { referenceNav: 108_529_815_480_720n, referenceTime: 1_792_317_272, navPrice: 108_547_853_399_289n, navTime: 1_792_448_341, floorBps: 10, maxYieldBps: 500, navMaxAgeSecs: 26 * 3600 };
+
+test("the corridor is math::corridor's, its growth capped at the NAV age bound", () => {
+  const { low, high } = corridor(FUND1.referenceNav, FUND1.referenceTime, FUND1.navTime, 10, 500, 26 * 3600);
+  assert.deepEqual([low, high], [108_421_285_665_240n, 108_654_451_319_046n]);
+  // A reference older than the bound grants no more growth.
+  assert.equal(corridor(FUND1.referenceNav, FUND1.referenceTime, FUND1.navTime + 30 * DAY, 10, 500, 26 * 3600).high, high);
+  // Both bounds bracket the reference.
+  const at = corridor(1_000_000n, 0, 0, 10, 500, 3600);
+  assert.deepEqual([at.low, at.high], [999_000n, 1_001_000n]);
+  // The haircut the corridor needs: 22 bps for tMMF, 13 for the euro funds (5 bps, 4 %, 64 h).
+  assert.equal(corridorHaircutBps(TMMF), 22n);
+  assert.equal(corridorHaircutBps({ corridor_floor_bps: 5, max_yield_bps: 400, nav_max_age_secs: 64 * 3600 }), 13n);
+});
+
+test("the haircut a two-key re-anchor needs under the delay in force: tMMF 33 bps at 300 s, 36 at 48 h; the testnet settings pass, a narrower haircut is a finding (rc5 round 2)", () => {
+  assert.equal(PROPOSAL_GRACE_SECS, 604_800n);
+  const tmmf = { ...TMMF, haircut_bps: 200 };
+  // 2 x 10 + ceil(500 x (300 + 604,800 + 2 x 93,600) / 31,536,000) = 20 + ceil(12.56) = 33; at 48 h, 20 + ceil(15.30) = 36.
+  assert.equal(reanchorHaircutBps(tmmf, 300), 33n);
+  assert.equal(reanchorHaircutBps(tmmf, 48 * 3600), 36n);
+  // The euro funds (5 bps, 4 %, 64 h): 10 + ceil(400 x (300 + 604,800 + 460,800) / 31,536,000) = 10 + ceil(13.52) = 24 at 300 s; 10 + ceil(15.71) = 26 at 48 h.
+  const euro = { corridor_floor_bps: 5, max_yield_bps: 400, nav_max_age_secs: 64 * 3600, haircut_bps: 150 };
+  assert.equal(reanchorHaircutBps(euro, 300), 24n);
+  assert.equal(reanchorHaircutBps(euro, 48 * 3600), 26n);
+  // The cover grows with the delay and never falls below the corridor's.
+  for (const cfg of [tmmf, euro]) for (const delay of [0, 300, 48 * 3600, 30 * 86_400]) assert.ok(reanchorHaircutBps(cfg, delay) > corridorHaircutBps(cfg));
+  assert.deepEqual(reanchorIssues(tmmf, 300), []);
+  assert.deepEqual(reanchorIssues(euro, 48 * 3600), []);
+  const [issue] = reanchorIssues({ ...tmmf, haircut_bps: 35 }, 48 * 3600);
+  assert.match(issue, /^rc5: haircut 0\.35 % below the 0\.36 % a two-key re-anchor needs under the 172800 s delay .*: propose_reanchor and apply_reanchor are refused with OutsideEnvelope until set_fund_limits widens the haircut through the delay$/);
+  assert.deepEqual(reanchorIssues({ ...tmmf, haircut_bps: 36 }, 48 * 3600), []);
+});
+
+test("fund 1 on 20 October: inside, 9.82 bps under the top, about 7 days at the 5 % cap, its reference past the bound (TOOL-8)", () => {
+  const h = corridorHeadroom({ ...FUND1, now: FUND1.navTime + 2 * 3600 });
+  assert.equal(h.inside, true);
+  assert.equal(h.headroomBps, 9.82);
+  assert.equal(h.daysAtMaxYield.toFixed(2), "7.17");
+  assert.equal(h.referenceStale, true);
+  assert.equal(Math.round(h.referenceAgeSecs / 3600), 38);
+  assert.deepEqual(corridorIssues(h), []);
+});
+
+test("a NAV outside the corridor, or within three days of its top, is a finding; a fresh reference counts its window first (TOOL-8)", () => {
+  const above = corridorHeadroom({ ...FUND1, navPrice: 108_700_000_000_000n });
+  assert.equal(above.inside, false);
+  assert.ok(above.headroomBps < 0);
+  assert.match(corridorIssues(above)[0], /^rc5: the live NAV is outside its corridor \[108421285665240, 108654451319046\] around the stored reference \(-4\.19 bps from the top\)/);
+  // Two bps from the top at a 5 % cap: under a day and a half.
+  const near = corridorHeadroom({ ...FUND1, navPrice: 108_632_000_000_000n });
+  assert.ok(near.inside && near.daysAtMaxYield < NEAR_TOP_DAYS);
+  assert.match(corridorIssues(near)[0], /^rc5: the live NAV is 2\.06 bps under its corridor's top, about 1\.5 days at the yield cap: refresh_reference now/);
+  // A reference one hour old: the top still grows for 25 hours before it stays.
+  const fresh = corridorHeadroom({ ...FUND1, referenceTime: FUND1.navTime - 3600, navPrice: FUND1.referenceNav });
+  assert.equal(fresh.referenceStale, false);
+  assert.ok(Math.abs(fresh.daysAtMaxYield - (25 / 24 + (fresh.headroomBps * 365) / 500)) < 1e-9);
+  // A flat NAV with no yield allowed never reaches its top.
+  assert.equal(corridorHeadroom({ ...FUND1, maxYieldBps: 0, navPrice: FUND1.referenceNav }).daysAtMaxYield, Infinity);
+});
+
+test("a feed publishes with 6 to 18 decimals; above 18 is a finding (VAL-3 in the contract)", () => {
+  for (const decimals of [6, 14, 18]) assert.deepEqual(feedDecimalsIssues("NAV feed", decimals), []);
+  assert.match(feedDecimalsIssues("FX feed", 19)[0], /^rc5: the FX feed publishes with 19 decimals, above 18: a replacement, a fallback or a re-anchor that reads it is refused$/);
+  assert.match(feedDecimalsIssues("NAV feed", 5)[0], /^rc5: the NAV feed publishes with 5 decimals, under 6/);
+  assert.match(feedDecimalsIssues("fallback feed", null)[0], /does not answer decimals\(\); it must publish with 6 to 18 decimals$/);
+});
+
+test("a fallback that reads the fund's own NAV feed and asset is a finding (VAL-4 in the contract)", () => {
+  const cfg = { oracle: "CNAV", oracle_asset: ["Stellar", "CSHARES"] };
+  assert.match(fallbackIssues(cfg, { oracle: "CNAV", asset: ["Stellar", "CSHARES"] })[0], /^rc5: the fallback feed is the fund's own NAV feed: no second source/);
+  assert.deepEqual(fallbackIssues(cfg, { oracle: "CBACKUP", asset: ["Stellar", "CSHARES"] }), []);
+  assert.deepEqual(fallbackIssues(cfg, { oracle: "CNAV", asset: ["Other", "USD"] }), []);
+  assert.deepEqual(fallbackIssues(cfg, null), []);
+});
+
+test("the code's time to live is checked against the 90 days the monitor keeps (TOOL-8)", () => {
+  assert.equal(daysToLive(1_000 + 17_280 * 35, 1_000), 35);
+  assert.match(codeTtlIssues(34.9)[0], /^the contract code has 34\.9 days to live, under the 90 the monitor keeps/);
+  assert.deepEqual(codeTtlIssues(90), []);
+  assert.match(codeTtlIssues(null)[0], /archived or missing: npm run upgrade -- --restore-code$/);
+});

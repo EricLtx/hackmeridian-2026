@@ -13,12 +13,17 @@
 //! of the natively compiled contract. The whole suite then runs in the VM,
 //! on the stack the WASM was linked with. The CI job `wasm-canary` does so
 //! with a WASM linked with an 8 KiB stack, in a target directory of its own
-//! so that `target/` keeps the shipped WASM:
+//! so that `target/` keeps the shipped WASM. Run by hand, the same commands
+//! go in a subshell, so that neither variable stays set in the shell: a
+//! later `stellar contract build` would link the 8 KiB stack into `target/`,
+//! or leave it stale, and `demo/upgrade.mjs` proposes the WASM `target/`
+//! holds (review finding STATE-2, 20 October 2026):
 //!
 //! ```text
-//! export CARGO_TARGET_DIR=$PWD/target-canary NIGHT_WINDOW_STACK_SIZE=8192
-//! stellar contract build
-//! NIGHT_WINDOW_TEST_WASM=1 cargo test -p night-window
+//! (
+//!   export CARGO_TARGET_DIR=$PWD/target-canary NIGHT_WINDOW_STACK_SIZE=8192
+//!   stellar contract build && NIGHT_WINDOW_TEST_WASM=1 cargo test -p night-window
+//! )
 //! ```
 
 use std::path::PathBuf;

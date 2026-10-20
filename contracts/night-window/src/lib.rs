@@ -114,6 +114,14 @@ pub const MAX_PENDING_CURRENCY_CAPS: u32 = 8;
 /// in to nothing since. At 6 decimals one unit of a price near 1 is
 /// 0.01 bps.
 pub const MIN_FEED_DECIMALS: u32 = 6;
+/// Most decimals a NAV, FX or fallback feed may publish with (review finding
+/// VAL-3, 20 October 2026). The cross price divides the NAV by the rate
+/// without forming the NAV times `10^decimals`, through a wide product
+/// where its remainder needs one, and is the exact floor whenever the
+/// result fits in i128, whatever the rate; the share value splits its
+/// product, which is exact up to 19 decimals. A feed with more could be
+/// admitted and then never price.
+pub const MAX_FEED_DECIMALS: u32 = 18;
 /// Decimals of every stablecoin: those of a Stellar classic asset through
 /// its Stellar Asset Contract. Caps and outstanding totals add base units
 /// across the stablecoins of a currency, so these must share one precision
@@ -1201,18 +1209,21 @@ impl OpenWindow {
         }
         steward_alive(&env, &fund, &steward);
         let config = pricing_config(&env, &fund)?;
+        check_reanchor_cover(&env, &config)?;
         let (nav, fx) = read_anchor(&env, &fund, &config)?;
         let nav_value = nav.price.mantissa();
+        let eta = eta(&env)?;
         // Values the apply will compute with must not overflow there: try
-        // the same arithmetic on them now.
+        // the same arithmetic on them now, with the growth the apply may
+        // count at the latest, at the end of the grace period.
         math::within_band(nav_value, nav_value, config.corridor_floor_bps)?;
         math::corridor(
             nav_value,
             nav.timestamp,
-            nav.timestamp,
+            eta.saturating_add(PROPOSAL_GRACE_SECS),
             config.corridor_floor_bps,
             config.max_yield_bps,
-            config.nav_max_age_secs,
+            u64::MAX,
         )?;
         if !math::within_band(nav_value, expected_nav, config.corridor_floor_bps)? {
             return Err(Error::PriceOutOfBand);
@@ -1236,7 +1247,6 @@ impl OpenWindow {
             _ if expected_fx != 0 => return Err(Error::PriceOutOfBand),
             _ => AnchorFx::Direct,
         };
-        let eta = eta(&env)?;
         let pending = PendingReanchor {
             nav_oracle: config.oracle.clone(),
             nav_asset: config.oracle_asset.clone(),
@@ -1276,6 +1286,9 @@ impl OpenWindow {
         if !same_feeds {
             return Err(Error::NotProposed);
         }
+        // Checked again: the delay may have grown and the haircut may have
+        // been loosened since the proposal.
+        check_reanchor_cover(&env, &config)?;
         let (nav, fx) = read_anchor(&env, &fund, &config)?;
         // A SEP-40 feed keeps its decimals for life, so this only trips on a
         // broken feed; readings in other units than the proposal's cannot be
@@ -1286,16 +1299,19 @@ impl OpenWindow {
         {
             return Err(Error::CurrencyMismatch);
         }
-        // The growth since the proposal counts over at most the NAV age
-        // bound, as for any valuation: the installed reference keeps the
-        // proposal's time, and the corridor around it grants no more.
+        // The NAV must have followed the model since the proposal, its
+        // growth counted over the real elapsed time, which the proposal's
+        // life bounds: the delay, its grace period and the NAV age of the
+        // proposal's reading. Counted over at most the NAV age bound, as a
+        // valuation counts it, an honest accruing NAV could never pass under
+        // a delay of a week or more (review finding VAL-1, 20 October 2026).
         let (low, high) = math::corridor(
             pending.nav,
             pending.nav_time,
             nav.timestamp,
             config.corridor_floor_bps,
             config.max_yield_bps,
-            config.nav_max_age_secs,
+            u64::MAX,
         )?;
         let value = nav.price.mantissa();
         if value < low || value > high {
@@ -1308,9 +1324,25 @@ impl OpenWindow {
                 return Err(Error::PriceOutOfBand);
             }
         }
+        // The NAV reference is carried from the proposal's reading to this
+        // one along the model, in one step: never below the NAV the two
+        // signers proposed, never above the model path from it at the
+        // maximum yield over the real elapsed time. The two signers fix the
+        // floor of the anchor and its FX rate, and whoever applies picks
+        // neither; but this one reading, signed by nobody, may lift the
+        // reference by the whole growth over the proposal's life, where a
+        // refresh grants one NAV age of growth per reading. The fund's
+        // haircut covers that lift (`check_reanchor_cover`, decision S30).
+        let ceiling = math::model_path(
+            pending.nav,
+            pending.nav_time,
+            nav.timestamp,
+            config.max_yield_bps,
+            u64::MAX,
+        )?;
         let mut state = storage::fund_state(&env, &fund)?;
-        state.reference_nav = pending.nav;
-        state.reference_time = pending.nav_time;
+        state.reference_nav = value.min(ceiling).max(pending.nav);
+        state.reference_time = nav.timestamp.max(pending.nav_time);
         state.nav_decimals = pending.nav_decimals;
         state.reference_fx = pending.fx.rate().map_or(0, |anchor| anchor.rate);
         state.fx_decimals = pending.fx.rate().map_or(0, |anchor| anchor.decimals);
@@ -1319,8 +1351,8 @@ impl OpenWindow {
         storage::bump_instance(&env);
         Reanchored {
             fund,
-            nav: pending.nav,
-            nav_time: pending.nav_time,
+            nav: state.reference_nav,
+            nav_time: state.reference_time,
             fx: state.reference_fx,
         }
         .publish(&env);
@@ -1472,23 +1504,33 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Names the automated key that may only pause and cancel. Guardian.
+    /// Names the automated key that may only pause and cancel. Guardian and
+    /// sentinel.
     pub fn set_sentinel(env: Env, sentinel: Address) -> Result<(), Error> {
         let guardian = storage::guardian(&env);
         guardian.require_auth();
         // The sentinel is a hot key on a monitoring host: it must hold no
         // role whose loss or theft would matter more than a pause, nor be
-        // about to take one (review finding auth-5, 20 October 2026).
+        // about to take one (review finding auth-5, 20 October 2026). An
+        // expired proposal never applies, and does not count.
         if is_governor_or_guardian(&env, &sentinel)
             || is_trustee(&env, &sentinel)
             || storage::guardian_backup(&env).is_some_and(|backup| backup == sentinel)
             || storage::sole_lender(&env).is_some_and(|lender| lender == sentinel)
-            || pending_admin_change(&env).is_some_and(|pending| pending.admin == sentinel)
+            || pending_admin_change(&env)
+                .is_some_and(|pending| pending.admin == sentinel && is_live(&env, pending.eta))
             || is_pending_guardian(&env, &DataKey::PendingGuardian, &sentinel)
             || is_pending_guardian(&env, &DataKey::PendingForcedGuardian, &sentinel)
         {
             return Err(Error::SentinelNotIndependent);
         }
+        // The named key consents: since the sentinel is refused as a forced
+        // guardian and as a trustee, a guardian naming anyone it likes could
+        // block the governor's candidate for a forced change, or the
+        // trustee's successor (review finding STATE-1, 20 October 2026).
+        // Asked after the checks, which refuse the guardian itself, so no
+        // address signs twice.
+        sentinel.require_auth();
         storage::set_sentinel(&env, Some(&sentinel));
         storage::bump_instance(&env);
         SentinelChanged {
@@ -1716,7 +1758,7 @@ impl OpenWindow {
         steward_alive(&env, &fund, &config.steward);
         let mut state = storage::fund_state(&env, &fund)?;
         let fallback = storage::fallback_for_pricing(&env, &fund);
-        let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
+        let (nav, _) = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
         let lowered = nav.price.mantissa().min(state.reference_nav);
         let timestamp = nav.timestamp.max(state.reference_time);
         Ok(set_reference(&env, &fund, &mut state, lowered, timestamp))
@@ -1744,7 +1786,7 @@ impl OpenWindow {
         let config = storage::fund(&env, &fund)?;
         let mut state = storage::fund_state(&env, &fund)?;
         let fallback = storage::fallback_for_pricing(&env, &fund);
-        let nav = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
+        let (nav, _) = oracle::read_nav(&env, &config, &state, fallback.as_ref())?;
         oracle::check_corridor(&config, &state, &nav)?;
         if let Some(next) = oracle::next_reference(&config, &state, &nav)? {
             return Ok(set_reference(&env, &fund, &mut state, next, nav.timestamp));
@@ -2057,6 +2099,7 @@ impl OpenWindow {
             fund: fund.clone(),
             nav: valuation.nav.price.mantissa(),
             nav_time: valuation.nav.timestamp,
+            fallback: valuation.fallback,
             fx,
             fx_applied,
             fx_time,
@@ -2393,12 +2436,15 @@ fn require_trustee(env: &Env, governor: &Address) {
 /// about to take one, it is not the sole lender, and it is not the sentinel,
 /// a hot key (review finding auth-5, 20 October 2026). A guardian forced in
 /// by the governor may become trustee: naming or handing over the trustee
-/// drops that pending change.
+/// drops that pending change. An expired proposal never applies and does
+/// not count: the trustee cannot cancel one, which would otherwise hold its
+/// chosen successor out for good (review finding STATE-1, 20 October 2026).
 fn ensure_independent_trustee(env: &Env, trustee: &Address) -> Result<(), Error> {
     if is_governor_or_guardian(env, trustee)
         || storage::sole_lender(env).is_some_and(|lender| lender == *trustee)
         || storage::guardian_backup(env).is_some_and(|backup| backup == *trustee)
-        || pending_admin_change(env).is_some_and(|pending| pending.admin == *trustee)
+        || pending_admin_change(env)
+            .is_some_and(|pending| pending.admin == *trustee && is_live(env, pending.eta))
         || is_pending_guardian(env, &DataKey::PendingGuardian, trustee)
         || is_sentinel(env, trustee)
     {
@@ -2422,11 +2468,12 @@ fn ensure_not_trustee_or_sentinel(env: &Env, who: &Address) -> Result<(), Error>
     Ok(())
 }
 
-/// Whether `who` is the guardian a pending appointment would install; `key`
-/// is `PendingGuardian` or `PendingForcedGuardian`.
+/// Whether `who` is the guardian a live pending appointment would install;
+/// `key` is `PendingGuardian` or `PendingForcedGuardian`. An expired one
+/// never applies (`ensure_due`).
 fn is_pending_guardian(env: &Env, key: &DataKey, who: &Address) -> bool {
     storage::instance_value::<PendingGuardianChange>(env, key)
-        .is_some_and(|pending| pending.guardian == *who)
+        .is_some_and(|pending| pending.guardian == *who && is_live(env, pending.eta))
 }
 
 /// Records that value can be at stake. The first admission ends the
@@ -2915,7 +2962,15 @@ fn prepare_fund(
 /// (`oracle::check_corridor`): after a long quiet spell or a long removal
 /// the check is no wider than one NAV age after the reference (verification
 /// of review finding arith-2, 20 October 2026). A fund whose NAV outgrew it
-/// is refreshed or re-anchored first.
+/// is refreshed or re-anchored first, while its current feed can be read; a
+/// fund with an active fallback is refreshed through the fallback when its
+/// primary feed dies. A fund without a fallback whose primary feed died
+/// cannot be refreshed or re-anchored, as both read that feed, nor given a
+/// fallback, which needs a fresh primary (review finding VAL-2, 20 October
+/// 2026). Its path: `remove_fund`; `set_fund` on the new feed, whose
+/// proposal defers this check to its apply; `propose_reanchor`, which reads
+/// the feed of that pending re-admission (`pricing_config`); then, after
+/// one delay, `apply_reanchor` followed by `apply_fund_change`.
 fn carry_nav_reference(
     current: Option<&FundConfig>,
     next: &FundConfig,
@@ -2985,8 +3040,12 @@ fn carry_fx_reference(
 /// as the one a later re-admission must hear from. Proposals made against
 /// the configuration it replaces go: pending loosened limits and a pending
 /// re-anchor (both read against the old settings), and a pending fallback
-/// when the steward who signed it is no longer the steward. They are
-/// cancelled by the contract itself, as no caller chose it.
+/// when the steward who signed it is no longer the steward. An active
+/// fallback whose feed becomes the primary goes too: the fund would have
+/// one source twice, which a fallback proposal refuses (review findings
+/// oracle-5 and VAL-4, 20 October 2026). It stood in for a silent primary
+/// during the delay, and its slot is freed. All are cancelled or removed by
+/// the contract itself, as no caller chose it.
 fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) {
     let by = env.current_contract_address();
     drop_pending_fund_limits(env, &fund, &by);
@@ -2998,6 +3057,16 @@ fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) 
         drop_pending_steward_recovery(env, &fund, &by);
         drop_pending_steward_backup(env, &fund, &by);
         storage::remove_steward_backup(env, &fund);
+    }
+    if storage::fallback(env, &fund)
+        .is_some_and(|(feed, _)| feed.oracle == config.oracle && feed.asset == config.oracle_asset)
+    {
+        storage::remove_fallback(env, &fund);
+        FallbackRemoved {
+            fund: fund.clone(),
+            by: by.clone(),
+        }
+        .publish(env);
     }
     storage::set_fund(env, &fund, &config);
     storage::set_fund_state(env, &fund, &state);
@@ -3066,10 +3135,10 @@ fn check_fallback(
 }
 
 /// The decimals of a NAV, FX or fallback feed, refused below
-/// `MIN_FEED_DECIMALS`: at admission, at a replacement, and when a fallback
-/// or a re-anchor is proposed or applied.
+/// `MIN_FEED_DECIMALS` and above `MAX_FEED_DECIMALS`: at admission, at a
+/// replacement, and when a fallback or a re-anchor is proposed or applied.
 fn check_feed_decimals(decimals: u32) -> Result<u32, Error> {
-    if decimals < MIN_FEED_DECIMALS {
+    if !(MIN_FEED_DECIMALS..=MAX_FEED_DECIMALS).contains(&decimals) {
         return Err(Error::OutsideEnvelope);
     }
     Ok(decimals)
@@ -3120,6 +3189,48 @@ fn corridor_haircut_bps(config: &FundConfig) -> Result<i128, Error> {
         .checked_mul(2)
         .and_then(|floors| floors.checked_add(growth))
         .ok_or(Error::ArithmeticOverflow)
+}
+
+/// Smallest haircut, in basis points, that covers a fund's corridor across
+/// a re-anchor. The apply of a re-anchor, open to anyone within the grace
+/// period, carries the reference up to the model path from the proposal's
+/// reading over the real elapsed time (`apply_reanchor`): one wrong reading
+/// at that moment lifts the reference by the growth over the reading's age,
+/// the delay and the grace, where a refresh grants one NAV age of growth per
+/// reading (review finding VAL-1, second round, 20 October 2026). The worst
+/// span, from a true NAV a floor under the proposal's reading to a second
+/// wrong reading at the top of the new corridor, is two floors plus the
+/// growth over the delay, the grace and two NAV ages: the proposal's reading
+/// may already be one NAV age old, and the second reading comes one NAV age
+/// after the apply. Rounded up, with the delay as set at the call; the
+/// fixtures' 200 / 10 / 500 / 26 h need 36 under the default delay.
+fn reanchor_haircut_bps(env: &Env, config: &FundConfig) -> Result<i128, Error> {
+    let span = storage::timelock_delay(env, DEFAULT_TIMELOCK_SECS)
+        .checked_add(PROPOSAL_GRACE_SECS)
+        .and_then(|secs| secs.checked_add(config.nav_max_age_secs))
+        .and_then(|secs| secs.checked_add(config.nav_max_age_secs))
+        .ok_or(Error::ArithmeticOverflow)?;
+    let growth = math::mul_div_ceil(
+        i128::from(config.max_yield_bps),
+        i128::from(span),
+        math::YEAR_SECS,
+    )?;
+    i128::from(config.corridor_floor_bps)
+        .checked_mul(2)
+        .and_then(|floors| floors.checked_add(growth))
+        .ok_or(Error::ArithmeticOverflow)
+}
+
+/// Refuses a re-anchor, proposed or applied, of a fund whose haircut does
+/// not cover the lift one wrong reading at its apply could give the
+/// reference (decision S30). The steward widens the haircut first
+/// (`set_fund_limits`, at once); the delay only grows, so a fund admitted
+/// at the loosest settings may need that before any re-anchor.
+fn check_reanchor_cover(env: &Env, config: &FundConfig) -> Result<(), Error> {
+    if i128::from(config.haircut_bps) < reanchor_haircut_bps(env, config)? {
+        return Err(Error::OutsideEnvelope);
+    }
+    Ok(())
 }
 
 /// Checks a fund configuration against the envelope, its haircut against

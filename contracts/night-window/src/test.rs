@@ -648,6 +648,195 @@ fn a_feed_with_fewer_than_six_decimals_is_refused() {
     );
 }
 
+/// Review finding VAL-3 (20 October 2026): a feed publishing with more than
+/// `MAX_FEED_DECIMALS` (18) is refused wherever the floor of six decimals
+/// is checked: at admission and at a replacement (NAV and FX feeds), at a
+/// fallback's proposal, and at a re-anchor. Beyond 18 decimals the share
+/// value leaves the domain its arithmetic covers, and a fund could be
+/// admitted that never prices.
+#[test]
+fn a_feed_with_more_than_eighteen_decimals_is_refused() {
+    let f = bare();
+    let shares = Asset::Stellar(f.shares.clone());
+    let (finest, finest_feed) = feed_with_decimals(&f, eur(&f.env), MAX_FEED_DECIMALS + 1);
+    finest_feed.set_price(&shares, &(NAV_EUR * 100_000), &T0);
+    let finest_config = FundConfig {
+        oracle: finest,
+        ..fund_config(&f)
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &finest_config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    let (fine, fine_feed) = feed_with_decimals(&f, eur(&f.env), MAX_FEED_DECIMALS);
+    fine_feed.set_price(&shares, &(NAV_EUR * 10_000), &T0);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: fine,
+            ..fund_config(&f)
+        },
+    );
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().nav_decimals,
+        MAX_FEED_DECIMALS
+    );
+    // A replacement by the finer feed.
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &finest_config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    // A fallback.
+    let (backup, backup_feed) = feed_with_decimals(&f, eur(&f.env), MAX_FEED_DECIMALS + 1);
+    backup_feed.set_price(&shares, &(NAV_EUR * 100_000), &T0);
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &backup)),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    // A re-anchor, reading a feed that now reports more decimals, which a
+    // SEP-40 feed should never do.
+    fine_feed.set_decimals(&(MAX_FEED_DECIMALS + 1));
+    fine_feed.set_price(&shares, &(NAV_EUR * 100_000), &T0);
+    assert_eq!(
+        f.client
+            .try_propose_reanchor(&f.shares, &(NAV_EUR * 100_000), &0),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+
+    // The FX feed of a cross fund.
+    let f = bare();
+    let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &T0);
+    let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), MAX_FEED_DECIMALS + 1);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &(EUR_USD * 100_000), &T0);
+    let config = FundConfig {
+        oracle: nav_oracle,
+        source: PriceSource::Cross(FxLeg {
+            oracle: fx_oracle,
+            asset: Asset::Other(eur(&f.env)),
+            haircut_bps: 200,
+            max_age_secs: 3 * DAY,
+            band_bps: 200,
+        }),
+        ..fund_config(&f)
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    fx_feed.set_decimals(&MAX_FEED_DECIMALS);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &(EUR_USD * 10_000), &T0);
+    f.client.set_fund(&f.shares, &config);
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().fx_decimals,
+        MAX_FEED_DECIMALS
+    );
+}
+
+/// Review finding VAL-3 (20 October 2026): a cross fund whose NAV and FX
+/// feeds both publish with 18 decimals. The cross price formed the NAV
+/// times 10^18 before dividing by the rate, which exceeds i128 above 170.14
+/// per share: a 1,000 USD share was admitted, then every quote and opening
+/// failed with `ArithmeticOverflow`. It now prices at the exact floor of
+/// the division, at the old edge and above it, and an opening lends what
+/// the quote announces.
+#[test]
+fn an_eighteen_decimal_cross_fund_prices_a_thousand_dollar_share() {
+    let e18 = 10i128.pow(18);
+    let rate = 112 * e18 / 100;
+    for nav in [170 * e18, 171 * e18, 1_000 * e18] {
+        let f = bare();
+        let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), 18);
+        let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), 18);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &T0);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &T0);
+        let config = FundConfig {
+            oracle: nav_oracle,
+            source: PriceSource::Cross(FxLeg {
+                oracle: fx_oracle,
+                asset: Asset::Other(eur(&f.env)),
+                haircut_bps: 200,
+                max_age_secs: 3 * DAY,
+                band_bps: 200,
+            }),
+            ..fund_config(&f)
+        };
+        let (f, offer_id) = ready_with(f, config);
+        let quote = f.client.quote(&f.shares, &ONE, &f.eurc);
+        // floor(nav * 10^18 / (1.12 * 10^18)), the price of one share in EUR.
+        let price = nav * 100 / 112;
+        assert_eq!((quote.price, quote.price_decimals), (price, 18));
+        assert_eq!(quote.haircut_bps, 400);
+        assert_eq!(quote.max_principal, ONE * price / e18 * 9_600 / 10_000);
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &ONE,
+            &quote.max_principal,
+            &DAY,
+        );
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().principal,
+            quote.max_principal
+        );
+    }
+}
+
+/// Review finding VAL-3, second round (20 October 2026): the split still
+/// formed the remainder times `10^d`, which overflows for an 18-decimal
+/// rate above about 170, so a cross fund with JPY-based feeds at EUR/JPY
+/// 175 was admitted, priced at 345 JPY a share and failed with
+/// `ArithmeticOverflow` at 349 JPY, where the remainder is 174 x 10^18. The
+/// remainder now goes through a wide product: both NAVs price at the exact
+/// floor, about 1.97 and 1.99 EUR, and an opening lends what the quote
+/// announces.
+#[test]
+fn an_eighteen_decimal_rate_above_one_hundred_seventy_prices_every_nav() {
+    let e18 = 10i128.pow(18);
+    let rate = 175 * e18;
+    let price_of = |nav: i128| {
+        let f = bare();
+        let jpy = Symbol::new(&f.env, "JPY");
+        let (nav_oracle, nav_feed) = feed_with_decimals(&f, jpy.clone(), 18);
+        let (fx_oracle, fx_feed) = feed_with_decimals(&f, jpy, 18);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &T0);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &T0);
+        let config = FundConfig {
+            oracle: nav_oracle,
+            source: PriceSource::Cross(FxLeg {
+                oracle: fx_oracle,
+                asset: Asset::Other(eur(&f.env)),
+                haircut_bps: 200,
+                max_age_secs: 3 * DAY,
+                band_bps: 200,
+            }),
+            ..fund_config(&f)
+        };
+        let (f, offer_id) = ready_with(f, config);
+        let quote = f.client.quote(&f.shares, &ONE, &f.eurc);
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &ONE,
+            &quote.max_principal,
+            &DAY,
+        );
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().principal,
+            quote.max_principal
+        );
+        (quote.price, quote.price_decimals)
+    };
+    // floor(nav x 10^18 / (175 x 10^18)) = floor(nav / 175), in 18 decimals.
+    assert_eq!(price_of(345 * e18), (345 * e18 / 175, 18));
+    assert!((174 * e18).checked_mul(e18).is_none());
+    assert_eq!(price_of(349 * e18), (349 * e18 / 175, 18));
+}
+
 /// A re-anchor installs references in the decimals of the feeds it reads,
 /// so the same rule holds there: a NAV or FX feed publishing with fewer than
 /// `MIN_FEED_DECIMALS` is refused when the re-anchor is proposed, and when
@@ -1990,6 +2179,162 @@ fn fallbacks_are_capped() {
     assert_eq!(count(&f), 0);
 }
 
+/// Review finding VAL-4 (20 October 2026): the rule that a fallback is
+/// never the primary feed itself (oracle-5) was checked only when a
+/// fallback is proposed or applied. A replacement making the active
+/// fallback's feed the primary kept the fallback: one source twice, one
+/// silent feed silencing both, and a slot of `MAX_FALLBACKS` held. The
+/// replacement now removes that fallback, published as `FallbackRemoved` by
+/// the contract. During the delay the fallback still stands in for the
+/// silent primary; afterwards the fund prices on its new primary, and the
+/// old primary, still publishing, may be proposed as the new fallback.
+#[test]
+fn promoting_the_fallback_to_primary_removes_it() {
+    let (f, _offer_id, feed) = ready_with_fallback();
+    let fallback = f.client.get_fallback(&f.shares).unwrap();
+    let next = FundConfig {
+        oracle: fallback.oracle.clone(),
+        oracle_asset: fallback.asset.clone(),
+        ..fund_config(&f)
+    };
+    f.client.set_fund(&f.shares, &next);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_on(&f, &feed, NAV_EUR_8);
+    // The primary last published two days ago: the fallback stands in.
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            FallbackRemoved {
+                fund: f.shares.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundSet {
+                fund: f.shares.clone(),
+                oracle: fallback.oracle.clone(),
+                haircut_bps: 200
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.get_fund(&f.shares), Some(next));
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+    let count = f
+        .env
+        .as_contract(&f.contract_id, || crate::storage::fallback_count(&f.env));
+    assert_eq!(count, 0);
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+    // The promoted feed cannot come back as its own fallback; the old
+    // primary can be proposed as one.
+    assert_eq!(
+        f.client.try_propose_fallback(&f.shares, &fallback),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    publish_nav(&f, NAV_EUR);
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &f.nav_oracle));
+}
+
+/// Review finding VAL-4, second round (20 October 2026): only a replacement
+/// that promotes the fallback itself, its oracle and its asset, removes it.
+/// A replacement keeping the primary, one moving to a third feed, and one
+/// on the fallback's oracle but another asset all keep the active fallback
+/// and publish no `FallbackRemoved`; nobody but an applied two-key
+/// replacement reaches the removal. A drop on the oracle alone passed every
+/// earlier test.
+#[test]
+fn only_a_replacement_promoting_the_fallback_removes_it() {
+    let removed = |f: &Fixture| {
+        own_events(f).events().contains(
+            &FallbackRemoved {
+                fund: f.shares.clone(),
+                by: f.contract_id.clone(),
+            }
+            .to_xdr(&f.env, &f.contract_id),
+        )
+    };
+    // The same primary, a higher haircut.
+    let (f, _, feed) = ready_with_fallback();
+    let active = f.client.get_fallback(&f.shares).unwrap();
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            haircut_bps: 300,
+            ..fund_config(&f)
+        },
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!removed(&f));
+    assert_eq!(f.client.get_fallback(&f.shares), Some(active));
+
+    // A third feed.
+    let (f, _, feed) = ready_with_fallback();
+    let active = f.client.get_fallback(&f.shares).unwrap();
+    let (third, third_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+    publish_on(&f, &third_feed, NAV_EUR);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: third.clone(),
+            ..fund_config(&f)
+        },
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_on(&f, &third_feed, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!removed(&f));
+    assert_eq!(f.client.get_fallback(&f.shares), Some(active));
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().oracle, third);
+
+    // The fallback's oracle, another asset.
+    let (f, _, feed) = ready_with_fallback();
+    let active = f.client.get_fallback(&f.shares).unwrap();
+    let other = Asset::Other(Symbol::new(&f.env, "SHAREB"));
+    let now = f.env.ledger().timestamp();
+    feed.set_price(&other, &NAV_EUR_8, &now);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: active.oracle.clone(),
+            oracle_asset: other.clone(),
+            ..fund_config(&f)
+        },
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let now = f.env.ledger().timestamp();
+    feed.set_price(&other, &NAV_EUR_8, &now);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!removed(&f));
+    assert_eq!(f.client.get_fallback(&f.shares), Some(active));
+
+    // An intruder reaches neither path.
+    let (f, _, _) = ready_with_fallback();
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_fund",
+            args: (f.shares.clone(), fund_config(&f)).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_set_fund(&f.shares, &fund_config(&f)).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+    assert!(f.client.get_fallback(&f.shares).is_some());
+}
+
 #[test]
 fn removing_a_fund_removes_its_fallback() {
     let (f, _, _) = ready_with_fallback();
@@ -2305,6 +2650,7 @@ fn opening_a_repo_publishes_its_valuation_and_any_move_of_the_reference() {
             fund: f.shares.clone(),
             nav,
             nav_time,
+            fallback: false,
             fx: 0,
             fx_applied: 0,
             fx_time: 0,
@@ -2391,6 +2737,7 @@ fn opening_a_cross_priced_repo_publishes_its_fx_leg() {
                     fund: f.shares.clone(),
                     nav: NAV_USD,
                     nav_time: T0,
+                    fallback: false,
                     fx: rate,
                     fx_applied: applied,
                     fx_time: T0,
@@ -2401,6 +2748,52 @@ fn opening_a_cross_priced_repo_publishes_its_fx_leg() {
             ]
         );
     }
+}
+
+/// Review finding VAL-5 (20 October 2026): `RepoValued` recorded the NAV
+/// and its time, not which feed supplied them, so a loan priced by the
+/// fallback while the primary was stale read exactly like one priced by the
+/// primary, a value the primary never published. It now says so: false
+/// while the primary is fresh, even with a fallback that agrees, true when
+/// the fallback stands in.
+#[test]
+fn an_opening_records_whether_the_fallback_priced_it() {
+    let (f, offer_id, feed) = ready_with_fallback();
+    let valued = |repo_id: u64, nav: i128, nav_time: u64, fallback: bool| {
+        RepoValued {
+            repo_id,
+            fund: f.shares.clone(),
+            nav,
+            nav_time,
+            fallback,
+            fx: 0,
+            fx_applied: 0,
+            fx_time: 0,
+            price: nav,
+            haircut_bps: 200,
+        }
+        .to_xdr(&f.env, &f.contract_id)
+    };
+    let published = f.env.ledger().timestamp();
+    let first = open(&f, offer_id);
+    assert!(own_events(&f)
+        .events()
+        .contains(&valued(first, NAV_EUR, published, false)));
+
+    // The primary goes stale; the fallback publishes 1.0501 EUR (8 decimals).
+    advance(&f, 26 * HOUR + 1);
+    let now = f.env.ledger().timestamp();
+    publish_on(&f, &feed, NAV_EUR_8 + 10_000);
+    let second = open(&f, offer_id);
+    let nav = (NAV_EUR_8 + 10_000) * 1_000_000;
+    let events = own_events(&f);
+    assert!(events.events().contains(&valued(second, nav, now, true)));
+    assert!(!events.events().contains(&valued(second, nav, now, false)));
+    let primary = f
+        .oracle
+        .lastprice(&Asset::Stellar(f.shares.clone()))
+        .unwrap();
+    assert_eq!((primary.price, primary.timestamp), (NAV_EUR, published));
 }
 
 #[test]
@@ -4238,8 +4631,11 @@ fn a_new_steward_drops_the_fallback_the_previous_one_signed() {
 /// Second review, M3: after a legitimate drop, the governor and the steward
 /// re-anchor the fund on the readings of the proposal; whoever applies can
 /// neither choose the anchor nor apply it against a feed that moved away.
+/// From rc5 on the apply carries the reference from the proposal's reading
+/// to its own along the model path (review finding VAL-1, 20 October 2026):
+/// never below the proposal, never above the path.
 #[test]
-fn reanchor_installs_the_readings_of_the_proposal() {
+fn reanchor_carries_the_readings_of_the_proposal_along_the_model() {
     let (f, offer_id) = ready();
     let dropped = NAV_EUR * 98 / 100;
     publish_nav(&f, dropped);
@@ -4296,14 +4692,15 @@ fn reanchor_installs_the_readings_of_the_proposal() {
     advance(&f, DEFAULT_TIMELOCK_SECS);
     // Review of the re-anchor round, item 3: the apply follows the model
     // from the proposed NAV. 0.2 % up in two days is faster than the
-    // corridor (0.1 % floor plus 5 % a year), 0.15 % down is below its
-    // floor: both refused. So is 0.12 % up from rc5 on: the growth counts
-    // over at most the NAV age bound, 26 hours, not the two days of the
-    // delay (review finding arith-2).
+    // corridor (0.1 % floor plus 5 % a year over the two days of the delay,
+    // 12.74 bps), 0.15 % down is below its floor: both refused. So is
+    // 0.13 % up. The growth counts over the real elapsed time (review
+    // finding VAL-1): over at most the NAV age bound, 26 hours, as rc5
+    // first counted it, 0.12 % up was refused too.
     for moved in [
         dropped * 1_002 / 1_000,
         dropped * 9_985 / 10_000,
-        dropped * 10_012 / 10_000,
+        dropped * 10_013 / 10_000,
     ] {
         publish_nav(&f, moved);
         assert_eq!(
@@ -4312,25 +4709,29 @@ fn reanchor_installs_the_readings_of_the_proposal() {
         );
     }
     assert!(f.client.pending_reanchor(&f.shares).is_some());
-    // 0.11 % up: more than the 0.1 % floor, but on the model path, which a
-    // symmetric band would wrongly refuse. The proposal's readings are
-    // installed, not the spot.
+    // 0.11 % up: more than the 0.1 % floor, but on the model, which a
+    // symmetric band would wrongly refuse. The spot is not installed: the
+    // reference is carried from the proposal along the model path, at most
+    // 5 % a year over the two days, 2.74 bps.
     publish_nav(&f, dropped * 10_011 / 10_000);
     f.env.set_auths(&[]);
     f.client.apply_reanchor(&f.shares);
     assert!(f.env.auths().is_empty());
+    let now = T0 + DEFAULT_TIMELOCK_SECS;
+    let path = math::model_path(dropped, T0, now, 500, u64::MAX).unwrap();
+    assert!(dropped < path && path < dropped * 10_011 / 10_000);
     assert_eq!(
         own_events(&f),
         std::vec![Reanchored {
             fund: f.shares.clone(),
-            nav: dropped,
-            nav_time: T0,
+            nav: path,
+            nav_time: now,
             fx: 0
         }
         .to_xdr(&f.env, &f.contract_id)]
     );
     let state = f.client.get_fund_state(&f.shares).unwrap();
-    assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
+    assert_eq!((state.reference_nav, state.reference_time), (path, now));
     assert_eq!(f.client.pending_reanchor(&f.shares), None);
     f.env.mock_all_auths();
     f.client.open_repo(
@@ -4393,9 +4794,625 @@ fn readmission_off_the_path_goes_through_a_reanchor() {
     );
     f.client.apply_reanchor(&f.shares);
     f.client.apply_fund_change(&f.shares);
+    // The NAV did not move since the proposal: the anchor is the proposed
+    // NAV, at the time of the apply's reading (review finding VAL-1).
     let state = f.client.get_fund_state(&f.shares).unwrap();
-    assert_eq!((state.reference_nav, state.reference_time), (dropped, T0));
+    assert_eq!(
+        (state.reference_nav, state.reference_time),
+        (dropped, T0 + DEFAULT_TIMELOCK_SECS)
+    );
     assert!(f.client.get_fund(&f.shares).is_some());
+}
+
+/// A NAV accruing `bps` a year from `base` at T0, as the demo's feeds
+/// publish (4 % a year).
+fn accruing(base: i128, bps: i128, at: u64) -> i128 {
+    base + base * bps * i128::from(at - T0) / (10_000 * 31_536_000)
+}
+
+/// Review finding VAL-1 (20 October 2026): the apply of a re-anchor counted
+/// the NAV's growth since the proposal over at most the NAV age bound,
+/// while the proposal's reading is at least one delay old. Under a delay of
+/// about ten days or more, an honest NAV accruing 4 % a year never passed,
+/// and a fund that had failed closed stayed unpriced: the delay cannot come
+/// down after the first admission. The growth now counts over the real
+/// elapsed time, and the reference is carried to the apply's reading. Under
+/// 14- and 30-day delays, a fund that failed closed after twelve quiet days
+/// is re-anchored three days into the grace period, and prices again.
+#[test]
+fn a_reanchor_applies_under_the_longest_delays() {
+    for delay in [14 * DAY, MAX_TIMELOCK_SECS] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let (f, _) = ready_from(f);
+        let config = fund_config(&f);
+        advance(&f, 12 * DAY);
+        let proposed_at = f.env.ledger().timestamp();
+        let proposed = accruing(NAV_EUR, 400, proposed_at);
+        publish_nav(&f, proposed);
+        assert_eq!(
+            f.client.try_quote(&f.shares, &ONE, &f.eurc),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+        f.client.propose_reanchor(&f.shares, &proposed, &0);
+        advance(&f, delay + 3 * DAY);
+        let now = f.env.ledger().timestamp();
+        let honest = accruing(NAV_EUR, 400, now);
+        publish_nav(&f, honest);
+        f.client.apply_reanchor(&f.shares);
+        let state = f.client.get_fund_state(&f.shares).unwrap();
+        assert_eq!((state.reference_nav, state.reference_time), (honest, now));
+        assert!(
+            honest
+                <= math::model_path(proposed, proposed_at, now, config.max_yield_bps, u64::MAX)
+                    .unwrap()
+        );
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+    }
+}
+
+/// Review finding VAL-1: whoever applies a re-anchor picks the moment, not
+/// the anchor. Under a 14-day delay, a reading at the top of the corridor
+/// around the proposal installs the model path from the proposal, one unit
+/// more is refused, and a reading below the proposal installs the proposal:
+/// the apply can neither lift the anchor above the path nor lower it.
+#[test]
+fn the_reading_at_the_apply_is_clamped_to_the_model_path() {
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let (f, _) = ready_from(f);
+    let config = fund_config(&f);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    advance(&f, 14 * DAY);
+    let now = f.env.ledger().timestamp();
+    let path = math::model_path(NAV_EUR, T0, now, config.max_yield_bps, u64::MAX).unwrap();
+    let top = corridor_top(&config, NAV_EUR, T0, now, u64::MAX);
+    assert!(NAV_EUR < path && path < top);
+    publish_nav(&f, top + 1);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish_nav(&f, top);
+    f.client.apply_reanchor(&f.shares);
+    assert_eq!(
+        own_events(&f),
+        std::vec![Reanchored {
+            fund: f.shares.clone(),
+            nav: path,
+            nav_time: now,
+            fx: 0
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (path, now));
+
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let (f, _) = ready_from(f);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    advance(&f, 14 * DAY);
+    let now = f.env.ledger().timestamp();
+    publish_nav(&f, NAV_EUR * 9_995 / 10_000);
+    f.client.apply_reanchor(&f.shares);
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (NAV_EUR, now));
+}
+
+/// Review finding VAL-1, the reviewer's case: a 14-day delay chosen before
+/// the first admission, which never comes down, and a NAV accruing 4 % a
+/// year that a keeper refreshes daily. The re-anchor applies at its eta
+/// (rc5 as first written refused it on every day of its grace). After
+/// twelve quiet days the fund fails closed, and the re-anchor, the way out,
+/// applies under the same delay.
+#[test]
+fn a_reanchor_applies_under_a_two_week_delay() {
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let (f, offer_id) = ready_from(f);
+    let publish = |f: &Fixture| {
+        let nav = accruing(NAV_EUR, 400, f.env.ledger().timestamp());
+        publish_nav(f, nav);
+        nav
+    };
+    advance(&f, DAY);
+    let nav = publish(&f);
+    f.client.refresh_reference(&f.shares);
+    f.client.propose_reanchor(&f.shares, &nav, &0);
+    for _ in 0..14 {
+        advance(&f, DAY);
+        publish(&f);
+        f.client.refresh_reference(&f.shares);
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+    }
+    f.client.apply_reanchor(&f.shares);
+    f.client.quote(&f.shares, &ONE, &f.eurc);
+    assert_eq!(
+        f.client.try_set_timelock_delay(&(2 * DAY)),
+        Err(Ok(Error::DelayCannotDecrease))
+    );
+
+    for _ in 0..12 {
+        advance(&f, DAY);
+        publish(&f);
+    }
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let nav = publish(&f);
+    f.client.propose_reanchor(&f.shares, &nav, &0);
+    advance(&f, 14 * DAY);
+    publish(&f);
+    f.client.apply_reanchor(&f.shares);
+    f.client
+        .open_repo(&f.borrower, &offer_id, &f.shares, &ONE, &ONE, &DAY);
+}
+
+/// The haircut a re-anchor of `f`'s fund needs under the delay set on it.
+fn reanchor_cover(f: &Fixture, config: &FundConfig) -> i128 {
+    f.env
+        .as_contract(&f.contract_id, || reanchor_haircut_bps(&f.env, config))
+        .unwrap()
+}
+
+/// Review finding VAL-1, second round (20 October 2026): since the apply
+/// carries the reference along the model path from the proposal, one wrong
+/// primary reading at the apply, made by anyone at a moment of its choosing
+/// within the grace, lifts the reference by the growth over the delay, the
+/// grace and the NAV age at once, where a refresh grants one NAV age of
+/// growth per reading. At the loosest settings the default envelope allows
+/// (haircut 109, the cover of the corridor alone), under a 14-day or a
+/// 30-day delay and a flat true NAV republished daily, that lift (57 and
+/// 101 bps) exceeded the cover: a second wrong reading three days later at
+/// the top of the new corridor lent more than 10,500 EURC against 10,000
+/// shares worth that much. Such a re-anchor is now refused at its proposal
+/// until the steward widens the haircut to two floors plus the growth over
+/// the delay, the grace and two NAV ages (174 and 218 bps), and refused at
+/// its apply when the delay grew meanwhile. Under the widened haircut the
+/// same two readings lend less than the value, also in the strict case the
+/// bound is sized for; the honest NAV still fails closed after the first
+/// one, as any NAV under its corridor does, until `reset_reference`.
+#[test]
+fn a_reanchor_needs_a_haircut_that_covers_one_wrong_reading_at_its_apply() {
+    for (delay, bound) in [(14 * DAY, 174), (MAX_TIMELOCK_SECS, 218)] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let config = loosest_config(&f);
+        assert_eq!(corridor_haircut_bps(&config), Ok(109));
+        let (f, offer_id) = ready_with(f, config.clone());
+        assert_eq!(reanchor_cover(&f, &config), bound);
+        let outside = Err(Ok(Error::OutsideEnvelope));
+        assert_eq!(
+            f.client.try_propose_reanchor(&f.shares, &NAV_EUR, &0),
+            outside
+        );
+        // One basis point short is still refused; the bound itself passes.
+        // Widening the haircut tightens, so it applies at once.
+        let widen = |haircut_bps: i128| {
+            f.client.set_fund_limits(
+                &f.shares,
+                &u32::try_from(haircut_bps).unwrap(),
+                &config.max_principal_per_repo,
+                &config.max_outstanding,
+            );
+        };
+        widen(bound - 1);
+        assert_eq!(
+            f.client.try_propose_reanchor(&f.shares, &NAV_EUR, &0),
+            outside
+        );
+        widen(bound);
+        let config = f.client.get_fund(&f.shares).unwrap();
+        f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+
+        let shares = 10_000 * ONE;
+        let true_value = shares * NAV_EUR / 10i128.pow(NAV_DECIMALS);
+        for _ in 0..(delay + PROPOSAL_GRACE_SECS) / DAY {
+            advance(&f, DAY);
+            publish_nav(&f, NAV_EUR);
+            f.client.refresh_reference(&f.shares);
+            assert!(f.client.try_quote(&f.shares, &shares, &f.eurc).is_ok());
+        }
+        let applied_at = f.env.ledger().timestamp();
+        publish_nav(&f, corridor_top(&config, NAV_EUR, T0, applied_at, u64::MAX));
+        f.client.apply_reanchor(&f.shares);
+        let path =
+            math::model_path(NAV_EUR, T0, applied_at, config.max_yield_bps, u64::MAX).unwrap();
+        let state = f.client.get_fund_state(&f.shares).unwrap();
+        assert_eq!(
+            (state.reference_nav, state.reference_time),
+            (path, applied_at)
+        );
+        let lift_bps = (path - NAV_EUR) * 10_000 / NAV_EUR;
+        assert!(lift_bps > i128::from(config.corridor_floor_bps));
+        assert!(lift_bps <= bound - 2 * i128::from(config.corridor_floor_bps));
+        publish_nav(&f, NAV_EUR);
+        assert_eq!(
+            f.client.try_quote(&f.shares, &shares, &f.eurc),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+        advance(&f, config.nav_max_age_secs);
+        let later = f.env.ledger().timestamp();
+        let top = corridor_top(&config, path, applied_at, later, config.nav_max_age_secs);
+        publish_nav(&f, top);
+        let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+        // At the 109 bps the corridor alone needs, this reading lent more
+        // than the shares are worth; the cover across the re-anchor holds.
+        let value_read = shares * top / 10i128.pow(NAV_DECIMALS);
+        assert!(value_read * 9_891 / 10_000 > true_value);
+        assert_eq!(quote.max_principal, value_read * (10_000 - bound) / 10_000);
+        assert!(quote.max_principal < true_value);
+        f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &shares,
+            &quote.max_principal,
+            &DAY,
+        );
+    }
+
+    // The apply reads the delay of its own day: grown from 14 to 30 days
+    // after the proposal, the cover is checked against the longer life.
+    let f = bare();
+    f.client.set_timelock_delay(&(14 * DAY));
+    let config = FundConfig {
+        haircut_bps: 174,
+        ..loosest_config(&f)
+    };
+    let (f, _) = ready_with(f, config.clone());
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    f.client.set_timelock_delay(&MAX_TIMELOCK_SECS);
+    assert_eq!(reanchor_cover(&f, &config), 218);
+    advance(&f, 14 * DAY);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    f.client.set_fund_limits(
+        &f.shares,
+        &218,
+        &config.max_principal_per_repo,
+        &config.max_outstanding,
+    );
+    f.client.apply_reanchor(&f.shares);
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+
+    // The strict case the bound is sized for: the proposal reads a NAV
+    // already one NAV age old, which the true NAV sits a floor under; the
+    // keeper reads that true NAV daily; the apply comes at the end of the
+    // grace on a wrong reading, and a second one follows one NAV age later
+    // at the top of the new corridor. At the bound the loan stays below the
+    // shares' value.
+    for (delay, bound) in [(14 * DAY, 174u32), (MAX_TIMELOCK_SECS, 218)] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let config = FundConfig {
+            haircut_bps: bound,
+            ..loosest_config(&f)
+        };
+        let (f, offer_id) = ready_with(f, config.clone());
+        let shares = 10_000 * ONE;
+        let bottom = NAV_EUR * (10_000 - i128::from(config.corridor_floor_bps)) / 10_000;
+        let true_value = shares * bottom / 10i128.pow(NAV_DECIMALS);
+        advance(&f, config.nav_max_age_secs);
+        f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+        assert_eq!(f.client.pending_reanchor(&f.shares).unwrap().nav_time, T0);
+        for _ in 0..(delay + PROPOSAL_GRACE_SECS) / DAY {
+            advance(&f, DAY);
+            publish_nav(&f, bottom);
+            f.client.refresh_reference(&f.shares);
+            assert!(f.client.try_quote(&f.shares, &shares, &f.eurc).is_ok());
+        }
+        let applied_at = f.env.ledger().timestamp();
+        assert_eq!(
+            applied_at,
+            T0 + config.nav_max_age_secs + delay + PROPOSAL_GRACE_SECS
+        );
+        publish_nav(&f, corridor_top(&config, NAV_EUR, T0, applied_at, u64::MAX));
+        f.client.apply_reanchor(&f.shares);
+        let path =
+            math::model_path(NAV_EUR, T0, applied_at, config.max_yield_bps, u64::MAX).unwrap();
+        assert_eq!(
+            f.client.get_fund_state(&f.shares).unwrap().reference_nav,
+            path
+        );
+        advance(&f, config.nav_max_age_secs);
+        let later = f.env.ledger().timestamp();
+        let top = corridor_top(&config, path, applied_at, later, config.nav_max_age_secs);
+        publish_nav(&f, top);
+        let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+        let value_read = shares * top / 10i128.pow(NAV_DECIMALS);
+        assert_eq!(
+            quote.max_principal,
+            value_read * (10_000 - i128::from(bound)) / 10_000
+        );
+        std::println!(
+            "strict case, delay {} d: loan {} against shares worth {}",
+            delay / DAY,
+            quote.max_principal,
+            true_value
+        );
+        assert!(quote.max_principal < true_value);
+        f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &shares,
+            &quote.max_principal,
+            &DAY,
+        );
+    }
+}
+
+/// Review finding VAL-1, second round: at the 48-hour default and the
+/// fixtures' settings (10 / 500 / 26 h) the re-anchor needs 36 bps and the
+/// 200 bps haircut covers it; under the five-minute delay of a
+/// demonstration, 33. One wrong reading at the apply still lifts the
+/// reference by the model path over the delay and the grace, 12.3 bps,
+/// above the 10 bps floor: the honest flat NAV then fails closed, which the
+/// cover makes safe and the steward undoes with `reset_reference`.
+#[test]
+fn at_the_default_delay_one_wrong_reading_at_the_apply_fails_the_honest_nav_closed() {
+    let f = bare();
+    f.client.set_timelock_delay(&300);
+    assert_eq!(reanchor_cover(&f, &fund_config(&f)), 33);
+
+    let (f, _) = ready();
+    let config = fund_config(&f);
+    assert_eq!(reanchor_cover(&f, &config), 36);
+    f.client.propose_reanchor(&f.shares, &NAV_EUR, &0);
+    for _ in 0..9 {
+        advance(&f, DAY);
+        publish_nav(&f, NAV_EUR);
+        f.client.refresh_reference(&f.shares);
+    }
+    let now = f.env.ledger().timestamp();
+    assert_eq!(now, T0 + DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS);
+    let top = corridor_top(&config, NAV_EUR, T0, now, u64::MAX);
+    publish_nav(&f, top);
+    f.client.apply_reanchor(&f.shares);
+    let lifted = f.client.get_fund_state(&f.shares).unwrap().reference_nav;
+    // 12.32 bps, in hundredths.
+    assert_eq!((lifted - NAV_EUR) * 1_000_000 / NAV_EUR, 1_232);
+    // The reading that lifted it values the shares under the cover.
+    let shares = 10_000 * ONE;
+    let quote = f.client.quote(&f.shares, &shares, &f.eurc);
+    assert!(quote.max_principal < shares * NAV_EUR / 10i128.pow(NAV_DECIMALS));
+    advance(&f, HOUR);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    f.client.reset_reference(&f.shares);
+    assert!(f.client.try_quote(&f.shares, &ONE, &f.eurc).is_ok());
+}
+
+/// A cross fund admitted under `delay`, its USD NAV accruing `growth_bps` a
+/// year, refreshed daily by a keeper. EUR/USD moves 2.5 % up, beyond the
+/// 2 % band: the fund stops pricing until a re-anchor on the new rate
+/// applies, one delay later. Returns the result of that apply.
+fn cross_reanchor_after(delay: u64, growth_bps: i128) -> Result<(), Error> {
+    let f = bare();
+    f.client.set_timelock_delay(&delay);
+    let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    let publish = |f: &Fixture, rate: i128| {
+        let now = f.env.ledger().timestamp();
+        let nav = accruing(NAV_USD, growth_bps, now);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &now);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+        nav
+    };
+    publish(&f, EUR_USD);
+    let mut config = fund_config(&f);
+    config.oracle = nav_oracle;
+    config.source = PriceSource::Cross(FxLeg {
+        oracle: fx_oracle,
+        asset: Asset::Other(eur(&f.env)),
+        haircut_bps: 200,
+        max_age_secs: 3 * DAY,
+        band_bps: 200,
+    });
+    let (f, _) = ready_with(f, config);
+    let moved = EUR_USD * 10_250 / 10_000;
+    advance(&f, DAY);
+    publish(&f, moved);
+    f.client.refresh_reference(&f.shares);
+    assert_eq!(
+        f.client.try_quote(&f.shares, &ONE, &f.eurc),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let nav = publish(&f, moved);
+    f.client.propose_reanchor(&f.shares, &nav, &moved);
+    let mut waited = 0;
+    while waited < delay {
+        let step = DAY.min(delay - waited);
+        advance(&f, step);
+        waited += step;
+        publish(&f, moved);
+        f.client.refresh_reference(&f.shares);
+    }
+    match f.client.try_apply_reanchor(&f.shares) {
+        Ok(Ok(())) => {}
+        Err(Ok(error)) => return Err(error),
+        _ => panic!("unexpected result"),
+    }
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().reference_fx,
+        moved
+    );
+    f.client.quote(&f.shares, &ONE, &f.eurc);
+    Ok(())
+}
+
+/// Review finding VAL-1, cross fund: its FX reference moves only by a
+/// re-anchor, so a fund whose rate left the band waits for one. Under a
+/// 14-day delay and a NAV accruing 4 % a year, the re-anchor on the new
+/// rate was refused by its NAV check (from 11 days on, for this fund); it
+/// now applies under any delay, up to the 30-day ceiling.
+#[test]
+fn a_cross_fund_follows_the_fx_market_under_a_long_delay() {
+    assert_eq!(cross_reanchor_after(DEFAULT_TIMELOCK_SECS, 400), Ok(()));
+    assert_eq!(cross_reanchor_after(14 * DAY, 0), Ok(()));
+    assert_eq!(cross_reanchor_after(11 * DAY, 400), Ok(()));
+    assert_eq!(cross_reanchor_after(14 * DAY, 400), Ok(()));
+    assert_eq!(cross_reanchor_after(MAX_TIMELOCK_SECS, 400), Ok(()));
+}
+
+/// Review finding VAL-2 (20 October 2026): a fund without a fallback whose
+/// NAV feed stops publishing after its admission. Eleven days later, the
+/// NAV accruing 4 % a year, a new feed reads outside the corridor around the
+/// old reference, which counts its growth over at most the NAV age bound
+/// with the current settings, and every route that reads the dead feed is
+/// refused: a replacement keeping it, a fallback (it needs a fresh
+/// primary), a refresh and a re-anchor. The way out, as the comment of
+/// `carry_nav_reference` describes it: remove the fund, propose its
+/// re-admission on the new feed and a re-anchor read from that proposal,
+/// then after one delay apply the re-anchor, then the re-admission.
+#[test]
+fn a_dead_nav_feed_without_fallback_is_replaced_through_a_removal() {
+    let (f, _) = ready();
+    let config = fund_config(&f);
+    let shares = Asset::Stellar(f.shares.clone());
+    advance(&f, 11 * DAY);
+    let now = f.env.ledger().timestamp();
+    let honest = accruing(NAV_EUR, 400, now);
+    let (b, b_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+    b_feed.set_price(&shares, &honest, &now);
+
+    let next = FundConfig {
+        oracle: b.clone(),
+        ..config.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &next),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    // A wider corridor does not help: the check uses the current settings.
+    let next_wide = FundConfig {
+        corridor_floor_bps: 50,
+        ..next.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &next_wide),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let wide = FundConfig {
+        corridor_floor_bps: 50,
+        ..config.clone()
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &wide),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &b)),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(
+        f.client.try_refresh_reference(&f.shares),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &honest, &0),
+        Err(Ok(Error::StalePrice))
+    );
+
+    f.client.remove_fund(&f.shares);
+    f.client.set_fund(&f.shares, &next);
+    f.client.propose_reanchor(&f.shares, &honest, &0);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let now = f.env.ledger().timestamp();
+    b_feed.set_price(&shares, &accruing(NAV_EUR, 400, now), &now);
+    // The re-admission alone still meets the old reference.
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    f.client.apply_reanchor(&f.shares);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares), Some(next));
+    f.client.quote(&f.shares, &ONE, &f.eurc);
+}
+
+/// Review finding VAL-2: how long a replacement on a new feed stays open
+/// after the only feed of a fund died, and what the removal route costs.
+/// Under the 48-hour default, a new feed proposed up to eight days after
+/// the last move of the reference still applies, and nine days is refused.
+/// Thirty days after the feed died, the removal route takes one delay, the
+/// re-admission and the re-anchor running side by side; under a 14-day
+/// delay too, with the fund's own corridor, since the re-anchor carries the
+/// reference to its apply (review finding VAL-1).
+#[test]
+fn a_dead_feed_is_replaced_within_eight_days_or_through_one_delay() {
+    let shares = |f: &Fixture| Asset::Stellar(f.shares.clone());
+    let replace_after = |days: u64| -> Result<(), Error> {
+        let (f, _) = ready();
+        let (b, b_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+        advance(&f, days * DAY);
+        let now = f.env.ledger().timestamp();
+        b_feed.set_price(&shares(&f), &accruing(NAV_EUR, 400, now), &now);
+        let next = FundConfig {
+            oracle: b,
+            ..fund_config(&f)
+        };
+        match f.client.try_set_fund(&f.shares, &next) {
+            Ok(Ok(())) => {}
+            Err(Ok(error)) => return Err(error),
+            _ => panic!("unexpected result"),
+        }
+        advance(&f, DEFAULT_TIMELOCK_SECS);
+        let now = f.env.ledger().timestamp();
+        b_feed.set_price(&shares(&f), &accruing(NAV_EUR, 400, now), &now);
+        match f.client.try_apply_fund_change(&f.shares) {
+            Ok(Ok(())) => {}
+            Err(Ok(error)) => return Err(error),
+            _ => panic!("unexpected result"),
+        }
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+        Ok(())
+    };
+    assert_eq!(replace_after(2), Ok(()));
+    assert_eq!(replace_after(8), Ok(()));
+    assert_eq!(replace_after(9), Err(Error::PriceOutOfBand));
+
+    for delay in [DEFAULT_TIMELOCK_SECS, 14 * DAY] {
+        let f = bare();
+        f.client.set_timelock_delay(&delay);
+        let (f, _) = ready_from(f);
+        let (b, b_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+        advance(&f, 30 * DAY);
+        let now = f.env.ledger().timestamp();
+        let honest = accruing(NAV_EUR, 400, now);
+        b_feed.set_price(&shares(&f), &honest, &now);
+        f.client.remove_fund(&f.shares);
+        f.client.set_fund(
+            &f.shares,
+            &FundConfig {
+                oracle: b,
+                ..fund_config(&f)
+            },
+        );
+        f.client.propose_reanchor(&f.shares, &honest, &0);
+        let started = f.env.ledger().timestamp();
+        advance(&f, delay);
+        let now = f.env.ledger().timestamp();
+        b_feed.set_price(&shares(&f), &accruing(NAV_EUR, 400, now), &now);
+        f.client.apply_reanchor(&f.shares);
+        f.client.apply_fund_change(&f.shares);
+        f.client.quote(&f.shares, &ONE, &f.eurc);
+        assert_eq!(f.env.ledger().timestamp() - started, delay);
+    }
 }
 
 /// Re-anchor round, item 1: the signers sign the values. Readings away from
@@ -4449,6 +5466,51 @@ fn reanchor_of_a_cross_fund_checks_the_expected_rate() {
             decimals: NAV_DECIMALS
         })
     );
+}
+
+/// Review finding VAL-1, second round (20 October 2026), the FX leg: the
+/// rate read at the apply only has to lie in the band around the signed
+/// rate; the FX reference installed, and published, is the signed rate,
+/// never the apply's. The rate moves 1.5 % between the proposal and the
+/// apply, inside the 2 % band; 2.5 % is refused. No earlier test moved the
+/// rate between the two, and an apply installing its own rate passed them.
+#[test]
+fn the_fx_reference_of_a_reanchor_is_the_signed_rate_not_the_rate_at_the_apply() {
+    let (f, fx_oracle) = cross_fund();
+    let config = f.client.get_fund(&f.shares).unwrap();
+    let nav_feed = MockOracleClient::new(&f.env, &config.oracle);
+    let fx_feed = MockOracleClient::new(&f.env, &fx_oracle);
+    let publish = |rate: i128| {
+        let now = f.env.ledger().timestamp();
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+    };
+    let signed = EUR_USD * 10_150 / 10_000;
+    publish(signed);
+    f.client.propose_reanchor(&f.shares, &NAV_USD, &signed);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish(signed * 10_250 / 10_000);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let at_apply = signed * 10_150 / 10_000;
+    publish(at_apply);
+    f.client.apply_reanchor(&f.shares);
+    let now = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![Reanchored {
+            fund: f.shares.clone(),
+            nav: NAV_USD,
+            nav_time: now,
+            fx: signed
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!(state.reference_fx, signed);
+    assert_ne!(state.reference_fx, at_apply);
 }
 
 /// Re-anchor round, item 2: a re-anchor is bound to the feeds it read. A
@@ -8358,6 +9420,111 @@ fn sentinel_cannot_be_given_another_role() {
         );
     }
     assert_eq!(f.client.sentinel(), Some(sentinel));
+}
+
+/// Review finding STATE-1 (20 October 2026): since rc5 the sentinel is
+/// refused as a forced guardian and as a trustee, and the guardian alone
+/// could put any address in that slot. A hostile guardian named the
+/// governor's candidate for a forced change, or the trustee's chosen
+/// successor, and blocked the recovery path against itself. Naming a
+/// sentinel now takes the named key's signature as well as the guardian's:
+/// the guardian alone names nobody, the forced change and the handover go
+/// through, and the guardian with the key's consent names it.
+#[test]
+fn naming_a_sentinel_takes_its_own_signature() {
+    let f = bare();
+    let guardian = appoint_guardian(&f);
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    let candidate = Address::generate(&f.env);
+    let successor = Address::generate(&f.env);
+    for named in [&candidate, &successor] {
+        let args: soroban_sdk::Vec<Val> = (named.clone(),).into_val(&f.env);
+        sign_only(&f, &[&guardian], "set_sentinel", args);
+        assert!(f.client.try_set_sentinel(named).is_err());
+        f.env.mock_all_auths();
+        assert_eq!(f.client.sentinel(), None);
+    }
+    f.client.force_guardian_change(&candidate);
+    assert_eq!(
+        f.client
+            .pending_forced_guardian_change()
+            .map(|pending| pending.guardian),
+        Some(candidate)
+    );
+    f.client.hand_over_trustee(&successor);
+    assert_eq!(f.client.trustee(), Some(successor));
+
+    let sentinel = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (sentinel.clone(),).into_val(&f.env);
+    sign_only(&f, &[&guardian, &sentinel], "set_sentinel", args);
+    f.client.set_sentinel(&sentinel);
+    assert_eq!(signers(&f), std::vec![guardian, sentinel.clone()]);
+    f.env.mock_all_auths();
+    assert_eq!(f.client.sentinel(), Some(sentinel));
+}
+
+/// Review finding STATE-1: the checks that keep the trustee and the
+/// sentinel out of other roles counted a pending appointment after it had
+/// expired, when it can never apply. A governor or guardian proposal then
+/// held the trustee's chosen successor out for good, and the trustee
+/// cannot cancel it. A live proposal still refuses the address it names;
+/// an expired one no longer does, and still never applies.
+#[test]
+fn an_expired_appointment_no_longer_blocks_the_trustee_or_the_sentinel() {
+    let f = bare();
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    let (f, _) = ready_from(f);
+    let next_guardian = Address::generate(&f.env);
+    let next_governor = Address::generate(&f.env);
+    let forced = Address::generate(&f.env);
+    f.client.set_guardian(&next_guardian);
+    f.client.set_admin(&next_governor);
+    f.client.force_guardian_change(&forced);
+    for candidate in [&next_guardian, &next_governor] {
+        assert_eq!(
+            f.client.try_hand_over_trustee(candidate),
+            Err(Ok(Error::TrusteeNotIndependent))
+        );
+    }
+    for candidate in [&next_guardian, &next_governor, &forced] {
+        assert_eq!(
+            f.client.try_set_sentinel(candidate),
+            Err(Ok(Error::SentinelNotIndependent))
+        );
+    }
+
+    // The guardian and governor appointments expire; the forced one, with
+    // its 30-day delay, is still live.
+    advance(&f, DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(f.client.pending_admin(), None);
+    assert_eq!(
+        f.client.try_set_sentinel(&forced),
+        Err(Ok(Error::SentinelNotIndependent))
+    );
+    f.client.set_sentinel(&next_governor);
+    assert_eq!(f.client.sentinel(), Some(next_governor.clone()));
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::ProposalExpired)));
+
+    // Then the forced one.
+    advance(&f, MAX_TIMELOCK_SECS);
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+    f.client.set_sentinel(&forced);
+    assert_eq!(f.client.sentinel(), Some(forced));
+    assert_eq!(
+        f.client.try_apply_forced_guardian_change(),
+        Err(Ok(Error::ProposalExpired))
+    );
+
+    f.client.hand_over_trustee(&next_guardian);
+    assert_eq!(f.client.trustee(), Some(next_guardian));
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::ProposalExpired))
+    );
+    assert_eq!(f.client.guardian(), f.governor);
 }
 
 /// Test 7 of the second review: the positive control of the signature

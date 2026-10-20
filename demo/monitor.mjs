@@ -42,6 +42,7 @@ import {
   ROOT,
   RPC_URLS,
   STATE_DIR,
+  STATE_NAME,
   WASM_DIR,
   activeRpcUrl,
   codeKey,
@@ -52,6 +53,7 @@ import {
   saveState,
   REFLECTOR_FX_TESTNET as REFLECTOR_FX,
   explorer,
+  extendCode,
   extendTtl,
   CODE_SLICE_MAX_FEE,
   invoke,
@@ -70,7 +72,8 @@ import {
 } from "./lib.mjs";
 import { FUND_SETTINGS, navAt } from "./config.mjs";
 import { plain } from "../indexer/lib/plain.mjs";
-import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, statusOf } from "./detectors.mjs";
+import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, restoredLabel, restoredOutcome, statusOf } from "./detectors.mjs";
+import { loadMonitor as loadMonitorFile, monitorFileName, refreshMonitor as refreshMonitorFile, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
 
 const args = process.argv.slice(2);
 /** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
@@ -109,8 +112,10 @@ async function heartbeat() {
     console.error(`  (heartbeat not delivered: ${error.message})`);
   }
 }
-// A witness keeps its own state and alert files: it never shares the acting instance's.
-const MONITOR_FILE = path.join(STATE_DIR, WITNESS ? "monitor-witness.json" : "monitor.json");
+// A witness keeps its own state and alert files: it never shares the acting
+// instance's. A disposable instance (OPEN_WINDOW_STATE) has its own too,
+// which `npm run upgrade` names the same way.
+const MONITOR_FILE = path.join(STATE_DIR, WITNESS ? "monitor-witness.json" : monitorFileName(STATE_NAME));
 const ALERT_FILE = path.join(STATE_DIR, WITNESS ? "alerts-witness.jsonl" : "alerts.jsonl");
 /** The indexer's journal (indexer/README.md): the second source for the event trail, when a copy is kept on this machine. `INDEXER_STATE_DIR` points at a copy kept elsewhere (the indexer's `--state <dir>`). */
 const JOURNAL_DIR = process.env.INDEXER_STATE_DIR ?? path.join(ROOT, "indexer", ".state");
@@ -122,20 +127,16 @@ if (!C?.openWindow) {
   process.exit(1);
 }
 
-/** Monitoring state of the deployed contract; a new deployment starts afresh. */
-function loadMonitor() {
-  let m = {};
-  try {
-    m = JSON.parse(fs.readFileSync(MONITOR_FILE, "utf8"));
-  } catch {
-    // first run
-  }
-  return m.contract === C.openWindow ? m : { contract: C.openWindow, announced: m.announced ?? [] };
-}
-function saveMonitor(m) {
-  // Fields starting with "_" are this process's memory (the journal check's), never saved.
-  fs.writeFileSync(MONITOR_FILE, JSON.stringify(m, (key, value) => (key.startsWith("_") ? undefined : value), 2));
-}
+/**
+ * Monitoring state of the deployed contract; a new deployment starts afresh.
+ * Other processes write to the same file (`npm run upgrade`, the
+ * `--announce-...=` flags): every pass and every decision merges what they
+ * wrote first, and every save writes that merge (monitor-state.mjs, TOOL-3).
+ * Fields starting with "_" are this process's memory, never saved.
+ */
+const loadMonitor = () => loadMonitorFile(MONITOR_FILE, C.openWindow);
+const saveMonitor = (m) => saveMonitorFile(MONITOR_FILE, m);
+const refreshMonitor = (m) => refreshMonitorFile(MONITOR_FILE, m);
 
 // ---------------------------------------------------------------------------
 // The indexer's journal, read incrementally (Repud.2 cross-check)
@@ -397,7 +398,7 @@ async function snapshot(monitor) {
   const [first] = funds;
   const { config, fundState, nav, held, stewardBackup, priceError, fxLeg, fx, currency } = first;
   const { outstanding, cap } = caps[currency] ?? {};
-  // The keeper pays the rent: its float must cover the coming month. A host
+  // The keeper pays the rent: its float must cover two code slices. A host
   // without the keeper's key (a witness) reports it unreadable.
   const keeperPub = publicKeyOf(state, keeperRole());
   const keeperKey = keeperPub ? xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(keeperPub).xdrAccountId() })) : null;
@@ -483,11 +484,21 @@ async function snapshot(monitor) {
     paused = await read(state, C.openWindow, "is_paused");
     pending = await pendingProposals(primaryRead);
   }
+  // Stablecoin proposals are kept per token, with no list to read: the
+  // tokens their events named, in this window or in an earlier one while
+  // still pending, are read from state on every pass (TOOL-7). Null: no
+  // longer pending; undefined: the read failed.
+  const proposedCoins = [...new Set([
+    ...(monitor.stablecoinProposals ?? []),
+    ...events.filter((e) => e.name === "stablecoin_change_proposed").map((e) => String(e.topics?.[0] ?? "")),
+  ].filter((token) => StrKey.isValidContract(token)))];
+  const pendingStablecoins = Object.fromEntries(await Promise.all(proposedCoins.map(async (token) => [token, await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]).catch(() => undefined)])));
+  monitor.stablecoinProposals = proposedCoins.filter((token) => pendingStablecoins[token] !== null);
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
   const trail = await readTrail(journal);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl(), trail };
+  return { contract: C.openWindow, now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, pendingStablecoins, second, primaryUrl: activeRpcUrl(), trail };
 }
 
 /**
@@ -533,7 +544,12 @@ async function secondFacts(latest) {
 }
 
 async function pass(monitor, { quiet = false } = {}) {
+  // What other processes wrote to the state file (an announcement, a code
+  // baseline moved by `npm run upgrade`) counts from this pass on, and so
+  // does what they wrote while the chain was being read (TOOL-3).
+  refreshMonitor(monitor);
   const s = await snapshot(monitor);
+  refreshMonitor(monitor);
   const alerts = detect(s, monitor, { limits: LIMITS });
   // The next pass reads events after the last ledger this one covered.
   monitor.cursor = (s.eventsReached ?? s.latest) + 1;
@@ -696,10 +712,11 @@ async function perform(action, s) {
       return "extend";
     }
     case "extend_code": {
-      // Its rent is the largest fee the monitor pays: capped at one slice (lib.mjs).
-      const r = await extendTtl(state, keeperRole(), [action.key], Math.floor(action.targetDays * 17_280), { maxResourceFee: CODE_SLICE_MAX_FEE });
+      // Its rent is the largest fee the monitor pays: capped at one slice,
+      // and a shorter slice when the rent has risen past the cap (lib.mjs).
+      const r = await extendCode(state, keeperRole(), action.key, { fromDays: action.days, toDays: action.targetDays, maxResourceFee: CODE_SLICE_MAX_FEE });
       const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
-      console.log(`  ACTION   extended the contract code to about ${action.targetDays.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
+      console.log(`  ACTION   extended the contract code to about ${r.days.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
       return "extend code";
     }
     case "refresh_reference": {
@@ -718,9 +735,11 @@ async function perform(action, s) {
     }
     case "release": {
       // The simulation said it would deliver; a refusal since then is logged
-      // and the position goes back to waiting, warned about once.
+      // and the position goes back to waiting, warned about once. The
+      // delivery writes the holder's balance or trustline: that holder may be
+      // in the footprint, though the call does not name it (TOOL-9).
       try {
-        const r = await invoke(state, keeperRole(), C.openWindow, "release", [sv.u64(action.repoId)]);
+        const r = await invoke(state, keeperRole(), C.openWindow, "release", [sv.u64(action.repoId)], { extraAddresses: action.to ? [action.to] : [] });
         console.log(`  ACTION   ${keeperRole()} released the shares of repo #${action.repoId} in ${r.seconds.toFixed(1)} s (${r.value ? "delivered" : "still refused"})  ${explorer(r.hash)}`);
         return r.value ? "release" : null;
       } catch (error) {
@@ -738,10 +757,13 @@ async function perform(action, s) {
  * the snapshot. With a second endpoint configured, each one waits for that
  * endpoint to read the same facts; otherwise, or when it fails, it becomes a
  * critical alert and the next action still runs (auth-6, rpc-2). Returns
- * the words the rehearsal records.
+ * the words the rehearsal records. An announcement written since the pass
+ * read the state file is merged first: a planned change is never answered
+ * as an attack (TOOL-3).
  */
 async function act(alerts, s, monitor = {}) {
   const ctx = { actor: actorRole(s), keys: { trustee: Boolean(state.keys.trustee), guardian: Boolean(state.keys.guardian) }, limits: LIMITS };
+  refreshMonitor(monitor);
   const plan = decideActions(alerts, s, monitor, ctx);
   const raised = [...plan.alerts];
   const done = [];
@@ -781,9 +803,11 @@ async function rehearse() {
   const pub = (role) => keypair(state, role).publicKey();
   const fund = sv.address(C.shares);
   const clean = async () => (await pass(monitor, { quiet: true })).alerts;
+  // `restored` is true, false, or the outcome's own text (a proposal the
+  // drill had to withdraw itself, which is no success of the monitor).
   const record = (detector, threat, trigger, fired, action, restored) => {
     results.push({ detector, threat, trigger, fired, action, restored });
-    console.log(`  => ${detector}: fired ${fired ? "yes" : "NO"}, action ${action}, restored ${restored ? "yes" : "NO"}`);
+    console.log(`  => ${detector}: fired ${fired ? "yes" : "NO"}, action ${action}, restored ${restored === false ? "NO" : restoredLabel(restored)}`);
   };
   const firedBy = (alerts, detector) => alerts.some((a) => a.detector === detector);
 
@@ -898,12 +922,27 @@ async function rehearse() {
     console.log(`  upgrade before the delay: ${early ? early.name : "accepted"}`);
     const { s, alerts } = await pass(monitor);
     const fired = alerts.some((a) => a.detector === "privileged" && a.level === "critical" && /upgrade_proposed/.test(a.message));
-    const done = await act(alerts, s);
+    const done = await act(alerts, s, monitor);
     const reacted = (Date.now() - proposedAt) / 1000;
-    const after = await read(state, C.openWindow, "pending_upgrade");
+    let after = await read(state, C.openWindow, "pending_upgrade");
     const window = Number(pending.eta) - (await ledgerTime());
-    console.log(`  proposal ${explorer(proposed.hash)}; cancelled ${reacted.toFixed(0)} s after it, ${window} s before it could apply`);
-    record("privileged", "Elev.2", "unannounced upgrade proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, ${window} s of the delay left`, !after && early?.name === "TimelockPending");
+    console.log(`  proposal ${explorer(proposed.hash)}; ${done.includes("cancel upgrade") ? `cancelled ${reacted.toFixed(0)} s after it, ${window} s before it could apply` : "not cancelled by the monitor"}`);
+    // The drill never leaves its stand-in code pending: when the monitor's
+    // cancellation was not taken (the second endpoint lagging or down), the
+    // governor withdraws its own proposal, which `npm run upgrade -- --apply`
+    // would otherwise meet (TOOL-2).
+    // The monitor is judged here, before the drill's own cleanup.
+    const cleared = !after && early?.name === "TimelockPending";
+    let cleanup = "";
+    let withdrawn = false;
+    if (after && hex(after.wasm_hash) === hostile.toString("hex")) {
+      const cancelled = await invoke(state, "governor", C.openWindow, "cancel_upgrade", [sv.address(pub("governor"))]);
+      after = await read(state, C.openWindow, "pending_upgrade");
+      withdrawn = !after;
+      cleanup = "; still pending after the monitor's action, withdrawn by the governor";
+      console.log(`  still pending after the monitor's action: the governor withdrew its own proposal ${explorer(cancelled.hash)}`);
+    }
+    record("privileged", "Elev.2", "unannounced upgrade proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, ${window} s of the delay left${cleanup}`, restoredOutcome(cleared, withdrawn));
   }
 
   if (runStep(9)) {
@@ -914,7 +953,9 @@ async function rehearse() {
     ]);
     const repoId = Number(opened.value);
     await invoke(state, "steward", C.shares, "set_frozen", [sv.address(C.openWindow), sv.bool(true)]);
-    const repaid = await invoke(state, "borrower", C.openWindow, "repurchase", [sv.u64(repoId)]);
+    // The repayment's token is read from the repo: a pull is signed only on the token the caller declares (TOOL-5).
+    const repo = await read(state, C.openWindow, "get_repo", [sv.u64(repoId)]);
+    const repaid = await invoke(state, "borrower", C.openWindow, "repurchase", [sv.u64(repoId)], { tokens: [String(repo.stablecoin)] });
     console.log(`  repo #${repoId} repaid while the contract is frozen: ${explorer(repaid.hash)}`);
     // While the token refuses, release returns false and keeps the record (and its TTL).
     const delivered = await read(state, C.openWindow, "release", [sv.u64(repoId)], "operator");
@@ -939,10 +980,23 @@ async function rehearse() {
     const { s, alerts } = await pass(monitor);
     const fired = alerts.some((a) => a.level === "critical" && /governor handover proposed/.test(a.message));
     const done = await act(alerts, s, monitor);
-    const after = await read(state, C.openWindow, "pending_admin");
+    let after = await read(state, C.openWindow, "pending_admin");
+    // Not vetoed (no guardian key on this host, or the second endpoint did
+    // not confirm): the governor withdraws its own handover (TOOL-2).
+    // The monitor is judged here, before the drill's own cleanup.
+    const cleared = !after;
+    let cleanup = "";
+    let withdrawn = false;
+    if (after && String(after.admin) === attacker) {
+      const cancelled = await invoke(state, "governor", C.openWindow, "cancel_admin", []);
+      after = await read(state, C.openWindow, "pending_admin");
+      withdrawn = !after;
+      cleanup = "; still pending after the monitor's action, withdrawn by the governor";
+      console.log(`  still pending after the monitor's action: the governor withdrew its own handover ${explorer(cancelled.hash)}`);
+    }
     const governor = await read(state, C.openWindow, "admin");
     const window = Number(pending.eta) - (await ledgerTime());
-    record("privileged", "Elev.2", "governor handover proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${((Date.now() - proposedAt) / 1000).toFixed(0)} s, ${window} s of the delay left`, !after && governor === pub("governor") && early?.name === "TimelockPending");
+    record("privileged", "Elev.2", "governor handover proposed with the governor keys", fired, `${done.join(", ") || "none"} after ${((Date.now() - proposedAt) / 1000).toFixed(0)} s, ${window} s of the delay left${cleanup}`, restoredOutcome(cleared && governor === pub("governor") && early?.name === "TimelockPending", withdrawn));
   }
 
   if (runStep(11)) {
@@ -952,18 +1006,29 @@ async function rehearse() {
       C.backupFeed = await deploy(state, "operator", "nav_oracle.wasm", [sv.address(pub("operator")), asset.other("USD"), sv.u32(14), sv.u32(300)]);
       saveState(state);
     }
-    const primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
+    let primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
     let t = await ledgerTime();
     await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t - 1)]);
     let active = await read(state, C.openWindow, "get_fallback", [fund]);
     if (!active) {
+      // Since rc5 a backup is checked against a fresh primary when it is
+      // proposed and when it is applied (oracle-5). On a fresh deployment
+      // the primary may be older than that allows by then: the operator
+      // republishes it, same price, fresh timestamp, and the backup that
+      // same price, before each of the two calls.
+      const alignFeeds = async () => {
+        primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
+        const at = Math.max((await ledgerTime()) - 1, Number(primary.timestamp));
+        await invoke(state, "operator", C.navOracle, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(at)]);
+        await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(at)]);
+      };
       const feed = sv.struct({ oracle: sv.address(C.backupFeed), asset: fundAsset, max_age_secs: sv.u64(26 * 3600), max_divergence_bps: sv.u32(20) });
+      await alignFeeds();
       await invoke(state, "governor", C.openWindow, "propose_fallback", [fund, feed], { cosigners: ["steward"] });
       const pending = await read(state, C.openWindow, "pending_fallback", [fund]);
       console.log(`  backup feed proposed by governor and steward; applies after the delay (${Number(pending.eta) - (await ledgerTime())} s)`);
       while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
-      t = await ledgerTime();
-      await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t - 1)]);
+      await alignFeeds();
       await invoke(state, "operator", C.openWindow, "apply_fallback", [fund]);
       active = await read(state, C.openWindow, "get_fallback", [fund]);
     }
@@ -995,7 +1060,15 @@ async function rehearse() {
     while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
     await invoke(state, "operator", C.openWindow, "apply_reanchor", [fund]);
     const fs1 = await read(state, C.openWindow, "get_fund_state", [fund]);
-    record("privileged", "S21", "two-key re-anchor of the price reference", fired, "applied after the delay by a third party", BigInt(fs1.reference_nav) === nav && BigInt(fs1.reference_fx) === fx);
+    // rc5 (VAL-1): the apply carries the reference from the proposal's NAV to
+    // the reading at the apply, along the model path: never below the NAV the
+    // two signed, never above that reading. The FX reference is the rate they
+    // signed. With no publication during the delay, both NAVs are the same.
+    const atApply = BigInt((await read(state, C.navOracle, "lastprice", [fundAsset])).price);
+    const installed = BigInt(fs1.reference_nav);
+    const carried = installed >= nav && installed <= (atApply > nav ? atApply : nav);
+    console.log(`  reference installed at ${(Number(installed) / 1e14).toFixed(6)} (proposed ${(Number(nav) / 1e14).toFixed(6)}, read at the apply ${(Number(atApply) / 1e14).toFixed(6)}), EUR/USD ${(Number(fs1.reference_fx) / 1e14).toFixed(4)}`);
+    record("privileged", "S21", "two-key re-anchor of the price reference", fired, "applied after the delay by a third party", carried && BigInt(fs1.reference_fx) === fx);
   }
 
   if (runStep(13)) {
@@ -1011,10 +1084,22 @@ async function rehearse() {
       const fired = alerts.some((a) => a.detector === "privileged" && a.level === "critical" && /forced guardian change/.test(a.message));
       const done = await act(alerts, s, monitor);
       const reacted = (Date.now() - proposedAt) / 1000;
-      const left = await read(state, C.openWindow, "pending_forced_guardian_change");
-      const guardian1 = await read(state, C.openWindow, "guardian");
+      let left = await read(state, C.openWindow, "pending_forced_guardian_change");
       console.log(`  proposal ${explorer(proposed.hash)}; ${done.join(", ") || "no action"} after ${reacted.toFixed(0)} s`);
-      record("privileged", "Elev.2", "forced guardian change proposed with the governor and trustee keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, 30 days before it could apply`, !left && guardian1 === guardian0);
+      // Not vetoed: the governor withdraws its own forced change (TOOL-2).
+      // The monitor is judged here, before the drill's own cleanup.
+      const cleared = !left;
+      let cleanup = "";
+      let withdrawn = false;
+      if (left && String(left.guardian) === pub("operator")) {
+        const cancelled = await invoke(state, "governor", C.openWindow, "cancel_forced_guardian_change", []);
+        left = await read(state, C.openWindow, "pending_forced_guardian_change");
+        withdrawn = !left;
+        cleanup = "; still pending after the monitor's action, withdrawn by the governor";
+        console.log(`  still pending after the monitor's action: the governor withdrew its own forced change ${explorer(cancelled.hash)}`);
+      }
+      const guardian1 = await read(state, C.openWindow, "guardian");
+      record("privileged", "Elev.2", "forced guardian change proposed with the governor and trustee keys", fired, `${done.join(", ") || "none"} after ${reacted.toFixed(0)} s, 30 days before it could apply${cleanup}`, restoredOutcome(cleared && guardian1 === guardian0, withdrawn));
     }
   }
 
@@ -1034,7 +1119,7 @@ async function rehearse() {
   }
 
   if (runStep(15)) {
-    console.log("\n15. Keeper float (DoS.2): the rent-paying account falls below a month of rent");
+    console.log("\n15. Keeper float (DoS.2): the rent-paying account falls below two slices of code rent");
     monitor.keeperMinXlmOverride = Number.POSITIVE_INFINITY;
     const { alerts } = await pass(monitor);
     delete monitor.keeperMinXlmOverride;
@@ -1091,9 +1176,21 @@ async function rehearse() {
       const { s, alerts } = await pass(monitor);
       const fired = alerts.some((a) => a.level === "critical" && /stablecoin registration proposed/.test(a.message));
       const done = await act(alerts, s, monitor);
-      const left = await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]);
+      let left = await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]);
       console.log(`  proposal ${explorer(proposed.hash)}; ${done.join(", ") || "no action"}`);
-      record("privileged", "Elev.2", "unannounced stablecoin registration proposed with the governor keys", fired, `${done.join(", ") || "none"} by ${actorRole(s)}`, !left);
+      // Not cancelled: the governor withdraws its own proposal (TOOL-2).
+      // The monitor is judged here, before the drill's own cleanup.
+      const cleared = !left;
+      let cleanup = "";
+      let withdrawn = false;
+      if (left) {
+        const cancelled = await invoke(state, "governor", C.openWindow, "cancel_stablecoin_change", [sv.address(token), sv.address(pub("governor"))]);
+        left = await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]);
+        withdrawn = !left;
+        cleanup = "; still pending after the monitor's action, withdrawn by the governor";
+        console.log(`  still pending after the monitor's action: the governor withdrew its own proposal ${explorer(cancelled.hash)}`);
+      }
+      record("privileged", "Elev.2", "unannounced stablecoin registration proposed with the governor keys", fired, `${done.join(", ") || "none"} by ${actorRole(s)}${cleanup}`, restoredOutcome(cleared, withdrawn));
     }
   }
 
@@ -1113,11 +1210,14 @@ async function rehearse() {
     }
   }
 
+  // The event cursor and the memory of every drill: the next watch starts
+  // after the rehearsal's own events, not before drills 14 to 19 (TOOL-7).
+  saveMonitor(monitor);
   const file = path.join(STATE_DIR, `rehearsal-${new Date().toISOString().slice(0, 10)}.json`);
   fs.writeFileSync(file, JSON.stringify(results, null, 2));
   console.log(`\nRehearsal written to ${path.relative(process.cwd(), file)}`);
   console.log("\n| Detector | Threat | Trigger | Fired | Action | Restored |\n|---|---|---|---|---|---|");
-  for (const r of results) console.log(`| ${r.detector} | ${r.threat} | ${r.trigger} | ${r.fired ? "yes" : "no"} | ${r.action} | ${r.restored ? "yes" : "no"} |`);
+  for (const r of results) console.log(`| ${r.detector} | ${r.threat} | ${r.trigger} | ${r.fired ? "yes" : "no"} | ${r.action} | ${restoredLabel(r.restored)} |`);
 }
 
 async function main() {

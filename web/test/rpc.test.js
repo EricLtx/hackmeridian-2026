@@ -2,10 +2,23 @@
 // network, moves to the next endpoint and stays there; a request the RPC
 // refuses does not. No network: the endpoints are stand-ins.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Chain, RETURN_QUIET_MS, RpcTimeout, pickEndpoint, rpcChangeText, rpcServer, withTimeout } from "../src/chain.js";
+import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import {
+  Chain,
+  HEIGHT_BUDGET_MS,
+  MAX_IN_FLIGHT,
+  MAX_REST_MS,
+  RETURN_QUIET_MS,
+  RpcTimeout,
+  pickEndpoint,
+  restAfterFailure,
+  rpcChangeText,
+  rpcServer,
+  withTimeout,
+} from "../src/chain.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 const never = () => new Promise(() => {});
@@ -141,47 +154,77 @@ test("RPC clients send only Content-Type, so a strict CORS preflight passes", as
   assert.deepEqual(sent, [["content-type"]]);
 });
 
-test("staleness: calls leave an endpoint more than 10 ledgers behind, and return to the first once it is level", () => {
-  const move = (heights, active) => {
-    const { index, reason, behind } = pickEndpoint(heights, active);
-    return [index, reason, behind];
-  };
-  assert.deepEqual(move([100, 100], 0), [0, null, 0], "level: stay");
-  assert.deepEqual(move([90, 100], 0), [0, null, 0], "10 behind is still tolerated");
-  assert.deepEqual(move([89, 100], 0), [1, "behind", 11]);
-  assert.deepEqual(move([100, 100], 1), [0, "level", 0], "back to the first once level");
-  assert.deepEqual(move([99, 100], 1), [0, "level", 0], "one ledger apart counts as level");
-  assert.deepEqual(move([98, 100], 1), [1, null, 0], "the first is still catching up: stay on the fallback");
-  assert.deepEqual(move([100, 80], 1), [0, "level", 0]);
-  assert.deepEqual(move([null, 100], 1), [1, null, 0], "an endpoint that did not answer is not a target");
-  assert.deepEqual(move([100, null], 0), [0, null, 0], "nor a reason to move");
+/** A height as an endpoint reports it, its latest ledger closed `age` seconds before `NOW` (null: no close time given). */
+const NOW = 1_792_500_000;
+const r = (height, age) => ({ height, closeTime: age === null ? null : NOW - age });
+const move = (reads, active) => {
+  const { index, reason, behind } = pickEndpoint(reads, active, NOW);
+  return [index, reason, behind];
+};
+
+test("staleness: calls leave an endpoint more than 10 ledgers behind and a minute old by its own clock, and return to the first once it is level or current", () => {
+  assert.deepEqual(move([r(100, 2), r(100, 2)], 0), [0, null, 0], "level: stay");
+  assert.deepEqual(move([r(90, 70), r(100, 2)], 0), [0, null, 0], "10 behind is still tolerated");
+  assert.deepEqual(move([r(89, 70), r(100, 2)], 0), [1, "behind", 11]);
+  assert.deepEqual(move([r(100, 2), r(100, 2)], 1), [0, "level", 0], "back to the first once level");
+  assert.deepEqual(move([r(99, 30), r(100, 2)], 1), [0, "level", 0], "one ledger apart counts as level");
+  assert.deepEqual(move([r(98, 30), r(100, 2)], 1), [1, null, 0], "the first is still catching up: stay on the fallback");
+  assert.deepEqual(move([r(100, 2), r(80, 100)], 1), [0, "level", 0]);
+  assert.deepEqual(move([null, r(100, 2)], 1), [1, null, 0], "an endpoint that did not answer is not a target");
+  assert.deepEqual(move([r(100, 2), null], 0), [0, null, 0], "nor a reason to move");
   assert.deepEqual(move([null, null], 0), [0, null, 0]);
-  assert.deepEqual(move([80, 95, 100], 0), [2, "behind", 20], "to the first endpoint that is level, not merely closer");
-  assert.deepEqual(move([80, 100, 100], 0), [1, "behind", 20]);
+  assert.deepEqual(move([r(80, 90), r(95, 2), r(100, 2)], 0), [2, "behind", 20], "to the first endpoint that is level, not merely closer");
+  assert.deepEqual(move([r(80, 90), r(100, 2), r(100, 2)], 0), [1, "behind", 20]);
+});
+
+test("freshness: another endpoint's height alone neither takes the calls from a current first endpoint nor keeps them from it", () => {
+  const N = 5_296_165;
+  // The first endpoint closed a ledger 3 s ago; the fallback claims 11 more, or any height, stamped now.
+  for (const claim of [N + 11, N + 1_000, Number.MAX_SAFE_INTEGER]) {
+    assert.deepEqual(move([r(N, 3), r(claim, 0)], 0), [0, null, 0], `a claim of ${claim} moves nothing`);
+  }
+  assert.deepEqual(move([r(N - 11, 50), r(N, 1)], 0), [0, null, 0], "under a minute old by its own clock: not stale yet");
+  assert.deepEqual(move([r(N - 12, 70), r(N, 2)], 0), [1, "behind", 12], "a first endpoint really behind still loses the calls");
+  assert.deepEqual(move([r(N - 12, null), r(N, 2)], 0), [0, null, 0], "no close time of its own: another endpoint's height is no proof");
+  // On the fallback: the first endpoint returns when its own close time is current, whatever the fallback claims.
+  assert.deepEqual(move([r(N, 3), r(N + 50, 0)], 1), [0, "level", 0]);
+  assert.deepEqual(move([r(N - 5, 10), r(N, 0)], 1), [0, "level", 0], "current by its own clock, though not level");
+  assert.deepEqual(move([r(N - 5, 20), r(N, 0)], 1), [1, null, 0], "neither level nor current: stay");
 });
 
 test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's height, and ignores a silent one", async () => {
-  const health = (latestLedger) => async () => ({ status: "healthy", latestLedger });
+  const now = () => Math.floor(Date.now() / 1000);
+  const health = (latestLedger, age = 1) => async () => ({ status: "healthy", latestLedger, latestLedgerCloseTime: String(now() - age) });
   const changes = [];
-  const lagging = chainWith(fake("lagging.example", { getHealth: health(5_293_700) }), fake("current.example", { getHealth: health(5_293_787) }));
+  const lagging = chainWith(fake("lagging.example", { getHealth: health(5_293_700, 450) }), fake("current.example", { getHealth: health(5_293_787) }));
   lagging.onRpcChange = (change) => changes.push(change);
-  assert.deepEqual(await lagging.checkHeights(), [5_293_700, 5_293_787]);
+  assert.deepEqual(
+    (await lagging.checkHeights()).map((read) => read.height),
+    [5_293_700, 5_293_787],
+  );
   assert.equal(lagging.rpcInfo().host, "current.example");
   assert.deepEqual(changes, [{ from: "lagging.example", to: "current.example", reason: "behind", behind: 87 }]);
 
-  // getHealth refuses on an endpoint whose last ledger is old: its height comes from getLatestLedger.
+  // getHealth refuses on an endpoint whose last ledger is old: its height and close time come from getLatestLedger.
   const unhealthy = async () => {
     throw { code: -32603, message: "latency (95s) since last known ledger closed is too high (>30s)" };
   };
-  const stale = chainWith(fake("stale.example", { getHealth: unhealthy, getLatestLedger: async () => ({ sequence: 5_293_770 }) }), fake("current.example", { getHealth: health(5_293_787) }));
-  assert.deepEqual(await stale.checkHeights(), [5_293_770, 5_293_787]);
+  const stale = chainWith(
+    fake("stale.example", { getHealth: unhealthy, getLatestLedger: async () => ({ sequence: 5_293_770, closeTime: String(now() - 95) }) }),
+    fake("current.example", { getHealth: health(5_293_787) }),
+  );
+  const reads = await stale.checkHeights();
+  assert.equal(reads[0].height, 5_293_770);
+  assert.ok(Math.abs(reads[0].closeTime - (now() - 95)) <= 1, "the close time is read too");
   assert.equal(stale.rpcInfo().host, "current.example");
 
-  // Back to the first endpoint once it is level again.
+  // Back to the first endpoint once it is level again, at its second poll answered in a row.
   const back = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
   back.active = 1;
   const returned = [];
   back.onRpcChange = (change) => returned.push(change.reason);
+  await back.checkHeights();
+  assert.equal(back.rpcInfo().host, "second.example", "one poll answered: not yet");
   await back.checkHeights();
   assert.equal(back.rpcInfo().host, "first.example");
   assert.deepEqual(returned, ["level"]);
@@ -189,25 +232,719 @@ test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's
   // An endpoint left after a failed call rests before calls return to it, level or not.
   const rested = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
   rested.active = 1;
-  rested.endpoints[0].failedAt = Date.now();
+  rested.endpoints[0].failedAt = performance.now();
+  await rested.checkHeights();
   await rested.checkHeights();
   assert.equal(rested.rpcInfo().host, "second.example", "a minute of rest first");
-  rested.endpoints[0].failedAt = Date.now() - RETURN_QUIET_MS - 1;
+  rested.endpoints[0].failedAt = performance.now() - RETURN_QUIET_MS - 1;
   await rested.checkHeights();
   assert.equal(rested.rpcInfo().host, "first.example");
   // failover marks the endpoint it leaves.
   const marked = chainWith(fake("slow.example", { getHealth: never }), fake("fast.example", { getHealth: health(1) }));
   await marked.net(() => marked.server.getHealth(), { timeoutMs: 20 });
-  assert.ok(Date.now() - marked.endpoints[0].failedAt < 5_000);
+  assert.ok(performance.now() - marked.endpoints[0].failedAt < 5_000);
 
   // A silent endpoint has no height: nothing moves on its account.
   const down = async () => {
     throw new TypeError("Failed to fetch");
   };
   const silent = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("silent.example", { getHealth: down, getLatestLedger: down }));
-  assert.deepEqual(await silent.checkHeights(), [5_293_787, null]);
+  const silentReads = await silent.checkHeights();
+  assert.equal(silentReads[0].height, 5_293_787);
+  assert.equal(silentReads[1], null);
   assert.equal(silent.rpcInfo().host, "first.example");
   assert.deepEqual(await chainWith(fake("only.example", { getHealth: health(1) })).checkHeights(), [], "one endpoint: nothing to compare");
+});
+
+test("the height poll: a fallback that over-reports its height takes no call from a current first endpoint, and gives them back", async () => {
+  // WEB-2: Gateway.fm, say, answers getHealth with 11 ledgers more than the chain has, stamped with the current time.
+  const now = () => Math.floor(Date.now() / 1000);
+  const N = 5_295_195;
+  const health = (latestLedger, age) => async () => ({ status: "healthy", latestLedger, latestLedgerCloseTime: String(now() - age) });
+  for (const claim of [N + 11, Number.MAX_SAFE_INTEGER]) {
+    const changes = [];
+    const chain = chainWith(fake("first.example", { getHealth: health(N, 2) }), fake("fallback.example", { getHealth: health(claim, 0) }));
+    chain.onRpcChange = (change) => changes.push(change);
+    for (let pass = 0; pass < 3; pass += 1) await chain.checkHeights();
+    assert.equal(chain.rpcInfo().host, "first.example", `a claim of ${claim}`);
+    assert.deepEqual(changes, []);
+    assert.equal(chain.endpoints[0].failedAt, undefined);
+  }
+  // Already on the fallback (after a failed call and its rest): back to a current first endpoint, whatever the fallback claims.
+  const back = chainWith(fake("first.example", { getHealth: health(N, 3) }), fake("fallback.example", { getHealth: health(N + 50, 0) }));
+  back.active = 1;
+  await back.checkHeights();
+  await back.checkHeights();
+  assert.equal(back.rpcInfo().host, "first.example");
+});
+
+test("the height poll never holds a refresh pass more than about 1.5 s", async () => {
+  // WEB-3: it ran before every pass, the first included, and waited 4 s for a silent endpoint, 8 s with its fallback.
+  assert.equal(HEIGHT_BUDGET_MS, 1500);
+  const now = () => Math.floor(Date.now() / 1000);
+  const health = async () => ({ status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(now()) });
+  const timed = async (run) => {
+    const started = Date.now();
+    const value = await run();
+    return { value, ms: Date.now() - started };
+  };
+
+  // One endpoint never answers getHealth: the poll and the pass's bounded wait both end at the budget.
+  const silent = chainWith(fake("first.example", { getHealth: health }), fake("silent.example", { getHealth: never, getLatestLedger: never }));
+  const poll = await timed(() => silent.checkHeights());
+  assert.ok(poll.ms < 1700, `checkHeights took ${poll.ms} ms`);
+  assert.equal(poll.value[0].height, 100);
+  assert.equal(poll.value[1], null);
+  const bounded = await timed(() => silent.pollHeights());
+  assert.ok(bounded.ms < 1700, `pollHeights took ${bounded.ms} ms`);
+
+  // An unhealthy endpoint that refuses getHealth after 1.2 s, then hangs on getLatestLedger: one budget for both.
+  const refuses = () => new Promise((_, reject) => setTimeout(() => reject({ code: -32603, message: "latency (95s) since last known ledger closed is too high (>30s)" }), 1200));
+  const slow = chainWith(fake("first.example", { getHealth: health }), fake("unhealthy.example", { getHealth: refuses, getLatestLedger: never }));
+  const shared = await timed(() => slow.checkHeights());
+  assert.ok(shared.ms < 1700, `getHealth and getLatestLedger shared ${shared.ms} ms`);
+
+  // Whatever holds the poll, the pass waits at most the budget; a move decided later applies to later calls.
+  const stuck = chainWith(fake("first.example", { getHealth: health }), fake("second.example", { getHealth: health }));
+  stuck.checkHeights = never;
+  const race = await timed(() => stuck.pollHeights(100));
+  assert.equal(race.value, null);
+  assert.ok(race.ms < 400, `pollHeights(100) took ${race.ms} ms`);
+});
+
+test("an endpoint that fails soon after each return rests longer each time, up to 10 minutes, and a minute again after a quiet period", async () => {
+  // WEB-4. The rule.
+  assert.equal(restAfterFailure({}, 1_000_000), RETURN_QUIET_MS, "a first failure: a minute");
+  const failedAt = 1_000_000;
+  const returnedAt = failedAt + 60_000;
+  assert.equal(restAfterFailure({ restMs: 60_000, failedAt, returnedAt }, returnedAt + 20_000), 120_000, "failed 20 s after calls returned to it");
+  assert.equal(restAfterFailure({ restMs: 480_000, failedAt, returnedAt }, returnedAt + 1_000), MAX_REST_MS);
+  assert.equal(restAfterFailure({ restMs: MAX_REST_MS, failedAt, returnedAt }, returnedAt + 1_000), MAX_REST_MS, "capped");
+  assert.equal(restAfterFailure({ restMs: 240_000, failedAt, returnedAt }, returnedAt + 300_000), RETURN_QUIET_MS, "quiet for longer than its rest: a minute again");
+  assert.equal(MAX_REST_MS, 600_000);
+
+  // The cycle the review saw on 20 October: each return to the first endpoint met a slow call at once.
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => clock;
+  try {
+    const health = async () => ({ status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(Math.floor(clock / 1000) - 2) });
+    const chain = chainWith(fake("first.example", { getHealth: health }), fake("second.example", { getHealth: health }));
+    chain.clock = () => clock; // the rests run on this test's clock
+    const changes = [];
+    chain.onRpcChange = (change) => changes.push(change.reason);
+    const restOf = async () => {
+      // One pass every 15 s until calls return to the first endpoint.
+      const left = clock;
+      while (chain.active === 1 && clock - left <= 20 * 60_000) {
+        clock += 15_000;
+        await chain.checkHeights();
+      }
+      return (clock - left) / 1000;
+    };
+    const rests = [];
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      assert.ok(chain.failover(new RpcTimeout(7000), 0), "a slow call on the first endpoint, just after calls returned to it");
+      rests.push(await restOf());
+    }
+    assert.deepEqual(rests, [60, 120, 240, 480, 600]);
+    assert.equal(changes.length, 10, "two notices per cycle, five cycles in 25 minutes rather than one a minute");
+    // The first endpoint then serves calls quietly for longer than its rest: its next failure rests a minute.
+    clock += MAX_REST_MS + 1;
+    chain.failover(new RpcTimeout(7000), 0);
+    assert.equal(await restOf(), 60);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a failing call skips an endpoint that is resting; with every other one resting, the calls stay where they are until a rest is over", () => {
+  const chain = chainWith(fake("a.example", {}), fake("b.example", {}), fake("c.example", {}));
+  chain.endpoints[1].failedAt = performance.now(); // b failed a moment ago
+  assert.ok(chain.failover(new RpcTimeout(7000), 0));
+  assert.equal(chain.rpcInfo().host, "c.example", "b rests: c takes the calls");
+  // a just failed and b rests: when c fails too, there is nowhere to go; the calls stay on c, which rests too now.
+  assert.equal(chain.failover(new RpcTimeout(7000), 2), false);
+  assert.equal(chain.rpcInfo().host, "c.example");
+  assert.ok(performance.now() - chain.endpoints[2].failedAt < 1000, "c's failure is recorded");
+  assert.equal(chain.moveCount, 1);
+  // With two endpoints: the other one resting, the calls stay; once its rest is over, the next failure moves there.
+  const two = chainWith(fake("a.example", {}), fake("b.example", {}));
+  two.endpoints[1].failedAt = performance.now();
+  assert.equal(two.failover(new RpcTimeout(7000), 0), false);
+  assert.equal(two.rpcInfo().host, "a.example");
+  two.endpoints[1].failedAt = performance.now() - 2 * RETURN_QUIET_MS;
+  assert.ok(two.failover(new RpcTimeout(7000), 0));
+  assert.equal(two.rpcInfo().host, "b.example");
+});
+
+// A session on virtual time (node:test mock timers, Date and setTimeout): a stand-in endpoint that answers or fails
+// on the network as `alive()` says, and a pass of the page (a height poll, then ten reads) every 15 s.
+const liveServer = (alive) => {
+  const at = () => Math.floor(Date.now() / 1000);
+  const failing = () => {
+    throw new TypeError("Failed to fetch");
+  };
+  return {
+    getHealth: async () => (alive() ? { status: "healthy", latestLedger: 100 + Math.floor(at() / 5), latestLedgerCloseTime: String(at() - 2) } : failing()),
+    simulateTransaction: async () => (alive() ? { ok: true } : failing()),
+  };
+};
+async function drive(chain, seconds, { onTick = () => {} } = {}) {
+  chain.clock = () => Date.now(); // virtual time: the rests and the window run on the mocked clock
+  const start = Date.now();
+  const since = () => Math.round((Date.now() - start) / 1000);
+  const moves = [];
+  chain.onRpcChange = (c) => moves.push(`${since()}s:${c.reason}:${c.to}`);
+  const passes = [];
+  const pass = async () => {
+    const at = since();
+    await chain.pollHeights();
+    const results = await Promise.all(Array.from({ length: 10 }, () => chain.net(() => chain.server.simulateTransaction()).then(() => true, () => false)));
+    passes.push({ at, ok: results.filter(Boolean).length, host: chain.rpcInfo().host });
+  };
+  const flush = async () => {
+    for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+  for (let t = 0; t <= seconds * 1000; t += 50) {
+    onTick(t);
+    if (t % 15_000 === 0) pass();
+    mock.timers.tick(50);
+    await flush();
+  }
+  return { moves, passes };
+}
+
+test("an outage of every endpoint: at most two moves in a minute, the reads come back at the first pass after it, and the first endpoint takes them back", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_792_500_000_000 });
+  try {
+    let outage = true;
+    const chain = chainWith(fake("sdf.example", liveServer(() => !outage)), fake("gfm.example", liveServer(() => !outage)));
+    // The outage lasts 60 s, then both endpoints answer again.
+    const { moves, passes } = await drive(chain, 135, {
+      onTick: (t) => {
+        if (t === 60_000) outage = false;
+      },
+    });
+    console.log(`outage: moves ${moves.join(" ")}; passes ${JSON.stringify(passes)}`);
+    const during = moves.filter((m) => Number.parseInt(m, 10) < 60);
+    assert.ok(during.length <= 2, `moves during the outage: ${moves.join(" ")}`);
+    const first = passes.find((p) => p.at >= 60);
+    assert.equal(first?.ok, 10, `the first pass after the recovery: ${JSON.stringify(passes)}`);
+    assert.equal(passes.at(-1).host, "sdf.example", `back on the first endpoint: ${moves.join(" ")}`);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("the fallback dies while the first endpoint rests long: its answered height poll ends the rest for a failing call, and the reads are back within one refresh", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_792_500_000_000 });
+  try {
+    const a = fake("sdf.example", liveServer(() => true));
+    const b = fake("gfm.example", liveServer(() => false));
+    const chain = chainWith(a, b);
+    // The calls are on gfm: sdf was left 10 s ago after its stalls, and its rest has grown to 480 s.
+    chain.active = 1;
+    a.failedAt = Date.now() - 10_000;
+    a.returnedAt = Date.now() - 20_000;
+    a.restMs = 480_000;
+    const { moves, passes } = await drive(chain, 60);
+    console.log(`fallback dead, first endpoint resting 480 s: moves ${moves.join(" ")}; passes ${JSON.stringify(passes)}`);
+    const first = passes.find((p) => p.ok === 10);
+    assert.ok(first && first.at <= 15, `first good pass at ${first?.at} s: ${JSON.stringify(passes)}`);
+    assert.ok(passes.filter((p) => p.ok === 0).length <= 1, "at most one failing pass");
+    assert.deepEqual(moves, ["0s:error:sdf.example"]);
+    assert.equal(passes.at(-1).host, "sdf.example");
+    // A resting endpoint whose poll did not answer is no such target: the calls stay.
+    const dead = chainWith(fake("sdf.example", liveServer(() => false)), fake("gfm.example", liveServer(() => false)));
+    dead.active = 1;
+    dead.endpoints[0].failedAt = Date.now() - 10_000;
+    dead.endpoints[0].restMs = 480_000;
+    const stayed = await drive(dead, 30);
+    assert.deepEqual(stayed.moves, [], "nowhere to go: the calls stay");
+    assert.equal(dead.rpcInfo().host, "gfm.example");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a failure during a stay keeps a doubled rest; only the first failure after a return doubles it", () => {
+  const a = fake("a.example", {});
+  const b = fake("b.example", {});
+  const chain = chainWith(a, b);
+  const now = performance.now();
+  b.failedAt = now; // b rests, and its last poll did not answer
+  a.restMs = 240_000;
+  a.failedAt = now - 100_000;
+  a.returnedAt = now - 5_000; // calls came back to a 5 s ago, within its 240 s rest
+  assert.equal(chain.failover(new RpcTimeout(7000), 0), false, "nowhere to go: stay");
+  assert.equal(a.restMs, 480_000, "the failure soon after the return doubles the rest");
+  assert.equal(chain.failover(new RpcTimeout(7000), 0), false);
+  assert.equal(a.restMs, 480_000, "the next failure of the same stay keeps it");
+  assert.equal(chain.moveCount, 0);
+  assert.equal(restAfterFailure({ restMs: 480_000, failedAt: now - 1_000, returnedAt: now - 5_000 }, now), 480_000);
+});
+
+test("an HTTP 429 is back-pressure on the same endpoint, not a failover", async () => {
+  const tooMany = (retryAfter) =>
+    Object.assign(new Error("Request failed with status code 429"), { response: { status: 429, headers: new Headers(retryAfter === undefined ? {} : { "retry-after": retryAfter }) } });
+  let calls = 0;
+  const busy = fake("busy.example", {
+    getHealth: async () => {
+      calls += 1;
+      if (calls < 3) throw tooMany("0");
+      return { status: "healthy" };
+    },
+  });
+  const chain = chainWith(busy, fake("other.example", { getHealth: healthy }));
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change);
+  assert.equal((await chain.net(() => chain.server.getHealth())).status, "healthy");
+  assert.equal(calls, 3, "sent there again, as the endpoint asked");
+  assert.equal(chain.rpcInfo().host, "busy.example");
+  assert.deepEqual(changes, []);
+
+  // A browser sees no Retry-After unless the endpoint exposes it: about a second.
+  let once = 0;
+  const plain = chainWith(
+    fake("busy.example", {
+      getHealth: async () => {
+        once += 1;
+        if (once === 1) throw tooMany();
+        return { status: "healthy" };
+      },
+    }),
+    fake("other.example", { getHealth: healthy }),
+  );
+  const started = Date.now();
+  await plain.net(() => plain.server.getHealth());
+  const waited = Date.now() - started;
+  assert.ok(waited >= 900 && waited < 2500, `waited ${waited} ms`);
+  assert.equal(plain.rpcInfo().host, "busy.example");
+
+  // The review's case: a 429 from the fallback while the first endpoint rests never sends calls back to it.
+  const back = chainWith(fake("first.example", {}), fake("fallback.example", {}));
+  assert.ok(back.failover(new RpcTimeout(7000), 0));
+  assert.equal(back.failover(tooMany(), 1), false);
+  assert.equal(back.rpcInfo().host, "fallback.example");
+});
+
+const tooManyWith = (retryAfter) =>
+  Object.assign(new Error("Request failed with status code 429"), { response: { status: 429, headers: new Headers(retryAfter === undefined ? {} : { "retry-after": retryAfter }) } });
+const refusingAsTooMany = (retryAfter) => async () => {
+  throw tooManyWith(retryAfter);
+};
+const healthAt = (height) => async () => ({ status: "healthy", latestLedger: height, latestLedgerCloseTime: String(Math.floor(Date.now() / 1000)) });
+
+test("an endpoint that answers HTTP 429 to everything is left after three in a row within one call: the reads land on the other endpoint", async () => {
+  let busyCalls = 0;
+  let healthyCalls = 0;
+  const chain = chainWith(
+    fake("busy.example", {
+      getHealth: refusingAsTooMany("0"),
+      simulateTransaction: async () => {
+        busyCalls += 1;
+        throw tooManyWith("0");
+      },
+    }),
+    fake("healthy.example", {
+      getHealth: healthAt(100),
+      simulateTransaction: async () => {
+        healthyCalls += 1;
+        return { ok: true };
+      },
+    }),
+  );
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change);
+  let ok = 0;
+  for (let pass = 0; pass < 2; pass += 1) {
+    await chain.pollHeights();
+    const results = await Promise.all(Array.from({ length: 20 }, () => chain.net(() => chain.server.simulateTransaction()).then(() => true, () => false)));
+    ok += results.filter(Boolean).length;
+  }
+  assert.equal(ok, 40, "every read of both passes lands");
+  assert.equal(healthyCalls, 40);
+  assert.equal(chain.rpcInfo().host, "healthy.example");
+  assert.deepEqual(changes, [{ from: "busy.example", to: "healthy.example", reason: "rate-limited" }], "one move, at the third 429 of one call");
+  assert.ok(busyCalls <= 20 * 3, `${busyCalls} calls sent to the busy endpoint`);
+  assert.match(rpcChangeText(changes[0]), /busy\.example keeps refusing requests as too many: switched to healthy\.example/);
+  // Two 429s then an answer is a burst, waited out on the same endpoint, as before.
+  let burst = 0;
+  const bursty = chainWith(
+    fake("bursty.example", {
+      getHealth: async () => {
+        burst += 1;
+        if (burst < 3) throw tooManyWith("0");
+        return { status: "healthy" };
+      },
+    }),
+    fake("other.example", { getHealth: healthy }),
+  );
+  assert.equal((await bursty.net(() => bursty.server.getHealth())).status, "healthy");
+  assert.equal(bursty.rpcInfo().host, "bursty.example");
+});
+
+test("calls that come back to an endpoint start its count of 429 polls again: one 429 poll after the return moves nothing, three do", async () => {
+  let polls = 0;
+  let aHealth = async () => {
+    polls += 1;
+    throw tooManyWith("0");
+  };
+  const a = fake("a.example", { getHealth: () => aHealth(), simulateTransaction: never });
+  const b = fake("b.example", { getHealth: healthAt(100), simulateTransaction: never });
+  const chain = chainWith(a, b);
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(`${change.reason}:${change.to}`);
+  // Two 429 polls on a, then a call that times out twice (the first timeout is retried there): calls move to b.
+  await chain.checkHeights();
+  await chain.checkHeights();
+  assert.equal(polls, 2);
+  assert.equal(chain.rpcInfo().host, "a.example");
+  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
+  assert.equal(chain.rpcInfo().host, "b.example");
+  // b fails too once a's rest is over: the calls come back to a by net()'s own return.
+  a.failedAt = performance.now() - 2 * RETURN_QUIET_MS;
+  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
+  assert.equal(chain.rpcInfo().host, "a.example");
+  assert.deepEqual(changes, ["timeout:b.example", "timeout:a.example"]);
+  // b's rest is over by now; a answers its poll with a 429 once: no move.
+  b.failedAt = performance.now() - 2 * RETURN_QUIET_MS;
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "a.example", "one 429 poll after the return");
+  assert.equal(changes.length, 2);
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "a.example", "two");
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "b.example", "three in a row");
+  assert.equal(changes[2], "rate-limited:b.example");
+  aHealth = healthAt(100);
+});
+
+test("a Retry-After longer than a timeout leaves the endpoint at the first 429; with every other endpoint resting, the call keeps waiting instead", async () => {
+  let busyCalls = 0;
+  const busy = (retryAfter) =>
+    fake("busy.example", {
+      getHealth: async () => {
+        busyCalls += 1;
+        throw tooManyWith(retryAfter);
+      },
+    });
+  const chain = chainWith(busy("30"), fake("other.example", { getHealth: healthy }));
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change.reason);
+  const started = Date.now();
+  assert.equal((await chain.net(() => chain.server.getHealth())).status, "healthy");
+  assert.ok(Date.now() - started < 1000, "no wait of 30 s, nor of the 5 s cap");
+  assert.equal(busyCalls, 1);
+  assert.deepEqual(changes, ["rate-limited"]);
+  assert.equal(chain.rpcInfo().host, "other.example");
+
+  // The other endpoint rests after a failure of its own: the third 429 in a row is then waited out too, and the call ends with the 429 after its attempts.
+  busyCalls = 0;
+  const alone = chainWith(busy("0"), fake("other.example", { getHealth: healthy }));
+  alone.endpoints[1].failedAt = performance.now();
+  const moves = [];
+  alone.onRpcChange = (change) => moves.push(change.reason);
+  await assert.rejects(alone.net(() => alone.server.getHealth()), /status code 429/);
+  assert.equal(busyCalls, 4, "sent there again after every wait");
+  assert.deepEqual(moves, []);
+  assert.equal(alone.rpcInfo().host, "busy.example");
+});
+
+test("three height polls in a row answered 429 by the endpoint in use move the calls; an answered poll resets the count", async () => {
+  let polls = 0;
+  const chain = chainWith(
+    fake("busy.example", {
+      getHealth: async () => {
+        polls += 1;
+        if (polls === 2) return { status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(Math.floor(Date.now() / 1000)) };
+        throw tooManyWith("0");
+      },
+    }),
+    fake("other.example", { getHealth: healthAt(100) }),
+  );
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change.reason);
+  for (let pass = 1; pass <= 4; pass += 1) {
+    await chain.checkHeights();
+    assert.equal(chain.rpcInfo().host, "busy.example", `pass ${pass}: 429, answer, 429, 429`);
+  }
+  assert.deepEqual(changes, []);
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "other.example", "the third 429 in a row");
+  assert.deepEqual(changes, ["rate-limited"]);
+  // The busy endpoint rests: the next poll brings nothing back to it.
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "other.example");
+});
+
+test("at most 6 calls are in flight on one endpoint; calls waiting for a slot follow a move", async () => {
+  assert.equal(MAX_IN_FLIGHT, 6);
+  let inFlight = 0;
+  let peak = 0;
+  const counting = fake("a.example", {
+    getHealth: async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      inFlight -= 1;
+      return { status: "healthy" };
+    },
+  });
+  const chain = chainWith(counting, fake("b.example", { getHealth: healthy }));
+  const results = await Promise.all(Array.from({ length: 20 }, () => chain.net(() => chain.server.getHealth())));
+  assert.ok(results.every((r) => r.status === "healthy"));
+  assert.equal(peak, MAX_IN_FLIGHT, "one board pass sent 31 requests in a second; Gateway.fm allows 30 per second per IP");
+  assert.equal(chain.endpoints[0].inFlight, 0, "every slot is given back");
+
+  // An endpoint that hangs: the first six time out and move the calls; those waiting for a slot go to the new endpoint.
+  const hung = chainWith(fake("hung.example", { getHealth: never }), fake("up.example", { getHealth: healthy }));
+  const changes = [];
+  hung.onRpcChange = (change) => changes.push(change);
+  const started = Date.now();
+  const all = await Promise.all(Array.from({ length: 12 }, () => hung.net(() => hung.server.getHealth(), { timeoutMs: 50 })));
+  assert.ok(all.every((r) => r.status === "healthy"));
+  assert.equal(changes.length, 1);
+  assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`);
+});
+
+test("at most 20 calls reach one endpoint in any one second: 60 issued at once arrive in three waves and all complete", async () => {
+  const PER_SECOND = 20; // RATE_PER_SECOND
+  const arrivals = [];
+  const counting = fake("gw.example", {
+    getHealth: async () => {
+      arrivals.push(Date.now());
+      return { status: "healthy" };
+    },
+  });
+  const chain = chainWith(counting, fake("b.example", { getHealth: healthy }));
+  const started = Date.now();
+  const results = await Promise.all(Array.from({ length: 60 }, () => chain.net(() => chain.server.getHealth())));
+  const ms = Date.now() - started;
+  assert.equal(results.length, 60);
+  assert.ok(results.every((r) => r.status === "healthy"));
+  assert.equal(arrivals.length, 60);
+  for (const t of arrivals) {
+    const within = arrivals.filter((u) => u >= t && u < t + 1000).length;
+    assert.ok(within <= PER_SECOND, `${within} calls within one second from ${t - started} ms`);
+  }
+  assert.ok(ms >= 2000 && ms < 3500, `60 calls took ${ms} ms`);
+  assert.equal(chain.rpcInfo().host, "gw.example", "a wait for a turn is not a failure");
+
+  // The cost on an ordinary board pass, offline: its calls, and the time at 0 ms and at 120 ms per call.
+  const stubServer = (latency) => {
+    let calls = 0;
+    const answer = async (value) => {
+      calls += 1;
+      if (latency) await new Promise((resolve) => setTimeout(resolve, latency));
+      return value;
+    };
+    return {
+      calls: () => calls,
+      simulateTransaction: () => answer({ latestLedger: 1, minResourceFee: "0", result: { auth: [], retval: xdr.ScVal.scvVoid() } }),
+      getLatestLedger: () => answer({ sequence: 1, closeTime: String(Math.floor(Date.now() / 1000)) }),
+    };
+  };
+  for (const latency of [0, 120]) {
+    const server = stubServer(latency);
+    const board = chainWith(fake("a.example", server), fake("b.example", server));
+    const from = Date.now();
+    await board.board(10_000_000n);
+    console.log(`board pass under the rate window: ${server.calls()} calls in ${Date.now() - from} ms at ${latency} ms per call`);
+  }
+});
+
+test("a call started before a round trip away and back, timing out after the return, moves nothing: one move in all", async () => {
+  const chain = chainWith(fake("sdf.example", { getHealth: never, getLatestLedger: never }), fake("gfm.example", { getHealth: healthy, getLatestLedger: never }));
+  const changes = [];
+  chain.onRpcChange = (c) => changes.push(`${c.from}->${c.to}:${c.reason}`);
+  // A long call (a scan of events, bound 300 ms here) and a short one are launched together on the first endpoint.
+  const long = chain.net(() => chain.server.getLatestLedger(), { timeoutMs: 300, attempts: 2 }).then(
+    () => "answered",
+    (e) => e.name,
+  );
+  const short = await chain.net(() => chain.server.getHealth(), { timeoutMs: 40 });
+  assert.equal(short.status, "healthy");
+  assert.equal(chain.rpcInfo().host, "gfm.example");
+  // The calls come back to the first endpoint (a level return of the height poll, or net()'s own return) before the long call ends.
+  chain.moveTo(0);
+  assert.equal(await long, "RpcTimeout");
+  assert.deepEqual(changes, ["sdf.example->gfm.example:timeout"], "the long call's timeout is a failure of the past");
+  assert.equal(chain.rpcInfo().host, "sdf.example");
+  assert.equal(chain.moveCount, 2);
+});
+
+test("a read moves away on the second timeout within 30 s of the endpoint in use, not on the first; a send still moves at once", async () => {
+  // One stall, then a normal answer: the read goes to the same endpoint once more and nothing moves.
+  const stalling = (pattern) => {
+    let n = 0;
+    return () => (pattern[n++ % pattern.length] ? never() : healthy());
+  };
+  const once = chainWith(fake("a.example", { getHealth: stalling([true, false]) }), fake("b.example", { getHealth: healthy }));
+  const changes = [];
+  once.onRpcChange = (change) => changes.push(change.reason);
+  assert.equal((await once.net(() => once.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
+  assert.equal(once.rpcInfo().host, "a.example");
+  assert.deepEqual(changes, []);
+  // A second stall within 30 s, on the next read: the reads move.
+  assert.equal((await once.net(() => once.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
+  assert.equal(once.rpcInfo().host, "b.example");
+  assert.deepEqual(changes, ["timeout"]);
+
+  // Two stalls 40 s apart: each is a first one.
+  const apart = chainWith(fake("a.example", { getHealth: stalling([true, false]) }), fake("b.example", { getHealth: healthy }));
+  apart.endpoints[0].timedOutAt = performance.now() - 40_000;
+  assert.equal((await apart.net(() => apart.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
+  assert.equal(apart.rpcInfo().host, "a.example");
+
+  // A send that times out moves at once, as before (the send calls failover itself).
+  const send = chainWith(fake("a.example", {}), fake("b.example", {}));
+  assert.ok(send.failover(new RpcTimeout(10_000), 0, { since: send.moveCount }));
+  assert.equal(send.rpcInfo().host, "b.example");
+});
+
+test("a scan of events whose bounds came from one endpoint and whose calls moved to another starts again on that one, instead of 'startLedger must be within the ledger range'", async () => {
+  const G = "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN";
+  const raw = (ledger, name, ...topics) => ({
+    ledger,
+    ledgerClosedAt: "2026-10-20T20:00:00Z",
+    txHash: "ab".repeat(32),
+    id: `${ledger}-1`,
+    topic: [xdr.ScVal.scvSymbol(name), ...topics],
+    value: xdr.ScVal.scvVoid(),
+  });
+  const run = async (scan) => {
+    const requests = [];
+    // The first endpoint keeps ledgers 100 to 200 and fails every getEvents on the network; the second keeps 150 to 200.
+    const a = fake("a.example", {
+      getHealth: async () => ({ status: "healthy", oldestLedger: 100, latestLedger: 200 }),
+      getEvents: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    const b = fake("b.example", {
+      getHealth: async () => ({ status: "healthy", oldestLedger: 150, latestLedger: 200 }),
+      getEvents: async (request) => {
+        requests.push(request.startLedger ?? "cursor");
+        if (request.startLedger < 150) throw new Error("startLedger must be within the ledger range: 150 - 200");
+        return { events: [raw(160, "repo_opened", nativeToScVal(5n, { type: "u64" }), nativeToScVal(G, { type: "address" }))], latestLedger: 200, cursor: null };
+      },
+    });
+    const chain = chainWith(a, b);
+    return { result: await scan(chain), requests, host: chain.rpcInfo().host };
+  };
+  const tape = await run((chain) => chain.contractEvents(100));
+  assert.equal(tape.result.events.length, 1);
+  assert.equal(tape.result.events[0].event, "repo_opened");
+  assert.equal(tape.result.nextLedger, 200);
+  assert.deepEqual(tape.requests, [100, 150], "refused once with the first endpoint's bound, then asked with its own");
+  assert.equal(tape.host, "b.example");
+  const openings = await run((chain) => chain.repoOpenings(G, 100));
+  assert.deepEqual([...openings.result.openings.keys()], [5]);
+  assert.deepEqual(openings.requests, [100, 150]);
+});
+
+test("the rate window and the rests run on a monotonic clock: a wall clock stepped back 10 s holds no call and keeps no rest", async () => {
+  // Only Date is mocked here: the timers and the monotonic clock are real.
+  mock.timers.enable({ apis: ["Date"], now: 1_792_500_000_000 });
+  try {
+    const chain = chainWith(fake("a.example", { getHealth: healthy }), fake("b.example", { getHealth: healthy }));
+    await Promise.all(Array.from({ length: 20 }, () => chain.net(() => chain.server.getHealth())));
+    mock.timers.setTime(Date.now() - 10_000); // the clock is corrected 10 s back (a sleep and wake, an NTP step)
+    const from = performance.now();
+    const bound = new Promise((resolve) => setTimeout(resolve, 2_000, "still waiting"));
+    assert.equal(await Promise.race([chain.net(() => chain.server.getHealth()).then(() => "answered"), bound]), "answered");
+    const waited = performance.now() - from;
+    assert.ok(waited < 1_500, `the 21st call was held ${waited} ms after the step`);
+    assert.ok(waited >= 900, `the window itself still held it ${waited} ms`);
+    // A rest too: b failed 70 s ago by the monotonic clock; the wall clock, now an hour back, keeps no rest.
+    chain.endpoints[1].failedAt = performance.now() - 70_000;
+    mock.timers.setTime(Date.now() - 3_600_000);
+    assert.ok(chain.failover(new RpcTimeout(7000), 0, { since: chain.moveCount }));
+    assert.equal(chain.rpcInfo().host, "b.example");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("the calls return to the first endpoint after two of its height polls answered in a row; a poll not answered in time, or a failure, starts the count again", async () => {
+  const at = () => Math.floor(Date.now() / 1000);
+  const level = async () => ({ status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(at() - 2) });
+  const polls = [level, never, level, level]; // answered, not in time, answered, answered
+  let n = 0;
+  const a = fake("first.example", { getHealth: () => polls[Math.min(n++, polls.length - 1)](), getLatestLedger: never });
+  const b = fake("second.example", { getHealth: level });
+  const chain = chainWith(a, b);
+  chain.active = 1;
+  const changes = [];
+  chain.onRpcChange = (c) => changes.push(c.reason);
+  const hosts = [];
+  for (let poll = 0; poll < 4; poll += 1) {
+    await chain.checkHeights(50);
+    hosts.push(chain.rpcInfo().host);
+  }
+  assert.deepEqual(hosts, ["second.example", "second.example", "second.example", "first.example"], "answered, late, answered, answered: back at the fourth");
+  assert.deepEqual(changes, ["level"]);
+  // A failed call moves the calls away and starts the count again: two polls before the next return, once the rest is over.
+  assert.ok(chain.failover(new RpcTimeout(7000), 0, { since: chain.moveCount }));
+  assert.equal(chain.endpoints[0].quickPolls, 0);
+  chain.endpoints[0].failedAt = performance.now() - 2 * RETURN_QUIET_MS;
+  await chain.checkHeights(50);
+  assert.equal(chain.rpcInfo().host, "second.example");
+  await chain.checkHeights(50);
+  assert.equal(chain.rpcInfo().host, "first.example");
+  assert.deepEqual(changes, ["level", "timeout", "level"]);
+});
+
+test("the sends and the cross-checks of writes count in the 20 a second too; the height polls do not", async () => {
+  const maxWithin = (times, ms = 1000) => {
+    const sorted = [...times].sort((x, y) => x - y);
+    let best = 0;
+    let j = 0;
+    for (let i = 0; i < sorted.length; i += 1) {
+      while (sorted[i] - sorted[j] >= ms) j += 1;
+      best = Math.max(best, i - j + 1);
+    }
+    return best;
+  };
+  const arrivals = [];
+  const server = (host) => ({
+    getHealth: async () => {
+      arrivals.push({ host, name: "getHealth", at: performance.now() });
+      return { status: "healthy", latestLedger: 1, latestLedgerCloseTime: "1" };
+    },
+    sendTransaction: async () => {
+      arrivals.push({ host, name: "sendTransaction", at: performance.now() });
+      return { status: "PENDING" };
+    },
+    getTransaction: async () => {
+      arrivals.push({ host, name: "getTransaction", at: performance.now() });
+      return { status: "SUCCESS", ledger: 1, latestLedgerCloseTime: "1" };
+    },
+  });
+  const chain = chainWith(fake("a.example", server("a.example")), fake("b.example", server("b.example")));
+  chain.pollMs = 1;
+  // 30 height polls at once reach each endpoint within the second: they are outside the window.
+  await Promise.all(Array.from({ length: 30 }, () => chain.heights()));
+  const polls = arrivals.filter((x) => x.host === "a.example" && x.name === "getHealth").map((x) => x.at);
+  assert.equal(polls.length, 30);
+  assert.ok(maxWithin(polls) > 20, `${maxWithin(polls)} polls in one second`);
+  // 25 writes submitted at once: the sends, their lookups and the cross-checks on the other endpoint all stay under 20 a second.
+  arrivals.length = 0;
+  const tx = { hash: () => new Uint8Array(32).fill(7), timeBounds: undefined };
+  const outcomes = await Promise.all(Array.from({ length: 25 }, () => chain.submit(tx)));
+  assert.equal(outcomes.length, 25);
+  assert.ok(outcomes.every((o) => o.result?.status === "SUCCESS"));
+  const of = (host, name) => arrivals.filter((x) => x.host === host && x.name === name).map((x) => x.at);
+  const sends = of("a.example", "sendTransaction");
+  const lookups = of("a.example", "getTransaction");
+  const crossChecks = of("b.example", "getTransaction");
+  assert.equal(sends.length, 25);
+  assert.ok(maxWithin(sends) <= 20, `${maxWithin(sends)} sends in one second`);
+  assert.ok(maxWithin([...sends, ...lookups]) <= 20, `${maxWithin([...sends, ...lookups])} POSTs on a.example in one second`);
+  assert.equal(crossChecks.length, 25);
+  assert.ok(maxWithin(crossChecks) <= 20, `${maxWithin(crossChecks)} cross-checks on b.example in one second`);
 });
 
 test("every move between endpoints is told in a sentence", () => {

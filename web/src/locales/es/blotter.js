@@ -15,6 +15,8 @@ export default {
   "VALUE": "VALOR",
   "#{id} {fund} valued, haircut {haircut}": "#{id} {fund} valorado, recorte {haircut}",
   "#{id} {fund} valued at {price} per share, haircut {haircut}": "#{id} {fund} valorado a {price} por participación, recorte {haircut}",
+  "#{id} {fund} valued by the backup feed, haircut {haircut}": "#{id} {fund} valorado por la fuente de respaldo, recorte {haircut}",
+  "#{id} {fund} valued by the backup feed at {price} per share, haircut {haircut}": "#{id} {fund} valorado por la fuente de respaldo a {price} por participación, recorte {haircut}",
   "REPAY": "RECOMP",
   "#{id} {principal} + {interest} interest": "#{id} {principal} + {interest} de intereses",
   "SEIZE": "EJEC",
@@ -166,7 +168,8 @@ export default {
   "Past its term, unpaid": "Vencido e impagado",
   "You are its lender": "Usted es su prestamista",
   "Only its lender {address} takes the shares": "Solo su prestamista {address} puede tomar las participaciones",
-  "The shares go to your address, which the issuer approved; the borrower can still repurchase until this lands.": "Las participaciones van a su dirección, aprobada por el emisor; el prestatario aún puede recomprar hasta que esta transacción se confirme.",
+  "The shares go to your address if the issuer approves you as lender for this fund; if not, the repo still settles and the shares wait in the contract until it approves you again (REL then delivers them). The borrower can still repurchase until this lands.":
+    "Las participaciones van a su dirección si el emisor le aprueba como prestamista para este fondo; si no, el repo se liquida igualmente y las participaciones esperan en el contrato hasta que vuelva a aprobarle (REL las entrega entonces). El prestatario aún puede recomprar hasta que esta transacción se confirme.",
   "TAKE SHARES · repo #{id}": "TOMAR PARTICIPACIONES · repo #{id}",
   "Deliver": "Entregar",
   "To": "Destinatario",

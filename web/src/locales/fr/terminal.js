@@ -42,6 +42,8 @@ export default {
   "Esc": "Échap",
   "{n} open": "{n} en cours",
   "{n} past term": "{n} après échéance",
+  "{n} repo could not be read": "{n} repo n'a pas pu être lu",
+  "{n} repos could not be read": "{n} repos n'ont pas pu être lus",
   "Reading the repos…": "Lecture des repos…",
   "No repo on this instance yet.": "Aucun repo sur cette instance pour l'instant.",
   "No repo for this address.": "Aucun repo pour cette adresse.",

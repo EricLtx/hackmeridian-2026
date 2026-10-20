@@ -124,6 +124,10 @@ jobs:
           cache-dependency-path: |
             demo/package-lock.json
             indexer/package-lock.json
+      # The testnet scripts (setup, run, the monitor's watch and rehearsal)
+      # have no offline test: their syntax at least is checked, every file.
+      - name: Syntax of every demo and indexer script
+        run: for f in demo/*.mjs demo/test/*.mjs demo/test/stub/*.mjs indexer/*.mjs indexer/lib/*.mjs indexer/test/*.mjs; do node --check "$f" || exit 1; done
       - name: Install the demo (exact versions, no install scripts)
         working-directory: demo
         run: npm ci --ignore-scripts

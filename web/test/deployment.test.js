@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { Networks } from "@stellar/stellar-sdk";
 import { checkDeployment, httpsUrl, isDecimals, isTicker, privacyLine, providersText, rpcProviders } from "../src/deployment.js";
 import { setLang } from "../src/i18n.js";
-import { addr, contractLink, explorerOf, exportDecimals, txLink, when } from "../src/journal.js";
+import { EXPORT_WAIT_MS, addr, contractLink, explorerOf, exportDecimals, loadExport, txLink, when } from "../src/journal.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 const copy = () => JSON.parse(JSON.stringify(dep));
@@ -49,6 +49,24 @@ test("symbols, URLs, decimals and contract addresses are checked", () => {
   delete lean.stablecoins;
   delete lean.rpcFallbacks;
   assert.doesNotThrow(() => checkDeployment(lean));
+});
+
+test("a contract address with a wrong checksum is refused, not left to fail every read (WEB-7)", () => {
+  // A one-character typo that keeps the strkey alphabet: the format matches, the checksum does not.
+  const typo = (address) => address.slice(0, -1) + (address.endsWith("A") ? "B" : "A");
+  const refused = (edit) => {
+    const edited = copy();
+    edit(edited);
+    assert.throws(() => checkDeployment(edited), /unexpected contract address/);
+  };
+  refused((d) => (d.contracts.fundShares = typo(d.contracts.fundShares)));
+  refused((d) => (d.contracts.openWindow = typo(d.contracts.openWindow)));
+  refused((d) => (d.funds[1].navFeed = typo(d.funds[1].navFeed)));
+  refused((d) => (d.stablecoins[1].contract = typo(d.stablecoins[1].contract)));
+  // An account address is not a contract address, whatever its checksum.
+  refused((d) => (d.contracts.stablecoin = dep.stablecoin.issuer));
+  // Every address of the published file is a valid contract strkey.
+  assert.doesNotThrow(() => checkDeployment(copy()));
 });
 
 test("the small checks the two pages share", () => {
@@ -105,4 +123,40 @@ test("the History page bounds the decimals it reads and links only to an https e
   assert.equal(when(""), "—");
   assert.equal(addr("<img src=x>"), `<span title="&lt;img src=x&gt;">&lt;img…c=x&gt;</span>`);
   assert.doesNotThrow(() => addr(42));
+});
+
+test("the market page waits 2 s at most for the history export; a late one fills the timelines when it lands", async () => {
+  assert.equal(EXPORT_WAIT_MS, 2000);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const exported = { generatedAt: "2026-10-20T12:00:00.000Z", journal: { lines: 1 }, events: [{ event: "repo_opened", topics: ["1"], data: {} }] };
+  const timed = async (run) => {
+    const started = Date.now();
+    const value = await run();
+    return { value, ms: Date.now() - started };
+  };
+  // On time: what the timelines need.
+  assert.deepEqual(await loadExport(async () => exported, { waitMs: 200 }), { generatedAt: exported.generatedAt, events: exported.events });
+  // Missing, unreachable or malformed: nothing, at once.
+  for (const fetchExport of [async () => null, async () => ({ events: "not a list" }), async () => Promise.reject(new TypeError("Failed to fetch"))]) {
+    const { value, ms } = await timed(() => loadExport(fetchExport, { waitMs: 200 }));
+    assert.equal(value, null);
+    assert.ok(ms < 150, `${ms} ms`);
+  }
+  // A host that never answers: the render goes on at the bound.
+  const hung = await timed(() => loadExport(() => new Promise(() => {}), { waitMs: 200 }));
+  assert.equal(hung.value, null);
+  assert.ok(hung.ms >= 190 && hung.ms < 400, `${hung.ms} ms`);
+  // A late export: nothing at the bound, then handed over when it lands.
+  let late = null;
+  const landed = new Promise((resolve) => {
+    loadExport(() => sleep(300).then(() => exported), {
+      waitMs: 100,
+      onLate: (value) => {
+        late = value;
+        resolve();
+      },
+    }).then((value) => assert.equal(value, null));
+  });
+  await landed;
+  assert.deepEqual(late, { generatedAt: exported.generatedAt, events: exported.events });
 });

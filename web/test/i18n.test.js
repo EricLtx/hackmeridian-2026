@@ -132,6 +132,55 @@ test("a translation carries exactly the HTML tags of its source", () => {
   assert.equal(tagsOf("<kbd>O &lt;offer&gt;</kbd> prepares a loan"), "</kbd> <kbd>");
 });
 
+test("an element whose name the HTML parser accepts beyond letters, digits and dashes is a tag too (WEB-6)", () => {
+  // A parser makes '<x:y style=…>' an element and applies its style; the pages allow inline styles.
+  const source = "Last hash of the chain: <code>{hash}</code>.";
+  for (const name of ["x:y", "x.y", "x_y", "xé"]) {
+    const overlay = `Dernier hachage : <code>{hash}</code>.<${name} style="position:fixed;inset:0;z-index:99;background:#fff">Service migré : ouvrez clone.example</${name}>`;
+    assert.notEqual(tagsOf(overlay), tagsOf(source), name);
+    assert.notEqual(tagsOf(`Dernier hachage : <code>{hash}</code>.<${name}>Service migré</${name}>`), tagsOf(source), `${name}, bare but closed`);
+  }
+  assert.equal(tagsOf("Q <shares> [FUND]"), "", "usage notation is still read as words");
+});
+
+test("a tag a translation leaves unterminated is a tag too: the markup that follows the text would close it", () => {
+  // The footer concatenates the translated sentence with ' <span class="rpc-note">…': an unterminated <b style=…> at its
+  // end became, in Chrome, a <b> with position:fixed wrapping the rest of the footer.
+  const source = "Open Window contract {contract} on Stellar {network}. Every figure is read from the chain.";
+  for (const unterminated of [
+    'Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.<b style="position:fixed;inset:0;z-index:99;background:#fff"',
+    "Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.<b",
+    "Contrat Open Window {contract} sur Stellar {network}.<b style=\"position:fixed\" Chaque chiffre est lu sur la chaîne.",
+    "Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.</b",
+    "Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.<x:y style='position:fixed'",
+  ]) {
+    assert.notEqual(tagsOf(unterminated), tagsOf(source), unterminated);
+    assert.match(tagsOf(unterminated), /<\/?[a-z:]+…/, unterminated);
+  }
+  // Complete tags around it are still read on their own; a `<` that starts no tag name is text.
+  assert.equal(tagsOf("Dernier : <code>{hash}</code>.<b style=\"x\""), "</code> <b… <code>");
+  assert.equal(tagsOf("a < b, 1 <2 and <> or <-"), "");
+  assert.equal(tagsOf("1 < 2"), "");
+  assert.equal(tagsOf("Q <shares> [FUND]"), "");
+  // The parser reads `a<b` as a tag start too, whatever comes before the `<`: it is listed, not read as text.
+  assert.equal(tagsOf("a<b"), "<b…");
+  // A comment or a processing instruction left open swallows the markup that follows; complete, it is markup the source does not have.
+  for (const markup of [
+    "Chaque chiffre est lu sur la chaîne.<!-- ",
+    "Chaque chiffre est lu sur la chaîne.<!--",
+    "Chaque chiffre est lu sur la chaîne.<?php",
+    "Chaque chiffre est lu sur la chaîne.<?",
+    "Chaque chiffre est lu sur la chaîne.<!-- caché -->",
+    "Chaque chiffre est lu sur la chaîne.<?xml version=\"1.0\"?>",
+  ]) {
+    assert.notEqual(tagsOf(markup), tagsOf(source), markup);
+  }
+  assert.equal(tagsOf("x<!-- y"), "<!--…");
+  assert.equal(tagsOf("x<?y"), "<?…");
+  assert.equal(tagsOf("x<!-- y -->"), "<!-- y -->");
+  assert.equal(tagsOf("<!-- a --><!-- b"), "<!-- a --> <!--…");
+});
+
 test("tc picks the entry of its context, then the plain entry, then English", async () => {
   const { tc } = await import("../src/i18n.js");
   assert.equal(tc("wallet", "none"), "none");

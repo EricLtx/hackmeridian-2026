@@ -32,12 +32,16 @@ export const LIMITS = {
   // without a move spans a weekend. A constant-NAV fund publishes the same
   // value by design: set the threshold to Infinity for it (`--nav-frozen-hours=`).
   navFrozenHours: 72,
-  // The keeper pays the rent. Its largest bill is one 30-day slice of the
-  // contract code: about 215 XLM at the testnet rate measured on 20 October
-  // 2026 (7.15 XLM a day for the 1.88 MB the network counts for the rc4
-  // code; rc5's is about 2 % larger). 250 XLM covers one slice, the small
-  // entries' extensions and the fees.
-  keeperMinXlm: 250,
+  // The keeper pays the rent. The testnet rate moves: 7.15 XLM a day in the
+  // morning of 20 October 2026, 8.35 to 8.40 XLM a day in the afternoon, so
+  // about 250 XLM for a 30-day slice of the rc4 code and 257 XLM for rc5's,
+  // about 2 % larger (review finding TOOL-6). Its largest bill is an
+  // upgrade run (`npm run upgrade`): the new code's first 30-day slice and
+  // then the slices to 91 days, about 84 days of rent in all, 706 XLM at
+  // 8.40 XLM a day. 800 XLM covers one such run with the rate up to 9.5 XLM
+  // a day, and so the routine two slices, the small entries' extensions and
+  // the fees.
+  keeperMinXlm: 800,
   rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
   // A re-stamped frozen feed is bounded neither by the corridor nor by the
   // band (residual risk of Tamper.6 and Tamper.7). A variable NAV moves every
@@ -49,8 +53,26 @@ export const LIMITS = {
 export const LEDGER_SECS = 5;
 /** Largest extension of the code entry in one transaction, in days. */
 export const CODE_STEP_DAYS = 30;
+/** The code entry is never extended beyond this many days of life. */
+export const CODE_MAX_DAYS = 120;
 /** What the small entries are extended to, in ledgers: about 140 days. */
 export const ENTRY_EXTEND_LEDGERS = 2_419_200;
+
+/**
+ * The "Restored" outcome of a rehearsal drill whose proposal the drill
+ * itself withdraws when the monitor's action did not take (drills 8, 10,
+ * 13 and 18): the monitor is judged on `cleared`, the state right after
+ * its action and before that cleanup, never after it. A proposal the
+ * governor had to withdraw is its own outcome, not a success of the
+ * monitor. Returns true, false, or the text the summary prints.
+ */
+export function restoredOutcome(cleared, withdrawn) {
+  if (cleared) return true;
+  return withdrawn ? "no: withdrawn by the governor, the drill's own cleanup" : false;
+}
+
+/** The text of a "Restored" outcome in the rehearsal's summary. */
+export const restoredLabel = (outcome) => (outcome === true ? "yes" : outcome === false ? "no" : String(outcome));
 
 /** Privileged changes: every one of them is reported (Elev.2). */
 export const PRIVILEGED = new Set([
@@ -159,6 +181,12 @@ export const DETECTORS = {
       if (ageHours >= warnHours) {
         out.push({ level: "warning", message: `NAV is ${ageHours.toFixed(1)} h old; the contract refuses it at ${Number(f.config.nav_max_age_secs) / 3600} h${tag(s, f)}`, action: "republish" });
       }
+    }
+    // rc5 (VAL-5): an opening valued on a fund's backup feed (`fallback` in
+    // repo_valued) means its primary NAV feed was stale or silent then.
+    for (const e of s.events.filter((ev) => ev.name === "repo_valued" && ev.data?.fallback === true)) {
+      const f = s.funds.find((x) => x.shares === String(e.topics?.[1] ?? ""));
+      out.push({ level: "warning", message: `repo #${e.topics?.[0]} was valued on the backup NAV feed at ledger ${e.ledger}: the primary feed was stale or silent${f ? tag(s, f) : ""}`, action: "check the primary NAV feed and its operator", tx: e.txHash });
     }
     return out.map((a) => ({ detector: "price", threat: "Tamper.1", ...a }));
   },
@@ -274,7 +302,9 @@ export const DETECTORS = {
       const f = s.funds.find((x) => x.shares === String(r.fund)) ?? { label: `fund ${String(r.fund).slice(0, 6)}` };
       const head = `repo #${r.id}: ${units(r.shares, 7, 0)} shares held back`;
       if (reason === "deliverable") {
-        out.push({ threat: "DoS.5", level: "warning", message: `${head} can be delivered now to ${String(r.to).slice(0, 6)}…${tag(s, f)}`, action: "release", repoId: r.id });
+        // `to` goes with the action: the delivery writes that holder's
+        // balance or trustline, which the release call does not name (TOOL-9).
+        out.push({ threat: "DoS.5", level: "warning", message: `${head} can be delivered now to ${String(r.to).slice(0, 6)}…${tag(s, f)}`, action: "release", repoId: r.id, to: String(r.to) });
       } else if (reason === "unapproved") {
         out.push({ threat: "DoS.7", level: "warning", message: `${head}, seized for a lender not approved for the fund: the delivery waits for its approval (rc5)${tag(s, f)}`, action: "the steward approves the lender again, or the lender redirects the release to an approved holder (redirect_release)" });
       } else {
@@ -320,9 +350,19 @@ export const DETECTORS = {
     return out.map((a) => ({ detector: "lenders", threat: "DoS.7", ...a }));
   },
   privileged(s, monitor) {
+    // rc5 (VAL-4): a replacement that makes a fund's backup feed its primary
+    // drops that fallback; the contract itself is then `by`. Not an attack,
+    // but the fund has no backup feed left.
+    const promoted = (e) => e.name === "fallback_removed" && s.contract && String(e.data?.by ?? "") === s.contract;
+    const fundTag = (e) => {
+      const f = s.funds.find((x) => x.shares === String(e.topics?.[0] ?? ""));
+      return f ? tag(s, f) : "";
+    };
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
-      .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
+      .map((e) => (promoted(e)
+        ? { level: "warning", message: `fallback_removed at ledger ${e.ledger} by the contract itself: a replacement made the fund's backup feed its primary, and the fund has no backup feed now${fundTag(e)}`, action: "propose another backup feed (propose_fallback) if the fund needs one", tx: e.txHash }
+        : { level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
     // A lost-steward recovery takes the fund from its issuer in 30 days: the issuer must know at once.
     for (const e of s.events.filter((ev) => ev.name === "steward_recovery_proposed")) {
       out.push({ level: "critical", message: `steward recovery proposed at ledger ${e.ledger}`, action: "tell the issuer; its steward key cancels it if the key is not lost", tx: e.txHash });
@@ -355,10 +395,17 @@ export const DETECTORS = {
     }
     for (const e of s.events.filter((ev) => PROPOSALS.test(ev.name))) {
       // rc4: a stablecoin registration announced beforehand (`--announce-stablecoin=<address>`) is a warning; unannounced, it is cancelled.
+      // Only while it is pending (TOOL-7): an event re-read after its
+      // cancellation, such as drill 18's after a rehearsal, is history.
       if (e.name === "stablecoin_change_proposed") {
         const token = String(e.topics?.[0] ?? "");
         const known = (monitor.announcedStablecoins ?? []).includes(token);
-        out.push({ level: known ? "warning" : "critical", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"}${known ? " (announced)" : " (NOT announced)"}`, action: known ? "verify before it applies" : "cancel stablecoin", token, tx: e.txHash });
+        const gone = s.pendingStablecoins?.[token] === null;
+        if (known || gone) {
+          out.push({ level: "warning", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"}${known ? " (announced)" : ""}${gone ? ", no longer pending (withdrawn or applied)" : ""}`, action: gone ? "verify" : "verify before it applies", token, tx: e.txHash });
+        } else {
+          out.push({ level: "critical", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"} (NOT announced)`, action: "cancel stablecoin", token, tx: e.txHash });
+        }
         continue;
       }
       const isUpgrade = e.name === "upgrade_proposed";
@@ -396,6 +443,13 @@ export const DETECTORS = {
     if (p.forcedGuardian && !(monitor.announcedGuardians ?? []).includes(p.forcedGuardian.guardian) && !reported("guardian_change_forced")) {
       out.push({ level: "critical", message: `forced guardian change to ${p.forcedGuardian.guardian.slice(0, 8)}… pending (NOT announced), applies at ${at(p.forcedGuardian.eta)} UTC`, action: "veto_forced" });
     }
+    // Stablecoin proposals are kept per token: the tokens their events named,
+    // in this window or an earlier one, are read on every pass (TOOL-7).
+    const proposedHere = new Set(s.events.filter((e) => e.name === "stablecoin_change_proposed").map((e) => String(e.topics?.[0] ?? "")));
+    for (const [token, pending] of Object.entries(s.pendingStablecoins ?? {})) {
+      if (!pending || proposedHere.has(token) || (monitor.announcedStablecoins ?? []).includes(token)) continue;
+      out.push({ level: "critical", message: `stablecoin registration of ${token.slice(0, 8)}… as ${pending.currency ?? "?"} pending (NOT announced), applicable from ${at(pending.eta)} UTC`, action: "cancel stablecoin", token });
+    }
     return out.map((a) => ({ detector: "proposals", threat: "Elev.2", ...a }));
   },
   pause(s) {
@@ -415,7 +469,10 @@ export const DETECTORS = {
         threat: "DoS.2",
         level: t.days === null ? "critical" : "warning",
         message: t.days === null ? `${t.label} is archived or missing` : `${t.label} has ${t.days.toFixed(1)} days to live`,
-        action: "extend",
+        // An archived code entry cannot be extended, and every call's
+        // simulation then asks to restore it, which the tooling refuses: it
+        // is restored on purpose, under its own cap (TOOL-4).
+        action: t.days === null && t.kind === "code" ? "restore it: npm run upgrade -- --restore-code (the keeper cannot extend an archived entry)" : "extend",
         key: t.key,
         kind: t.kind,
         days: t.days,
@@ -527,7 +584,7 @@ export const DETECTORS = {
     if (s.keeperXlm === null) return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} account not readable`, action: "check the account" }];
     const min = monitor.keeperMinXlmOverride ?? limits.keeperMinXlm;
     if (s.keeperXlm >= min) return [];
-    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM: one 30-day extension of the contract code costs about 215 XLM on testnet (rate measured on 20 October 2026)`, action: "top up the keeper from treasury" }];
+    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM, the rent of one upgrade run (about 84 days of the contract code, 706 XLM on testnet at 8.40 XLM a day on 20 October 2026) or of two 30-day extensions (about 250 XLM each), and the rate moves`, action: "top up the keeper from treasury" }];
   },
   events(s) {
     // Every repo opened inside the event window must have its repo_opened event (Repud.1).
@@ -696,9 +753,10 @@ export function recordAnnouncement(monitor, args, { isAddress = () => true } = {
  * of an unannounced upgrade or stablecoin and the pause first, as the
  * sentinel needs no other key; then the vetoes; then the keeper's
  * extensions, reference refresh and releases. `s.pending` holds the
- * proposals the snapshot read; `ctx.actor` is the key that pauses and
- * cancels, `ctx.keys` the keys this host holds, `ctx.limits` the thresholds.
- * Returns `{ actions, alerts }`: `alerts` stand where a key is missing.
+ * proposals the snapshot read, `s.pendingStablecoins` the stablecoin ones
+ * by token; `ctx.actor` is the key that pauses and cancels, `ctx.keys` the
+ * keys this host holds, `ctx.limits` the thresholds. Returns
+ * `{ actions, alerts }`: `alerts` stand where a key is missing.
  */
 export function decideActions(alerts, s, monitor = {}, { actor = "guardian", keys = {}, limits = LIMITS } = {}) {
   const actions = [];
@@ -708,9 +766,10 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
   if (asked((a) => a.action === "cancel") && pending.upgrade && !(monitor.announced ?? []).includes(pending.upgrade.hash)) {
     actions.push({ kind: "cancel_upgrade", role: actor, hash: pending.upgrade.hash });
   }
-  // rc4: a stablecoin proposed without an announcement is withdrawn the same way.
+  // rc4: a stablecoin proposed without an announcement is withdrawn the same
+  // way, only while the state shows it pending (TOOL-7), like the upgrade.
   for (const token of new Set(alerts.filter((x) => x.action === "cancel stablecoin" && x.token).map((x) => x.token))) {
-    actions.push({ kind: "cancel_stablecoin", role: actor, token });
+    if (s.pendingStablecoins?.[token] && !(monitor.announcedStablecoins ?? []).includes(token)) actions.push({ kind: "cancel_stablecoin", role: actor, token });
   }
   const pauses = alerts.filter((a) => a.level === "critical" && a.action === "pause");
   if (!s.paused && pauses.length) actions.push({ kind: "pause", role: actor, grounds: pauses.map((a) => a.ground).filter(Boolean) });
@@ -728,18 +787,20 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
   const small = extend.filter((a) => a.kind !== "code").map((a) => a.key);
   if (small.length) actions.push({ kind: "extend", keys: small, ledgers: ENTRY_EXTEND_LEDGERS, belowDays: limits.ttlDays });
   // The code entry is large: extend it by 30 days at most per transaction, so
-  // its rent stays well under the largest fee a transaction may carry.
+  // its rent stays well under the largest fee a transaction may carry. The
+  // life it has now (`days`) sizes a shorter slice when the rent has risen.
   for (const a of extend.filter((x) => x.kind === "code")) {
-    actions.push({ kind: "extend_code", key: a.key, targetDays: Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120), belowDays: limits.codeTtlDays });
+    actions.push({ kind: "extend_code", key: a.key, days: a.days, targetDays: Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, CODE_MAX_DAYS), belowDays: limits.codeTtlDays });
   }
   // rc5: an old price reference is stepped along the model by the keeper.
   for (const a of alerts.filter((x) => x.action === "refresh_reference" && x.fund)) {
     actions.push({ kind: "refresh_reference", fund: a.fund });
   }
   // A deferred delivery the simulated release says would go through: the
-  // keeper sends it (anyone may). A waiting one is never retried blindly.
+  // keeper sends it (anyone may), to the holder named on record. A waiting
+  // one is never retried blindly.
   for (const a of alerts.filter((x) => x.action === "release" && x.repoId !== undefined)) {
-    actions.push({ kind: "release", repoId: a.repoId });
+    actions.push({ kind: "release", repoId: a.repoId, to: a.to });
   }
   return { actions, alerts: raised };
 }

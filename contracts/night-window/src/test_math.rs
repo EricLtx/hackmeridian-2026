@@ -247,6 +247,97 @@ proptest! {
         }
     }
 
+    /// The cross price without the full product (review finding VAL-3)
+    /// changes no result: wherever `nav * 10^d` fits in i128, it is the
+    /// direct formula's, at every precision up to 18 decimals, and a price
+    /// that rounds down to nothing is still refused.
+    #[test]
+    fn divided_by_is_the_direct_formula_where_it_fits(
+        nav in 1i128..=100_000_000_000_000_000_000,
+        rate in 1i128..=1_000_000_000_000_000_000_000,
+        scales in (0u32..=20, 0u32..=21),
+        nav_decimals in 0u32..=18,
+        fx_decimals in 0u32..=18,
+    ) {
+        let nav = (nav / 10i128.pow(scales.0)).max(1);
+        let rate = (rate / 10i128.pow(scales.1)).max(1);
+        let direct = nav * 10i128.pow(fx_decimals) / rate;
+        let price = Price::new(nav, nav_decimals)
+            .unwrap()
+            .divided_by(Price::new(rate, fx_decimals).unwrap());
+        if direct > 0 {
+            prop_assert_eq!(price, Price::new(direct, nav_decimals));
+        } else {
+            prop_assert_eq!(price, Err(Error::InvalidPrice));
+        }
+    }
+
+    /// Beyond the direct formula's reach, the cross price is still the exact
+    /// floor of `nav * 10^d / rate`. The only overflow left is a result that
+    /// does not fit in i128: since the second round of review finding VAL-3
+    /// a rate whose mantissa times `10^d` does not fit no longer counts.
+    #[test]
+    fn divided_by_is_exact_beyond_the_direct_formula(
+        nav in 1i128..=i128::MAX,
+        rate in 1i128..=i128::MAX,
+        scales in (0u32..=38, 0u32..=38),
+        nav_decimals in 0u32..=18,
+        fx_decimals in 0u32..=18,
+    ) {
+        let nav = (nav / 10i128.pow(scales.0)).max(1);
+        let rate = (rate / 10i128.pow(scales.1)).max(1);
+        let unit = 10i128.pow(fx_decimals);
+        let product = Wide::of(nav).times(unit);
+        let price = Price::new(nav, nav_decimals)
+            .unwrap()
+            .divided_by(Price::new(rate, fx_decimals).unwrap());
+        match price {
+            Ok(price) => {
+                prop_assert_eq!(price.decimals(), nav_decimals);
+                let floor = Wide::of(price.mantissa()).times(rate);
+                prop_assert!(floor <= product);
+                prop_assert!(product < floor.plus(rate));
+            }
+            Err(Error::InvalidPrice) => prop_assert!(product < Wide::of(rate)),
+            Err(error) => {
+                prop_assert_eq!(error, Error::ArithmeticOverflow);
+                let result_too_large = product >= Wide::of(i128::MAX).times(rate).plus(rate);
+                prop_assert!(result_too_large);
+            }
+        }
+    }
+
+    /// The wide floor is the exact floor of `a * b / c` whenever that
+    /// quotient fits in i128, however large the product (review finding
+    /// VAL-3, second round): the only overflow is a quotient that does not
+    /// fit, and the result is the direct formula's wherever that one fits.
+    #[test]
+    fn mul_div_floor_wide_is_the_exact_floor_wherever_the_quotient_fits(
+        a in 1i128..=i128::MAX,
+        b in 1i128..=i128::MAX,
+        c in 1i128..=i128::MAX,
+        scales in (0u32..=38, 0u32..=38, 0u32..=38),
+    ) {
+        let a = (a / 10i128.pow(scales.0)).max(1);
+        let b = (b / 10i128.pow(scales.1)).max(1);
+        let c = (c / 10i128.pow(scales.2)).max(1);
+        let product = Wide::of(a).times(b);
+        match math::mul_div_floor_wide(a, b, c) {
+            Ok(quotient) => {
+                let floor = Wide::of(quotient).times(c);
+                prop_assert!(floor <= product);
+                prop_assert!(product < floor.plus(c));
+                if let Some(direct) = a.checked_mul(b) {
+                    prop_assert_eq!(quotient, direct / c);
+                }
+            }
+            Err(error) => {
+                prop_assert_eq!(error, Error::ArithmeticOverflow);
+                prop_assert!(product >= Wide::of(i128::MAX).times(c).plus(c));
+            }
+        }
+    }
+
     /// The bounds round inward (review finding arith-4): a value passes the
     /// band exactly when it lies within it in exact arithmetic, whatever the
     /// precision, so nothing beyond the configured band passes and the
@@ -366,6 +457,7 @@ proptest! {
         check(math::pow10(small))?;
         check(math::mul_div_floor(a, b, c))?;
         check(math::mul_div_ceil(a, b, c))?;
+        check(math::mul_div_floor_wide(a, b, c))?;
         check(math::rescale_floor(a, small, other))?;
         check(math::interest(a, small, time))?;
         check(math::model_path(a, time, later, small, window))?;
@@ -385,6 +477,22 @@ proptest! {
     }
 }
 
+/// Review finding VAL-3 (20 October 2026): a 1,000 USD share priced in EUR
+/// through feeds of 18 decimals each. The direct formula's product,
+/// 10^21 * 10^18, does not fit in i128; the split one gives the exact floor,
+/// and so does it at the old edge of 170 USD.
+#[test]
+fn an_eighteen_decimal_cross_price_needs_no_full_product() {
+    let e18 = 10i128.pow(18);
+    let rate = Price::new(112 * e18 / 100, 18).unwrap();
+    assert!((170 * e18).checked_mul(e18).is_some());
+    assert!((171 * e18).checked_mul(e18).is_none());
+    for nav in [170 * e18, 171 * e18, 1_000 * e18] {
+        let price = Price::new(nav, 18).unwrap().divided_by(rate).unwrap();
+        assert_eq!((price.mantissa(), price.decimals()), (nav * 100 / 112, 18));
+    }
+}
+
 /// The edges random sampling rarely draws: every combination of extreme
 /// values, through the same checks.
 #[test]
@@ -401,6 +509,7 @@ fn edge_values_give_typed_errors_not_panics() {
             for &c in &wide {
                 assert!(ok(math::mul_div_floor(a, b, c)));
                 assert!(ok(math::mul_div_ceil(a, b, c)));
+                assert!(ok(math::mul_div_floor_wide(a, b, c)));
             }
             for &n in &narrow {
                 assert!(ok(math::within_band(a, b, n).map(i128::from)));
@@ -418,6 +527,28 @@ fn edge_values_give_typed_errors_not_panics() {
             }
         }
     }
+    // The wide floor takes non-negative operands and a positive divisor on
+    // both of its paths: a negative triple whose product fits the direct
+    // one is refused, not truncated towards zero, and so is a zero divisor.
+    let overflow = Err(Error::ArithmeticOverflow);
+    for (a, b, c) in [
+        (-1, -1, -1),
+        (-1, 1, 1),
+        (1, -1, 1),
+        (1, 1, -1),
+        (-7, 3, 2),
+        (7, -3, 2),
+        (7, 3, -2),
+        (i128::MIN + 1, 1, 1),
+        (1, 1, 0),
+        (i128::MAX, 2, 0),
+        (-1, i128::MAX, i128::MAX),
+    ] {
+        assert!(a.checked_mul(b).is_some() || c == 0, "{a} {b} {c}");
+        assert_eq!(math::mul_div_floor_wide(a, b, c), overflow, "{a} {b} {c}");
+    }
+    assert_eq!(math::mul_div_floor_wide(7, 3, 2), Ok(10));
+    assert_eq!(math::mul_div_floor_wide(0, i128::MAX, 1), Ok(0));
     for &t in &times {
         assert!(ok(math::ceil_to_hour(t).map(i128::from)));
     }

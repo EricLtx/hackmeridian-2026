@@ -1351,6 +1351,13 @@ input[aria-invalid="true"] {
   background: var(--danger-soft);
 }
 
+/* Applied according to one endpoint, which no second endpoint could confirm. */
+.tx-unverified {
+  background: var(--warn-soft);
+  color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
 .tx .icon {
   display: inline-grid;
   place-items: center;
@@ -1370,6 +1377,12 @@ input[aria-invalid="true"] {
 
 .tx-error .icon {
   background: var(--danger);
+}
+
+.tx-unverified .icon {
+  background: var(--warn);
+  /* The soft tone on the strong one reads in the light, dark and terminal themes alike. */
+  color: var(--warn-soft);
 }
 
 code.err {
