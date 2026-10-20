@@ -79,6 +79,7 @@ This repository is public. The market study, the business proposal and third-par
 - Never add files from `private/` or `references/` to git, and never copy their content (figures, partner or product names, business case, pitch) into tracked files. Tracked documentation describes the product and the code, not the business plan.
 - When the functional specification is written, it is the reference for the lifecycle; keep it in `private/` until the maintainer decides otherwise, and keep tracked files limited to what the code needs (interface, invariants, security decisions).
 - Do not add event, application or team-administration content.
+- `LICENSE` and `NOTICE` name the copyright holder, Jean-Eric Le Texier, at the owner's request: keep that name there and add no other personal data anywhere.
 
 ## Network requests made by agents
 
