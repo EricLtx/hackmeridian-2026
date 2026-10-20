@@ -20,19 +20,30 @@ import path from "node:path";
 export const ANNOUNCEMENTS = ["announced", "announcedStablecoins", "announcedAdmins", "announcedGuardians"];
 
 /**
+ * The one rule on an instance name (`OPEN_WINDOW_STATE`): letters, digits,
+ * `_` and `-` only. The name goes into file names under demo/.state/ (the
+ * state file, the monitor file, a disposable deployment file): nothing
+ * else may reach outside that folder or carry a separator. Returns the
+ * name; throws before any file is read or written. lib.mjs applies it to
+ * the variable at import, so every script (setup, the demo, the monitor,
+ * the upgrade) refuses a bad name before it does anything.
+ */
+export function checkStateName(stateName) {
+  if (typeof stateName !== "string" || !/^[A-Za-z0-9_-]+$/.test(stateName)) {
+    throw new Error(`OPEN_WINDOW_STATE must be made of letters, digits, _ and - only, not ${JSON.stringify(stateName)}`);
+  }
+  return stateName;
+}
+
+/**
  * The name of the state file of the instance `stateName` (`OPEN_WINDOW_STATE`,
  * `testnet` by default), in demo/.state/: `monitor.json` for the demo
  * instance, `monitor-<name>.json` for a disposable one, so that a rehearsal
  * or an offline run never writes into the demo instance's file. Every writer
- * (the watch, `npm run upgrade`) names it this way. The name goes into a
- * path: only letters, digits, `_` and `-` are accepted, so no name reaches
- * outside demo/.state/ or carries a separator.
+ * (the watch, `npm run upgrade`) names it this way, under `checkStateName`.
  */
 export function monitorFileName(stateName) {
-  if (typeof stateName !== "string" || !/^[A-Za-z0-9_-]+$/.test(stateName)) {
-    throw new Error(`OPEN_WINDOW_STATE must be made of letters, digits, _ and - only, not ${JSON.stringify(stateName)}`);
-  }
-  return stateName === "testnet" ? "monitor.json" : `monitor-${stateName}.json`;
+  return checkStateName(stateName) === "testnet" ? "monitor.json" : `monitor-${stateName}.json`;
 }
 
 /** The file's content, or null when it is missing or unreadable. */

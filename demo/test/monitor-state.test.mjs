@@ -11,7 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { LIMITS, decideActions, detect, recordAnnouncement } from "../detectors.mjs";
-import { acknowledgeUpgrade, announceUpgrade, loadMonitor, mergeMonitor, monitorFileName, readMonitorFile, refreshMonitor, saveMonitor } from "../monitor-state.mjs";
+import { acknowledgeUpgrade, announceUpgrade, checkStateName, loadMonitor, mergeMonitor, monitorFileName, readMonitorFile, refreshMonitor, saveMonitor } from "../monitor-state.mjs";
 
 const OW = "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL";
 const RC4 = "f5f13ae69499efdd23ae350d45f4bfe4bb25026bfcb6b44b264a2d3d2effbcea";
@@ -95,5 +95,9 @@ test("the monitor file of an instance is named from OPEN_WINDOW_STATE, which car
   assert.equal(monitorFileName("offline-stub"), "monitor-offline-stub.json");
   for (const bad of ["../testnet", "a/b", "a\\b", "", "name with space", "dot.json", ".", "..", undefined, null, 42]) {
     assert.throws(() => monitorFileName(bad), /OPEN_WINDOW_STATE must be made of letters, digits, _ and - only/, JSON.stringify(bad));
+    assert.throws(() => checkStateName(bad), /OPEN_WINDOW_STATE must be made of letters, digits, _ and - only/, JSON.stringify(bad));
   }
+  // The one validator every file name derives from: it returns the name it accepts.
+  assert.equal(checkStateName("testnet"), "testnet");
+  assert.equal(checkStateName("rehearsal-2026_10-20"), "rehearsal-2026_10-20");
 });

@@ -31,12 +31,19 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { LIMITS } from "./detectors.mjs";
+import { checkStateName } from "./monitor-state.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(here, "..");
 export const STATE_DIR = path.join(here, ".state");
-/** Name of the state file: `testnet` for the demo instance; `OPEN_WINDOW_STATE=<name>` points the tooling at a disposable instance (rehearsals), whose deployment facts stay out of `web/public/`. */
-export const STATE_NAME = process.env.OPEN_WINDOW_STATE ?? "testnet";
+/**
+ * Name of the state file: `testnet` for the demo instance;
+ * `OPEN_WINDOW_STATE=<name>` points the tooling at a disposable instance
+ * (rehearsals), whose deployment facts stay out of `web/public/`. Letters,
+ * digits, `_` and `-` only (`checkStateName`): the name goes into file
+ * names, and a bad one is refused here, at import, before any file is read.
+ */
+export const STATE_NAME = checkStateName(process.env.OPEN_WINDOW_STATE ?? "testnet");
 export const STATE_FILE = path.join(STATE_DIR, `${STATE_NAME}.json`);
 export const WASM_DIR = path.join(ROOT, "target", "wasm32v1-none", "release");
 
