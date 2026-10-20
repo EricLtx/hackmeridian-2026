@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NEAR_TOP_DAYS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive } from "../inventory-rules.mjs";
+import { NEAR_TOP_DAYS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues } from "../inventory-rules.mjs";
 
 const DAY = 86_400;
 /** Fund 1 (tMMF): 10 bps floor, 5 % yield cap, 26 h NAV age bound; its reference and its NAV on 20 October 2026. */
@@ -49,6 +49,14 @@ test("a NAV outside the corridor, or within three days of its top, is a finding;
   assert.ok(Math.abs(fresh.daysAtMaxYield - (25 / 24 + (fresh.headroomBps * 365) / 500)) < 1e-9);
   // A flat NAV with no yield allowed never reaches its top.
   assert.equal(corridorHeadroom({ ...FUND1, maxYieldBps: 0, navPrice: FUND1.referenceNav }).daysAtMaxYield, Infinity);
+});
+
+test("a fallback that reads the fund's own NAV feed and asset is a finding (VAL-4 in the contract)", () => {
+  const cfg = { oracle: "CNAV", oracle_asset: ["Stellar", "CSHARES"] };
+  assert.match(fallbackIssues(cfg, { oracle: "CNAV", asset: ["Stellar", "CSHARES"] })[0], /^rc5: the fallback feed is the fund's own NAV feed: no second source/);
+  assert.deepEqual(fallbackIssues(cfg, { oracle: "CBACKUP", asset: ["Stellar", "CSHARES"] }), []);
+  assert.deepEqual(fallbackIssues(cfg, { oracle: "CNAV", asset: ["Other", "USD"] }), []);
+  assert.deepEqual(fallbackIssues(cfg, null), []);
 });
 
 test("the code's time to live is checked against the 90 days the monitor keeps (TOOL-8)", () => {

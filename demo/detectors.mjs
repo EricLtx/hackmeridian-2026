@@ -325,9 +325,19 @@ export const DETECTORS = {
     return out.map((a) => ({ detector: "lenders", threat: "DoS.7", ...a }));
   },
   privileged(s, monitor) {
+    // rc5 (VAL-4): a replacement that makes a fund's backup feed its primary
+    // drops that fallback; the contract itself is then `by`. Not an attack,
+    // but the fund has no backup feed left.
+    const promoted = (e) => e.name === "fallback_removed" && s.contract && String(e.data?.by ?? "") === s.contract;
+    const fundTag = (e) => {
+      const f = s.funds.find((x) => x.shares === String(e.topics?.[0] ?? ""));
+      return f ? tag(s, f) : "";
+    };
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
-      .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
+      .map((e) => (promoted(e)
+        ? { level: "warning", message: `fallback_removed at ledger ${e.ledger} by the contract itself: a replacement made the fund's backup feed its primary, and the fund has no backup feed now${fundTag(e)}`, action: "propose another backup feed (propose_fallback) if the fund needs one", tx: e.txHash }
+        : { level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
     // A lost-steward recovery takes the fund from its issuer in 30 days: the issuer must know at once.
     for (const e of s.events.filter((ev) => ev.name === "steward_recovery_proposed")) {
       out.push({ level: "critical", message: `steward recovery proposed at ledger ${e.ledger}`, action: "tell the issuer; its steward key cancels it if the key is not lost", tx: e.txHash });

@@ -337,6 +337,20 @@ test("privileged: a code change and a steward without backup are reported", () =
   assert.deepEqual(out.map((a) => a.level).sort(), ["critical", "warning"]);
 });
 
+test("privileged: a fallback the contract dropped because a replacement made it the primary is said so, not taken for an attack (VAL-4 in the contract)", () => {
+  const events = [
+    { name: "fallback_removed", ledger: 7, txHash: "t1", topics: ["CF2"], data: { by: "COW" } },
+    { name: "fallback_removed", ledger: 8, txHash: "t2", topics: ["CF2"], data: { by: "GGOVERNOR" } },
+  ];
+  const out = run("privileged", snap({ contract: "COW", events, funds: [fund("fund 1", "CF1"), fund("fund 2", "CF2")] }));
+  assert.deepEqual(out.map((a) => a.level), ["warning", "warning"]);
+  assert.match(out[0].message, /^fallback_removed at ledger 7 by the contract itself: a replacement made the fund's backup feed its primary, and the fund has no backup feed now \[fund 2\]$/);
+  assert.match(out[0].action, /propose_fallback/);
+  // Removed by a role: a privileged change to verify, as before.
+  assert.deepEqual([out[1].message, out[1].action], ["privileged change fallback_removed at ledger 8", "verify"]);
+  assert.deepEqual(decideActions(out, snap(), {}, { actor: "sentinel" }).actions, []);
+});
+
 test("pause: a pause event and a paused instance are reported", () => {
   const out = run("pause", snap({ paused: true, events: [{ name: "pause_changed", ledger: 3, data: { paused: true } }] }));
   assert.equal(out.length, 2);

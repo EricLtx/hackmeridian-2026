@@ -80,6 +80,21 @@ export function corridorIssues(h) {
   return [];
 }
 
+/** Whether two feed assets are the same: `["Stellar", address]` or `["Other", symbol]`, as the contract's types decode. */
+const sameAsset = (a, b) => Array.isArray(a) && Array.isArray(b) && String(a[0]) === String(b[0]) && String(a[1]) === String(b[1]);
+
+/**
+ * The inventory's finding on a fund whose active fallback reads the very
+ * feed and asset of its primary (oracle-5, review finding VAL-4): one source
+ * twice, and a silent feed silences both. Since rc5 a replacement that
+ * promotes the fallback drops it, and a fallback proposal naming the
+ * primary is refused; a fund left so before still needs the change.
+ */
+export function fallbackIssues(cfg, fallback) {
+  if (!fallback || String(fallback.oracle) !== String(cfg.oracle) || !sameAsset(fallback.asset, cfg.oracle_asset)) return [];
+  return ["rc5: the fallback feed is the fund's own NAV feed: no second source, a silent feed silences both; remove_fallback, then propose another feed"];
+}
+
 /** Days a code entry has to live: `liveUntil` ledger seen at ledger `latest`. */
 export const daysToLive = (liveUntil, latest) => ((Number(liveUntil) - Number(latest)) * LEDGER_SECS) / 86_400;
 

@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { asset, codeKey, fmt, ledgerEntries, ledgerTime, loadState, read, storageKey, STATE_DIR, sv } from "./lib.mjs";
-import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive } from "./inventory-rules.mjs";
+import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues } from "./inventory-rules.mjs";
 
 const JSON_OUT = process.argv.includes("--json");
 const state = loadState();
@@ -154,6 +154,7 @@ async function main() {
     for (const coin of stablecoins.filter((c) => c.currency === String(cfg.currency) && offPrecision(c))) {
       issues.push(`rc5: the ${coin.currency} stablecoin ${short(coin.token)} has ${coin.liveDecimals ?? coin.decimals} decimals, not ${RC5.stablecoinDecimals}: this fund's caps add raw units across the coins of its currency, and rc5 registers only ${RC5.stablecoinDecimals}-decimal coins`);
     }
+    issues.push(...fallbackIssues(cfg, fallback));
     if (!backup) issues.push("no steward backup registered: a lost steward key could not be recovered (D4)");
     if (soleLender && approved === false) issues.push("the sole lender is not approved on this fund: no offer can list it");
     if (navAge !== null && navAge > Number(cfg.nav_max_age_secs)) issues.push(`NAV is ${hours(navAge)} old, beyond the ${hours(cfg.nav_max_age_secs)} bound: entries on this fund are refused until a fresh publication`);

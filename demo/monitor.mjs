@@ -495,7 +495,7 @@ async function snapshot(monitor) {
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
   const trail = await readTrail(journal);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, pendingStablecoins, second, primaryUrl: activeRpcUrl(), trail };
+  return { contract: C.openWindow, now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, pendingStablecoins, second, primaryUrl: activeRpcUrl(), trail };
 }
 
 /**
