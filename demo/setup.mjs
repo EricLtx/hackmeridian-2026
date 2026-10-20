@@ -547,7 +547,7 @@ async function secondFund(state, ow, shares, teur) {
   console.log(`  NAV feed (EUR)   ${state.contracts.navOracle2}`);
   const shares2 = state.contracts.shares2;
 
-  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4)", async () => {
+  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4, applied by the governor from rc5)", async () => {
     const token = sv.address(state.contracts.euro2);
     await invoke(state, "governor", ow, "set_stablecoin", [token, sv.symbol("EUR")]);
     // From rc4 a registration after the first admission is a proposal (S29).
@@ -556,8 +556,11 @@ async function secondFund(state, ow, shares, teur) {
       const wait = Math.max(0, Number(pending.eta) - (await ledgerTime()));
       console.log(`  proposed; applying it after the time delay (${Math.ceil(wait / 60)} min)`);
       while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
-      await invoke(state, "operator2", ow, "apply_stablecoin_change", [token]);
-      console.log("  applied by a third party after the delay");
+      // Since rc5 only the current governor applies it (auth-3): a proposal
+      // left by a governor since replaced can no longer be applied by anyone.
+      // On rc4 code anyone may, the governor included.
+      await invoke(state, "governor", ow, "apply_stablecoin_change", [token]);
+      console.log("  applied by the governor after the delay");
     }
     console.log("  two stablecoins now share the EUR cap");
   });
