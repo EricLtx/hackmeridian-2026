@@ -2185,6 +2185,104 @@ fn promoting_the_fallback_to_primary_removes_it() {
         .propose_fallback(&f.shares, &fallback_feed(&f, &f.nav_oracle));
 }
 
+/// Review finding VAL-4, second round (20 October 2026): only a replacement
+/// that promotes the fallback itself, its oracle and its asset, removes it.
+/// A replacement keeping the primary, one moving to a third feed, and one
+/// on the fallback's oracle but another asset all keep the active fallback
+/// and publish no `FallbackRemoved`; nobody but an applied two-key
+/// replacement reaches the removal. A drop on the oracle alone passed every
+/// earlier test.
+#[test]
+fn only_a_replacement_promoting_the_fallback_removes_it() {
+    let removed = |f: &Fixture| {
+        own_events(f).events().contains(
+            &FallbackRemoved {
+                fund: f.shares.clone(),
+                by: f.contract_id.clone(),
+            }
+            .to_xdr(&f.env, &f.contract_id),
+        )
+    };
+    // The same primary, a higher haircut.
+    let (f, _, feed) = ready_with_fallback();
+    let active = f.client.get_fallback(&f.shares).unwrap();
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            haircut_bps: 300,
+            ..fund_config(&f)
+        },
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!removed(&f));
+    assert_eq!(f.client.get_fallback(&f.shares), Some(active));
+
+    // A third feed.
+    let (f, _, feed) = ready_with_fallback();
+    let active = f.client.get_fallback(&f.shares).unwrap();
+    let (third, third_feed) = feed_with_decimals(&f, eur(&f.env), NAV_DECIMALS);
+    publish_on(&f, &third_feed, NAV_EUR);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: third.clone(),
+            ..fund_config(&f)
+        },
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_on(&f, &third_feed, NAV_EUR);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!removed(&f));
+    assert_eq!(f.client.get_fallback(&f.shares), Some(active));
+    assert_eq!(f.client.get_fund(&f.shares).unwrap().oracle, third);
+
+    // The fallback's oracle, another asset.
+    let (f, _, feed) = ready_with_fallback();
+    let active = f.client.get_fallback(&f.shares).unwrap();
+    let other = Asset::Other(Symbol::new(&f.env, "SHAREB"));
+    let now = f.env.ledger().timestamp();
+    feed.set_price(&other, &NAV_EUR_8, &now);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: active.oracle.clone(),
+            oracle_asset: other.clone(),
+            ..fund_config(&f)
+        },
+    );
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let now = f.env.ledger().timestamp();
+    feed.set_price(&other, &NAV_EUR_8, &now);
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fund_change(&f.shares);
+    assert!(!removed(&f));
+    assert_eq!(f.client.get_fallback(&f.shares), Some(active));
+
+    // An intruder reaches neither path.
+    let (f, _, _) = ready_with_fallback();
+    let intruder = Address::generate(&f.env);
+    f.env.mock_auths(&[MockAuth {
+        address: &intruder,
+        invoke: &MockAuthInvoke {
+            contract: &f.contract_id,
+            fn_name: "set_fund",
+            args: (f.shares.clone(), fund_config(&f)).into_val(&f.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(f.client.try_set_fund(&f.shares, &fund_config(&f)).is_err());
+    f.env.mock_all_auths();
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::NotProposed))
+    );
+    assert!(f.client.get_fallback(&f.shares).is_some());
+}
+
 #[test]
 fn removing_a_fund_removes_its_fallback() {
     let (f, _, _) = ready_with_fallback();
@@ -5249,6 +5347,51 @@ fn reanchor_of_a_cross_fund_checks_the_expected_rate() {
             decimals: NAV_DECIMALS
         })
     );
+}
+
+/// Review finding VAL-1, second round (20 October 2026), the FX leg: the
+/// rate read at the apply only has to lie in the band around the signed
+/// rate; the FX reference installed, and published, is the signed rate,
+/// never the apply's. The rate moves 1.5 % between the proposal and the
+/// apply, inside the 2 % band; 2.5 % is refused. No earlier test moved the
+/// rate between the two, and an apply installing its own rate passed them.
+#[test]
+fn the_fx_reference_of_a_reanchor_is_the_signed_rate_not_the_rate_at_the_apply() {
+    let (f, fx_oracle) = cross_fund();
+    let config = f.client.get_fund(&f.shares).unwrap();
+    let nav_feed = MockOracleClient::new(&f.env, &config.oracle);
+    let fx_feed = MockOracleClient::new(&f.env, &fx_oracle);
+    let publish = |rate: i128| {
+        let now = f.env.ledger().timestamp();
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &now);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &now);
+    };
+    let signed = EUR_USD * 10_150 / 10_000;
+    publish(signed);
+    f.client.propose_reanchor(&f.shares, &NAV_USD, &signed);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish(signed * 10_250 / 10_000);
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    let at_apply = signed * 10_150 / 10_000;
+    publish(at_apply);
+    f.client.apply_reanchor(&f.shares);
+    let now = T0 + DEFAULT_TIMELOCK_SECS;
+    assert_eq!(
+        own_events(&f),
+        std::vec![Reanchored {
+            fund: f.shares.clone(),
+            nav: NAV_USD,
+            nav_time: now,
+            fx: signed
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!(state.reference_fx, signed);
+    assert_ne!(state.reference_fx, at_apply);
 }
 
 /// Re-anchor round, item 2: a re-anchor is bound to the feeds it read. A
