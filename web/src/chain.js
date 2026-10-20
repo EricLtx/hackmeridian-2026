@@ -181,7 +181,8 @@ export const MAX_IN_FLIGHT = 6;
  * in one second to Gateway.fm on 20 October, which allows 30 POST per
  * second per IP, shared with every client behind the same NAT, and sends
  * no Retry-After. Under this budget the page causes no 429 of its own and
- * leaves room for the others on the same IP.
+ * leaves room for the others on the same IP. The reads, the sends and the
+ * cross-checks of a write count; the height polls, two per pass, do not.
  */
 export const RATE_PER_SECOND = 20;
 const RATE_WINDOW_MS = 1000;
@@ -254,18 +255,25 @@ function slotOn(endpoint) {
  * RATE_PER_SECOND: the sends of the last second are kept, and a call past
  * the budget waits for the oldest of them to leave the window. Turns are
  * given in the order asked; `clock` gives the time in milliseconds.
+ * Resolves a function the caller runs right before its call: the send is
+ * then stamped at its own time, not at the turn's, so that the window
+ * holds on the wire whatever ran between the two (a later stamp only
+ * lengthens the waits after it).
  */
 function turnOn(endpoint, clock = monotonic) {
   const turn = (endpoint.turns ?? Promise.resolve()).then(async () => {
     endpoint.sentAt ??= [];
     for (;;) {
       const now = clock();
-      while (endpoint.sentAt.length && now - endpoint.sentAt[0] >= RATE_WINDOW_MS) endpoint.sentAt.shift();
+      while (endpoint.sentAt.length && now - endpoint.sentAt[0].at >= RATE_WINDOW_MS) endpoint.sentAt.shift();
       if (endpoint.sentAt.length < RATE_PER_SECOND) {
-        endpoint.sentAt.push(now);
-        return;
+        const stamp = { at: now };
+        endpoint.sentAt.push(stamp);
+        return () => {
+          stamp.at = Math.max(stamp.at, clock());
+        };
       }
-      await sleep(endpoint.sentAt[0] + RATE_WINDOW_MS - now + 1);
+      await sleep(endpoint.sentAt[0].at + RATE_WINDOW_MS - now + 1);
     }
   });
   endpoint.turns = turn;
@@ -938,7 +946,7 @@ export class Chain {
       const index = this.active;
       const endpoint = this.endpoints[index];
       const release = await slotOn(endpoint);
-      if (index === this.active) await turnOn(endpoint, this.clock);
+      const sending = index === this.active ? await turnOn(endpoint, this.clock) : null;
       if (index !== this.active) {
         // Calls moved while this one waited: it follows them, and that counts as its move, so that it
         // backs off rather than bouncing back when the new endpoint fails it too.
@@ -950,6 +958,7 @@ export class Chain {
       const since = this.moveCount;
       let error;
       try {
+        sending();
         const result = await withTimeout(call(), timeoutMs);
         endpoint.lastMs = this.clock() - started;
         endpoint.failures = 0;
@@ -1358,6 +1367,7 @@ export class Chain {
   /** `getTransaction` on one given endpoint, within RPC_TIMEOUT_MS; null when it does not answer. */
   async transactionOn(endpoint, hash) {
     try {
+      (await turnOn(endpoint, this.clock))();
       return await withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS);
     } catch {
       return null;
@@ -1454,7 +1464,8 @@ export class Chain {
       const via = this.active;
       const since = this.moveCount;
       try {
-        sent = await withTimeout(this.server.sendTransaction(tx), SEND_TIMEOUT_MS);
+        (await turnOn(this.endpoints[via], this.clock))();
+        sent = await withTimeout(this.endpoints[via].server.sendTransaction(tx), SEND_TIMEOUT_MS);
       } catch (error) {
         // Lost or late response: the transaction may be queued. The lookup settles it, and the next
         // send goes to the other endpoint; the same signed transaction cannot apply twice.

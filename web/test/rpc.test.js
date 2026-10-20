@@ -897,6 +897,56 @@ test("the calls return to the first endpoint after two of its height polls answe
   assert.deepEqual(changes, ["level", "timeout", "level"]);
 });
 
+test("the sends and the cross-checks of writes count in the 20 a second too; the height polls do not", async () => {
+  const maxWithin = (times, ms = 1000) => {
+    const sorted = [...times].sort((x, y) => x - y);
+    let best = 0;
+    let j = 0;
+    for (let i = 0; i < sorted.length; i += 1) {
+      while (sorted[i] - sorted[j] >= ms) j += 1;
+      best = Math.max(best, i - j + 1);
+    }
+    return best;
+  };
+  const arrivals = [];
+  const server = (host) => ({
+    getHealth: async () => {
+      arrivals.push({ host, name: "getHealth", at: performance.now() });
+      return { status: "healthy", latestLedger: 1, latestLedgerCloseTime: "1" };
+    },
+    sendTransaction: async () => {
+      arrivals.push({ host, name: "sendTransaction", at: performance.now() });
+      return { status: "PENDING" };
+    },
+    getTransaction: async () => {
+      arrivals.push({ host, name: "getTransaction", at: performance.now() });
+      return { status: "SUCCESS", ledger: 1, latestLedgerCloseTime: "1" };
+    },
+  });
+  const chain = chainWith(fake("a.example", server("a.example")), fake("b.example", server("b.example")));
+  chain.pollMs = 1;
+  // 30 height polls at once reach each endpoint within the second: they are outside the window.
+  await Promise.all(Array.from({ length: 30 }, () => chain.heights()));
+  const polls = arrivals.filter((x) => x.host === "a.example" && x.name === "getHealth").map((x) => x.at);
+  assert.equal(polls.length, 30);
+  assert.ok(maxWithin(polls) > 20, `${maxWithin(polls)} polls in one second`);
+  // 25 writes submitted at once: the sends, their lookups and the cross-checks on the other endpoint all stay under 20 a second.
+  arrivals.length = 0;
+  const tx = { hash: () => new Uint8Array(32).fill(7), timeBounds: undefined };
+  const outcomes = await Promise.all(Array.from({ length: 25 }, () => chain.submit(tx)));
+  assert.equal(outcomes.length, 25);
+  assert.ok(outcomes.every((o) => o.result?.status === "SUCCESS"));
+  const of = (host, name) => arrivals.filter((x) => x.host === host && x.name === name).map((x) => x.at);
+  const sends = of("a.example", "sendTransaction");
+  const lookups = of("a.example", "getTransaction");
+  const crossChecks = of("b.example", "getTransaction");
+  assert.equal(sends.length, 25);
+  assert.ok(maxWithin(sends) <= 20, `${maxWithin(sends)} sends in one second`);
+  assert.ok(maxWithin([...sends, ...lookups]) <= 20, `${maxWithin([...sends, ...lookups])} POSTs on a.example in one second`);
+  assert.equal(crossChecks.length, 25);
+  assert.ok(maxWithin(crossChecks) <= 20, `${maxWithin(crossChecks)} cross-checks on b.example in one second`);
+});
+
 test("every move between endpoints is told in a sentence", () => {
   assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "timeout" }), "RPC a.example did not answer in time: switched to b.example.");
   assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "error" }), "RPC a.example failed: switched to b.example.");
