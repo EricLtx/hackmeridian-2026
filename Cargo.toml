@@ -5,7 +5,7 @@ members = [
 ]
 
 [workspace.dependencies]
-soroban-sdk = "28"
+soroban-sdk = "29"
 
 # Security baseline shared by every contract crate (`[lints] workspace = true`).
 # Rationale: docs/security.md, section "Toolchain".
