@@ -105,5 +105,69 @@ test("a transaction the active endpoint does not know, but the second one does, 
     await new Promise((resolve) => setImmediate(resolve));
     t.mock.timers.tick(1_000);
   }
-  assert.match(verdict ?? "", /expired before landing; nothing changed on chain, rerun the step$/);
+  assert.match(verdict ?? "", /expired before landing; nothing changed on chain, rerun the step \(https:\/\/two\.stub\.invalid does not know it either\)$/);
+});
+
+/** Runs `call` under the test's mocked time, a second a tick, and returns its verdict: "landed" or the error's message. */
+async function verdictOf(t, call) {
+  let verdict;
+  call().then(() => { verdict = "landed"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 300 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  return verdict ?? "";
+}
+
+const FAILED = new xdr.TransactionResult({ feeCharged: xdr.Int64.fromString("100"), result: xdr.TransactionResultResult.txFailed([]), ext: xdr.TransactionResultExt.v0() });
+
+test("'nothing changed on chain' is never said when the second endpoint could not answer: the operator checks the explorer (TOOL-1)", async (t) => {
+  // The hostile active endpoint forwarded the transaction and reports
+  // NOT_FOUND; the second endpoint is unreachable at that moment. A rerun
+  // on the active endpoint's word alone would land the step twice.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  one.getTransaction = async () => ({ status: "NOT_FOUND" });
+  two.getTransaction = async () => {
+    throw new Error("fetch failed");
+  };
+  const verdict = await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", []));
+  assert.doesNotMatch(verdict, /nothing changed on chain/);
+  assert.match(verdict, /expired on this machine's clock, and https:\/\/one\.stub\.invalid does not know transaction [0-9a-f]{64}, but https:\/\/two\.stub\.invalid could not answer: not confirmed by a second endpoint; check it in the explorer before rerunning the step https:\/\/stellar\.expert/);
+});
+
+test("a FAILED reported by the active endpoint is read against the second one: disagreement stops, agreement confirms, silence sends to the explorer (TOOL-1)", async (t) => {
+  // A failed transaction consumes its sequence number: an endpoint that
+  // lies FAILED could serve the next sequence for the rerun and land both.
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  one.getTransaction = async () => ({ status: "FAILED", resultXdr: FAILED });
+  two.getTransaction = async () => ({ status: "SUCCESS" });
+  const disagree = await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", []));
+  assert.doesNotMatch(disagree, /transaction failed/);
+  assert.match(disagree, /https:\/\/one\.stub\.invalid reports transaction [0-9a-f]{64} FAILED \(txFailed\), https:\/\/two\.stub\.invalid says SUCCESS: the endpoints disagree; check it in the explorer before rerunning the step/);
+  two.getTransaction = async () => ({ status: "FAILED", resultXdr: FAILED });
+  assert.match(await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", [])), /transaction failed \(txFailed\), confirmed by https:\/\/two\.stub\.invalid https:\/\/stellar\.expert/);
+  two.getTransaction = async () => {
+    throw new Error("fetch failed");
+  };
+  assert.match(await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", [])), /transaction failed \(txFailed\) according to https:\/\/one\.stub\.invalid; https:\/\/two\.stub\.invalid could not answer; check it in the explorer/);
+  two.getTransaction = async () => ({ status: "NOT_FOUND" });
+  assert.match(await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", [])), /according to https:\/\/one\.stub\.invalid; https:\/\/two\.stub\.invalid does not know it; check it in the explorer/);
+  assert.equal(sent.length, 4, "every verdict came after one submission, never a resend");
+});
+
+test("a submission the active endpoint refuses with ERROR is read against the second one too (TOOL-1)", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  const badSeq = new xdr.TransactionResult({ feeCharged: xdr.Int64.fromString("100"), result: xdr.TransactionResultResult.txBadSeq(), ext: xdr.TransactionResultExt.v0() });
+  one.sendTransaction = async (tx) => {
+    sent.push(tx);
+    return { status: "ERROR", errorResult: badSeq };
+  };
+  one.getTransaction = async () => ({ status: "NOT_FOUND" });
+  two.getTransaction = async () => ({ status: "SUCCESS" });
+  const disagree = await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", []));
+  assert.match(disagree, /https:\/\/one\.stub\.invalid refused the submission \(txBadSeq\), https:\/\/two\.stub\.invalid says the transaction [0-9a-f]{64} is SUCCESS: the endpoints disagree; check it in the explorer/);
+  two.getTransaction = async () => ({ status: "NOT_FOUND" });
+  assert.match(await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", [])), /submission refused \(txBadSeq\) by https:\/\/one\.stub\.invalid; https:\/\/two\.stub\.invalid does not know the transaction either$/);
+  assert.equal(sent.length, 2);
 });

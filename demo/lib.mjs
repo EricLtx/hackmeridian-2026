@@ -312,6 +312,62 @@ async function lookup(hash, client = server) {
 export const EXPIRY_MARGIN_SECS = 30;
 
 /**
+ * What a second endpoint, when one is configured, knows of transaction
+ * `hash`: `{ url, answer }`, `answer` null when it could not answer; null
+ * with a single endpoint. Asked of that endpoint directly, never through the
+ * failover client, so the active endpoint never vouches for itself.
+ */
+async function secondOpinion(hash) {
+  const index = secondEndpoint();
+  if (index === null) return null;
+  return { url: RPC_URLS[index], answer: await lookup(hash, servers[index]) };
+}
+
+/** The verdict when the active endpoint reports transaction `hash` FAILED. */
+async function failedVerdict(known, hash, label) {
+  const code = resultCode(known.resultXdr);
+  const second = await secondOpinion(hash);
+  const check = `check it in the explorer before rerunning the step ${explorer(hash)}`;
+  if (!second) return new Error(`${label}: transaction failed (${code}) according to ${activeRpcUrl()}, the only endpoint configured; ${check}`);
+  if (second.answer?.status === "SUCCESS") return new Error(`${label}: ${activeRpcUrl()} reports transaction ${hash} FAILED (${code}), ${second.url} says SUCCESS: the endpoints disagree; ${check}`);
+  if (second.answer?.status === "FAILED") return new Error(`${label}: transaction failed (${code}), confirmed by ${second.url} ${explorer(hash)}`);
+  const why = second.answer ? `does not know it` : `could not answer`;
+  return new Error(`${label}: transaction failed (${code}) according to ${activeRpcUrl()}; ${second.url} ${why}; ${check}`);
+}
+
+/** The verdict when the active endpoint refuses the submission with status ERROR. */
+async function refusedVerdict(sent, hash, label) {
+  const code = resultCode(sent.errorResult);
+  const second = await secondOpinion(hash);
+  if (!second) return new Error(`${label}: submission refused (${code})`);
+  const check = `check it in the explorer before rerunning the step ${explorer(hash)}`;
+  if (second.answer?.status === "SUCCESS" || second.answer?.status === "FAILED") {
+    return new Error(`${label}: ${activeRpcUrl()} refused the submission (${code}), ${second.url} says the transaction ${hash} is ${second.answer.status}: the endpoints disagree; ${check}`);
+  }
+  if (second.answer) return new Error(`${label}: submission refused (${code}) by ${activeRpcUrl()}; ${second.url} does not know the transaction either`);
+  return new Error(`${label}: submission refused (${code}) by ${activeRpcUrl()}; ${second.url} could not answer; ${check}`);
+}
+
+/**
+ * The verdict when the window has closed on this machine's clock and the
+ * active endpoint does not know the transaction. "Nothing changed" is said
+ * on the word of two endpoints: the second one must have answered NOT_FOUND
+ * itself. When it could not answer, the operator checks the explorer before
+ * rerunning. With a single endpoint configured, its word is taken.
+ */
+async function expiredVerdict(hash, label) {
+  const second = await secondOpinion(hash);
+  const nothing = `${label}: expired before landing; nothing changed on chain, rerun the step`;
+  if (!second) return new Error(nothing);
+  const status = second.answer?.status;
+  if (status === "SUCCESS" || status === "FAILED") {
+    return new Error(`${label}: ${activeRpcUrl()} does not know transaction ${hash}, ${second.url} says ${status}: the endpoints disagree; check it in the explorer before rerunning the step ${explorer(hash)}`);
+  }
+  if (status === "NOT_FOUND") return new Error(`${nothing} (${second.url} does not know it either)`);
+  return new Error(`${label}: expired on this machine's clock, and ${activeRpcUrl()} does not know transaction ${hash}, but ${second.url} could not answer: not confirmed by a second endpoint; check it in the explorer before rerunning the step ${explorer(hash)}`);
+}
+
+/**
  * Submits a signed transaction and returns once it has landed. Throws only
  * with a definitive answer: the transaction failed, or its validity window
  * closed without it landing. A lost response, a resend refused because the
@@ -321,9 +377,12 @@ export const EXPIRY_MARGIN_SECS = 30;
  * The window is judged on this machine's clock, never on a close time the
  * endpoint reports (review finding TOOL-1, 20 October 2026): an endpoint
  * that holds the signed transaction back and claims a later ledger would
- * otherwise have the step called expired, rerun, and then land both. Before
- * saying that nothing changed, a second endpoint, when one is configured,
- * must not know the transaction either.
+ * otherwise have the step called expired, rerun, and then land both. No
+ * verdict rests on the active endpoint alone when a second one is
+ * configured: "nothing changed" needs the second endpoint's own NOT_FOUND,
+ * and a FAILED or an ERROR it reports is read against the second endpoint,
+ * since a failed transaction consumes its sequence number and a rerun on a
+ * lie would land both.
  */
 async function submit(tx, label, started = Date.now()) {
   const hash = Buffer.from(tx.hash()).toString("hex");
@@ -343,8 +402,8 @@ async function submit(tx, label, started = Date.now()) {
     if (sent?.status === "PENDING" || sent?.status === "DUPLICATE") break;
     const known = await lookup(hash);
     if (known?.status === "SUCCESS") return done(known);
-    if (known?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(known.resultXdr)}) ${explorer(hash)}`);
-    if (sent?.status === "ERROR") throw new Error(`${label}: submission refused (${resultCode(sent.errorResult)})`);
+    if (known?.status === "FAILED") throw await failedVerdict(known, hash, label);
+    if (sent?.status === "ERROR") throw await refusedVerdict(sent, hash, label);
     if (expired()) break; // settled in step 2
     process.stderr.write(`  (network: ${label} ${sent?.status ?? "no answer"}, resending in ${delay / 1000} s)\n`);
     await sleep(delay);
@@ -355,19 +414,12 @@ async function submit(tx, label, started = Date.now()) {
   for (;;) {
     const result = await lookup(hash);
     if (result?.status === "SUCCESS") return done(result);
-    if (result?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(result.resultXdr)}) ${explorer(hash)}`);
+    if (result?.status === "FAILED") throw await failedVerdict(result, hash, label);
     if (expired()) {
       const last = await lookup(hash);
       if (last?.status === "SUCCESS") return done(last);
-      if (last?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(last.resultXdr)}) ${explorer(hash)}`);
-      if (last) {
-        const index = secondEndpoint();
-        const other = index === null ? null : await lookup(hash, servers[index]);
-        if (other?.status === "SUCCESS" || other?.status === "FAILED") {
-          throw new Error(`${label}: ${activeRpcUrl()} does not know transaction ${hash}, ${RPC_URLS[index]} says ${other.status}: the endpoints disagree; check it in the explorer before rerunning the step ${explorer(hash)}`);
-        }
-        throw new Error(`${label}: expired before landing; nothing changed on chain, rerun the step`);
-      }
+      if (last?.status === "FAILED") throw await failedVerdict(last, hash, label);
+      if (last) throw await expiredVerdict(hash, label);
     }
     await sleep(1000);
   }
@@ -651,6 +703,26 @@ const signedForSimulation = (count, expiry) =>
   `the transaction was not signed or sent, but ${count} authorization ${count === 1 ? "entry" : "entries"} signed for its simulation reached the RPC, valid until ledger ${expiry}`;
 
 /**
+ * The refusal of the simulation made with the signed entries. Once entries
+ * went out signed, the endpoint's own text is never the tool's verdict: a
+ * hostile endpoint writes what it likes there, "nothing signed" included
+ * (review finding TOOL-1, 20 October 2026). The verdict names the endpoint
+ * and ends with the tail that says what went out; the endpoint's words go to
+ * stderr, marked as its own, and stay in the error's `detail`. A contract
+ * error keeps its name and code, so a caller still tells a refusal apart.
+ */
+function refusedAfterSigning(error, label, tail) {
+  const said = String((error instanceof ContractError ? error.detail : error.message) ?? "").split("\n")[0].slice(0, 200);
+  process.stderr.write(`  (${activeRpcUrl()} answered the simulation made with the signed entries: ${said})\n`);
+  const why = error instanceof ContractError
+    ? `the contract refused it with ${error.name} (#${error.code})`
+    : `${activeRpcUrl()} refused it, in its own words (printed above, kept in the error's detail)`;
+  error.detail = error.detail ?? said;
+  error.message = `${label}: the simulation made with the signed entries was refused, ${why}; ${tail} (rpc-1)`;
+  return error;
+}
+
+/**
  * Refuses an authorization entry that is not for the operation's own call,
  * or an address-credential entry for an address the operation does not
  * expect. A signature over another call could be replayed in a transaction
@@ -895,7 +967,7 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
     tail = signedForSimulation(signed.filter(isAddressCredential).length, expiry);
     tx = await build(source.publicKey(), Operation.invokeHostFunction({ func, auth: signed }));
     sim = await net(() => server.simulateTransaction(tx), "simulate");
-    if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+    if (rpc.Api.isSimulationError(sim)) throw refusedAfterSigning(simulationError(sim), label, tail);
   }
 
   checkSimulatedFee(sim, maxResourceFee, label, tail);

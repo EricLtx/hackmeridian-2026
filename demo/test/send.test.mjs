@@ -47,11 +47,14 @@ let sent;
 beforeEach(() => {
   simulations = 0;
   sent = [];
-  answer = { auth: [], readOnly: [instanceKey(OW)], readWrite: [], fee: 1n * XLM };
+  // `error(n)` is the text the n-th simulation fails with, or null: the endpoint writes it.
+  answer = { auth: [], readOnly: [instanceKey(OW)], readWrite: [], fee: 1n * XLM, error: () => null };
   server.getAccount = async (publicKey) => new Account(publicKey, "100");
   server.getLatestLedger = async () => ({ sequence: 1_000, closeTime: "1800000000" });
   server.simulateTransaction = async (tx) => {
     simulations += 1;
+    const error = answer.error(simulations);
+    if (error) return rpc.parseRawSimulation({ id: String(simulations), latestLedger: 1_000, error, events: [] });
     // The fee may depend on the transaction: an extension's rent on the days it adds.
     const fee = typeof answer.fee === "function" ? answer.fee(tx) : answer.fee;
     const data = new SorobanDataBuilder().setReadOnly(answer.readOnly).setReadWrite(answer.readWrite).setResourceFee(fee).build();
@@ -380,4 +383,36 @@ test("naming a sentinel carries the sentinel's own signature with the guardian's
   const withoutKey = { keys: { guardian: guardian.secret() }, contracts: { openWindow: OW } };
   await assert.rejects(lib.invoke(withoutKey, "guardian", OW, "set_sentinel", args), new RegExp(`no local key can authorize ${sentinel.publicKey()}`));
   assert.equal(sent.length, 1);
+});
+
+test("once the co-signers' entries went out, the endpoint's own text of a failed simulation is never the verdict, which says what went out (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  // The hostile endpoint takes the steward's signed entry, then fails the
+  // second simulation with a text of its choosing, which claims nothing was signed.
+  answer.error = (n) => (n === 2 ? "the call was refused; nothing signed (rpc-1)" : null);
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error);
+  assert.equal(simulations, 2, "the signed entry reached the endpoint in the second simulation");
+  assert.equal(sent.length, 0);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /^governor co_signed_test: the simulation made with the signed entries was refused, https:\/\/rpc\.stub\.invalid refused it, in its own words/);
+  assert.match(error.message, /1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.equal(error.detail, "the call was refused; nothing signed (rpc-1)", "the endpoint's words are kept apart, in the detail");
+});
+
+test("a contract error in the simulation made with the signed entries keeps its name and code, and the verdict still says what went out (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  answer.error = (n) => (n === 2 ? "HostError: Error(Contract, #3); nothing signed (rpc-1)" : null);
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error instanceof lib.ContractError, "a caller still tells a contract refusal apart");
+  assert.deepEqual([error.name, error.code], ["unknown:Error", 3]);
+  assert.match(error.message, /the simulation made with the signed entries was refused, the contract refused it with unknown:Error \(#3\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.equal(sent.length, 0);
+  // Before any signature, a failed simulation is the plain refusal it always was (the offline state registers no contract: "unknown").
+  answer.error = () => "HostError: Error(Contract, #8)";
+  const first = await lib.invoke(state, "governor", OW, "pause", pauseArgs()).then(() => null, (e) => e);
+  assert.deepEqual([first.name, first.message, simulations], ["unknown:Error", "unknown:Error (#8)", 3]);
 });
