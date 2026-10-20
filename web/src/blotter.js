@@ -3,7 +3,7 @@
 // DOM and no network; the arithmetic is the contract's (terms.js mirrors
 // math.rs), so a ticket shows what the contract will take.
 
-import { formatAmount, formatDateTime, formatRate, formatUnits, shortAddress } from "./format.js";
+import { UNSHOWABLE, formatAmount, formatDateTime, formatRate, formatUnits, shortAddress } from "./format.js";
 import { t, tk } from "./i18n.js";
 import { HOUR, WEEKEND_SECS, chargedHours, defaultPrincipal, interest, maxTermFor, nextInterestStep, seizeState } from "./terms.js";
 
@@ -578,22 +578,30 @@ export function bandItems({ network = "", paused = null, version = null, schema 
   );
   if (version !== null) items.push({ label: t("CODE"), value: `v${version}${schema !== null ? `·s${schema}` : ""}`, tone: "id", title: t("Contract version and stored layout version") });
   for (const f of funds) {
-    const bound = f.navMaxAge === null ? "?" : compactDuration(f.navMaxAge);
-    const navTitle =
-      f.navAge === null ? t("{name}: NAV unread, bound {bound}", { name: f.name, bound }) : t("{name}: NAV {age} old, bound {bound}", { name: f.name, age: compactDuration(f.navAge), bound });
-    items.push({
-      label: f.symbol,
-      value: f.nav === null ? "—" : `${formatUnits(f.nav, f.navDecimals, { digits: 4 })} ${f.navCurrency}${f.navAge === null ? "" : ` ${compactDuration(f.navAge)}`}`,
-      tone: f.frozen ? "warn" : f.navTone,
-      title: f.frozen ? t("{text}; frozen by its issuer", { text: navTitle }) : navTitle,
-    });
-    if (f.fx !== null) {
-      items.push({
-        label: t("FX {symbol}", { symbol: f.symbol }),
-        value: `${formatUnits(f.fx, f.fxDecimals, { digits: 4 })}${f.fxAge === null ? "" : ` ${compactDuration(f.fxAge)}`}`,
-        tone: f.fxTone,
-        title: t("Exchange rate of the {symbol} leg, bound {bound}", { symbol: f.symbol, bound: f.fxMaxAge === null ? "?" : compactDuration(f.fxMaxAge) }),
-      });
+    // Each fund's items are made on their own: a value that cannot be formatted marks that fund only.
+    try {
+      const bound = f.navMaxAge === null ? "?" : compactDuration(f.navMaxAge);
+      const navTitle =
+        f.navAge === null ? t("{name}: NAV unread, bound {bound}", { name: f.name, bound }) : t("{name}: NAV {age} old, bound {bound}", { name: f.name, age: compactDuration(f.navAge), bound });
+      const fund = [
+        {
+          label: f.symbol,
+          value: f.nav === null ? "—" : `${formatUnits(f.nav, f.navDecimals, { digits: 4 })} ${f.navCurrency}${f.navAge === null ? "" : ` ${compactDuration(f.navAge)}`}`,
+          tone: f.frozen ? "warn" : f.navTone,
+          title: f.frozen ? t("{text}; frozen by its issuer", { text: navTitle }) : navTitle,
+        },
+      ];
+      if (f.fx !== null) {
+        fund.push({
+          label: t("FX {symbol}", { symbol: f.symbol }),
+          value: `${formatUnits(f.fx, f.fxDecimals, { digits: 4 })}${f.fxAge === null ? "" : ` ${compactDuration(f.fxAge)}`}`,
+          tone: f.fxTone,
+          title: t("Exchange rate of the {symbol} leg, bound {bound}", { symbol: f.symbol, bound: f.fxMaxAge === null ? "?" : compactDuration(f.fxMaxAge) }),
+        });
+      }
+      items.push(...fund);
+    } catch {
+      items.push({ label: String(f.symbol ?? "?"), value: "—", tone: "bad", title: t(UNSHOWABLE) });
     }
   }
   if (openInterest) {

@@ -7,6 +7,7 @@ import "@fontsource-variable/inter";
 import { Chain } from "./chain.js";
 import { describeError } from "./errors.js";
 import {
+  UNSHOWABLE,
   formatAge,
   formatAmount,
   formatCountdown,
@@ -248,8 +249,14 @@ function renderGuide() {
      </div>`,
   );
   if (b) {
-    const rows = guideTerms({ dep: S.dep, board: b, maxTermSecs: ctx.maxTermSecs, delaySecs: ctx.delaySecs, version: S.version, paused: b.paused.value });
-    setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(t(label))}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(t(note))}</span>` : ""}</dd></div>`).join(""));
+    let rows = null;
+    try {
+      rows = guideTerms({ dep: S.dep, board: b, maxTermSecs: ctx.maxTermSecs, delaySecs: ctx.delaySecs, version: S.version, paused: b.paused.value });
+    } catch (error) {
+      // A value the page cannot show leaves the terms as last drawn; the board goes on.
+      console.warn("guide terms", error);
+    }
+    if (rows) setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(t(label))}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(t(note))}</span>` : ""}</dd></div>`).join(""));
     $("guide-meta").textContent = S.dep.network === "testnet" ? t("terms read from the chain on testnet") : t("terms read from the chain");
   }
 }
@@ -282,61 +289,65 @@ function renderBoard() {
   const navCurrency = S.dep.fund.navCurrency;
   const tooOld = `${esc(t("Too old to lend against."))} `;
   const since = (timestamp) => `<span data-since="${esc(String(timestamp))}"></span>`;
-  if (b.nav.value && state) {
+  // Each tile is drawn on its own: a value the page cannot show blanks its tile, never the board.
+  const draw = (label, build) => {
+    try {
+      tiles.push(build());
+    } catch (error) {
+      console.warn("board tile", error);
+      tiles.push(tile(label, "—", `<span class="text-error">${esc(t(UNSHOWABLE))}</span>`, "tile-warn"));
+    }
+  };
+  draw(esc(t("Fund share NAV")), () => {
+    if (!b.nav.value || !state) return tile(esc(t("Fund share NAV")), "—", b.nav.error ? errorLine(b.nav) : "");
     const old = config && ts - Number(b.nav.value.timestamp) > Number(config.nav_max_age_secs);
-    tiles.push(
-      tile(
-        esc(t("Fund share NAV")),
-        `${formatUnits(b.nav.value.price, state.nav_decimals, { digits: 4 })} <span class="unit-inline">${navCurrency}</span>`,
-        `${old ? tooOld : ""}${t("Published {age}", { age: since(b.nav.value.timestamp) })}`,
-        old ? "tile-warn" : "",
-      ),
+    return tile(
+      esc(t("Fund share NAV")),
+      `${formatUnits(b.nav.value.price, state.nav_decimals, { digits: 4 })} <span class="unit-inline">${navCurrency}</span>`,
+      `${old ? tooOld : ""}${t("Published {age}", { age: since(b.nav.value.timestamp) })}`,
+      old ? "tile-warn" : "",
     );
-  } else {
-    tiles.push(tile(esc(t("Fund share NAV")), "—", b.nav.error ? errorLine(b.nav) : ""));
-  }
+  });
 
   const leg = Array.isArray(config?.source) && config.source[0] === "Cross" ? config.source[1] : null;
-  if (leg && b.fx.value && state) {
-    const old = ts - Number(b.fx.value.timestamp) > Number(leg.max_age_secs);
-    tiles.push(
-      tile(
+  if (leg) {
+    draw(`${S.dep.stablecoin.currency}/${navCurrency}`, () => {
+      if (!b.fx.value || !state) return tile(`${S.dep.stablecoin.currency}/${navCurrency}`, "—", b.fx.error ? errorLine(b.fx) : esc(t("No rate")));
+      const old = ts - Number(b.fx.value.timestamp) > Number(leg.max_age_secs);
+      return tile(
         `${S.dep.stablecoin.currency}/${navCurrency}`,
         formatUnits(b.fx.value.price, state.fx_decimals, { digits: 4 }),
         `${old ? tooOld : ""}${t("Exchange rate, {age}", { age: since(b.fx.value.timestamp) })}`,
         old ? "tile-warn" : "",
-      ),
-    );
-  } else if (leg) {
-    tiles.push(tile(`${S.dep.stablecoin.currency}/${navCurrency}`, "—", b.fx.error ? errorLine(b.fx) : esc(t("No rate"))));
+      );
+    });
   }
 
-  if (b.quote.value) {
-    const q = b.quote.value;
-    tiles.push(
-      tile(
+  if (b.quote.value || b.quote.error) {
+    draw(esc(t("Share value in {code}", { code: code() })), () => {
+      if (!b.quote.value) return tile(esc(t("Share value in {code}", { code: code() })), "—", errorLine(b.quote), "tile-warn");
+      const q = b.quote.value;
+      return tile(
         esc(t("Share value in {code}", { code: code() })),
         formatUnits(q.price, q.price_decimals, { digits: 4 }),
         esc(t("Lent against with a {haircut} haircut", { haircut: formatRate(q.haircut_bps) })),
-      ),
-    );
-  } else if (b.quote.error) {
-    tiles.push(tile(esc(t("Share value in {code}", { code: code() })), "—", errorLine(b.quote), "tile-warn"));
+      );
+    });
   }
 
   if (config && state) {
-    const used = BigInt(state.outstanding);
-    const cap = BigInt(config.max_outstanding);
-    const pct = cap > 0n ? Number((used * 1000n) / cap) / 10 : 0;
-    tiles.push(
-      tile(
+    draw(esc(t("Lent against this fund")), () => {
+      const used = BigInt(state.outstanding);
+      const cap = BigInt(config.max_outstanding);
+      const pct = cap > 0n ? Number((used * 1000n) / cap) / 10 : 0;
+      return tile(
         esc(t("Lent against this fund")),
         `${formatAmount(used, SD(), "round")} <span class="unit-inline">${esc(t("of {cap}", { cap: `${formatAmount(cap, SD())} ${code()}` }))}</span>`,
         `<span class="bar${firstShow("bar")}" role="img" aria-label="${esc(t("{pct} percent of the fund cap used", { pct: decimalText(pct.toFixed(1)) }))}"><span style="width:${Math.min(pct, 100)}%"></span></span>${esc(
           t("Up to {amount} per loan", { amount: money(config.max_principal_per_repo) }),
         )}`,
-      ),
-    );
+      );
+    });
   }
   setHTML($("tiles"), tiles.join(""));
   tick();
@@ -357,16 +368,25 @@ function renderFunds(funds) {
   }
   const heads = [t("Fund share"), t("NAV in"), t("FX leg"), t("Haircut"), t("Max NAV age"), t("Lent")].map((h) => esc(h));
   const rows = funds.map((f) => {
-    const cfg = f.config.value;
-    const st = f.state.value;
-    const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
-    const lent =
-      cfg && st
-        ? esc(t("{used} of {cap}", { used: formatAmount(BigInt(st.outstanding), SD(), "round"), cap: `${formatAmount(BigInt(cfg.max_outstanding), SD())} ${code()}` }))
-        : "—";
-    const leg = source === "Cross" ? esc(t("exchange-rate leg")) : source === "Direct" ? esc(t("none")) : "—";
-    const maxAge = cfg ? `${decimalText(Number(cfg.nav_max_age_secs) / 3600)} h` : "—";
-    return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
+    // Each row is drawn on its own: one fund's unreadable value blanks its row only.
+    try {
+      const cfg = f.config.value;
+      const st = f.state.value;
+      const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
+      const lent =
+        cfg && st
+          ? esc(t("{used} of {cap}", { used: formatAmount(BigInt(st.outstanding), SD(), "round"), cap: `${formatAmount(BigInt(cfg.max_outstanding), SD())} ${code()}` }))
+          : "—";
+      const leg = source === "Cross" ? esc(t("exchange-rate leg")) : source === "Direct" ? esc(t("none")) : "—";
+      const maxAge = cfg ? `${decimalText(Number(cfg.nav_max_age_secs) / 3600)} h` : "—";
+      return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
+    } catch (error) {
+      console.warn("fund row", error);
+      return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="text-error small">${esc(t(UNSHOWABLE))}</span></td>${heads
+        .slice(1)
+        .map((h) => `<td data-label="${h}">—</td>`)
+        .join("")}</tr>`;
+    }
   });
   setHTML(
     out,

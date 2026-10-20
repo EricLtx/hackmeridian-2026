@@ -27,7 +27,7 @@ import {
   withdrawTicket,
 } from "./blotter.js";
 import { describeError } from "./errors.js";
-import { formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
+import { UNSHOWABLE, formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
 import { LANG_NAMES, lang, numberStyle, setLang, t, tc, tk, tn } from "./i18n.js";
 import { HOUR, nextInterestStep } from "./terms.js";
 import { replay } from "./motion.js";
@@ -511,9 +511,18 @@ export function createTerminal(ctx) {
       return;
     }
     const stateTone = { OPEN: "ok", FROZEN: "warn", STALE: "bad", "FX STALE": "bad" };
+    // Each row is drawn on its own: one fund's unreadable value blanks its row only.
+    const drawn = (line) => (f) => {
+      try {
+        return line(f);
+      } catch (error) {
+        console.warn("terminal fund row", error);
+        return `<tr><td>${esc(f.symbol)}</td><td class="t-bad" colspan="6">${esc(t(UNSHOWABLE))}</td></tr>`;
+      }
+    };
     const body = rows
       .map(
-        (f) => `<tr>
+        drawn((f) => `<tr>
           <td><button type="button" class="t-pick" data-fill="${esc(`Q 1K ${f.symbol}`)}" title="${esc(`${f.name}: Q 1K ${f.symbol}`)}">${esc(f.symbol)}</button>${f.iface ? `<span class="t-amber" title="${esc(t("The fund this screen borrows against"))}">◆</span>` : ""} <span class="t-dim" title="${esc(f.token === "SAC" ? t("Classic Stellar asset held through the Stellar Asset Contract") : t("SEP-41 share token"))}">${f.token === "SAC" ? "SAC" : "41"}</span></td>
           <td class="n" data-k="nav:${esc(f.symbol)}" title="${esc(t("NAV in {currency}", { currency: f.navCurrency }))}">${f.nav === null ? "—" : esc(formatUnits(f.nav, f.navDecimals, { digits: 4 }))} <span class="t-dim">${esc(f.navCurrency)}</span></td>
           <td class="n${tone(f.navTone)}" title="${esc(
@@ -536,7 +545,7 @@ export function createTerminal(ctx) {
               : esc(t("{outstanding} of {cap} lent", { outstanding: formatAmount(f.outstanding, sd(), "round"), cap: f.cap === null ? "?" : formatAmount(f.cap, sd()) }))
           }">${f.usedPct === null ? "—" : `${f.usedPct.toFixed(1).replace(".", numberStyle().decimal)} %`}</td>
           <td class="t-${stateTone[f.state] ?? "dim"}">${esc(stateLabel(f.state))}</td>
-        </tr>`,
+        </tr>`),
       )
       .join("");
     setHTML(

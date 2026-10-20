@@ -66,6 +66,26 @@ test("units parse and format without float rounding", () => {
   assert.equal(formatRate(1), "0.01 %");
 });
 
+test("decimals from 0 to 38: fewer than the digits shown pad with zeros, more are refused at once", () => {
+  // A coarse feed (rc4 admitted 0 to 3 decimals) asked for 4 digits: scaled up, never a negative power of ten.
+  assert.equal(formatUnits(97n, 2, { digits: 4 }), "0.9700");
+  assert.equal(formatUnits(1085n, 3, { digits: 4 }), "1.0850");
+  assert.equal(formatUnits(108_500_000_000_000n, 0, { digits: 4 }), "108,500,000,000,000.0000");
+  assert.equal(formatUnits(-97n, 2, { digits: 4 }), "-0.9700");
+  assert.equal(formatAmount(5n, 0), "5.00");
+  for (let decimals = 0; decimals <= 3; decimals += 1) assert.doesNotThrow(() => formatUnits(108_500_000_000_000n, decimals, { digits: 4 }), `decimals ${decimals}`);
+  assert.equal(formatUnits(1n, 38), `0.${"0".repeat(37)}1`);
+  assert.equal(formatUnits(1n, 7n, { digits: 2n }), "0.00", "a decimals count read as a big integer");
+  // Out of range, or not an integer: a RangeError at once, not a 300-million-digit power of ten.
+  const started = Date.now();
+  for (const decimals of [39, -1, 1.5, 300_000_000, 4_294_967_295, "x", "", null, undefined, Number.NaN]) {
+    assert.throws(() => formatUnits(1n, decimals), RangeError, String(decimals));
+  }
+  assert.throws(() => formatUnits(1n, 7, { digits: 39 }), RangeError);
+  assert.throws(() => formatUnits(1n, 7, { digits: -1 }), RangeError);
+  assert.ok(Date.now() - started < 1000);
+});
+
 test("durations read naturally", () => {
   assert.equal(formatDuration(42), "42 s");
   assert.equal(formatDuration(600), "10 min");

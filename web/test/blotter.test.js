@@ -317,3 +317,30 @@ test("the quote view and the band", () => {
     ["GOV", "none pending"],
   ]);
 });
+
+test("a fund whose value cannot be formatted marks its own band item, not the band", () => {
+  const fund = (symbol, extra = {}) => ({
+    symbol,
+    name: symbol,
+    navCurrency: "USD",
+    nav: 108_500_000_000_000n,
+    navDecimals: 14,
+    navAge: 60,
+    navMaxAge: H,
+    navTone: "ok",
+    fx: null,
+    frozen: false,
+    ...extra,
+  });
+  const band = bandItems({ network: "testnet", paused: false, funds: [fund("tBAD", { navDecimals: 99 }), fund("tOK"), fund("tFX", { fx: 1n, fxDecimals: -3 })] });
+  assert.deepEqual(band.map((i) => [i.label, i.value, i.tone]), [
+    ["TESTNET", "", "amber"],
+    ["STATE", "OPEN", "ok"],
+    ["tBAD", "—", "bad"],
+    ["tOK", "1.0850 USD 1m00s", "ok"],
+    ["tFX", "—", "bad"],
+  ]);
+  assert.equal(band[2].title, "The chain returned a value this page cannot show.");
+  // A coarse feed's NAV shows with the four digits asked, padded.
+  assert.equal(bandItems({ funds: [fund("tTWO", { nav: 97n, navDecimals: 2 })] })[2].value, "0.9700 USD 1m00s");
+});

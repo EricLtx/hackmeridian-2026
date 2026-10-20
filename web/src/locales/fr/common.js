@@ -10,4 +10,5 @@ export default {
   "{n} hour": "{n} heure",
   "{n} hours": "{n} heures",
   "{hours} ({days} days)": "{hours} ({days} jours)",
+  "The chain returned a value this page cannot show.": "La chaîne a renvoyé une valeur que cette page ne peut pas afficher.",
 };
