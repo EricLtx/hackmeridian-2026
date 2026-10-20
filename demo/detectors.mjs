@@ -163,6 +163,12 @@ export const DETECTORS = {
         out.push({ level: "warning", message: `NAV is ${ageHours.toFixed(1)} h old; the contract refuses it at ${Number(f.config.nav_max_age_secs) / 3600} h${tag(s, f)}`, action: "republish" });
       }
     }
+    // rc5 (VAL-5): an opening valued on a fund's backup feed (`fallback` in
+    // repo_valued) means its primary NAV feed was stale or silent then.
+    for (const e of s.events.filter((ev) => ev.name === "repo_valued" && ev.data?.fallback === true)) {
+      const f = s.funds.find((x) => x.shares === String(e.topics?.[1] ?? ""));
+      out.push({ level: "warning", message: `repo #${e.topics?.[0]} was valued on the backup NAV feed at ledger ${e.ledger}: the primary feed was stale or silent${f ? tag(s, f) : ""}`, action: "check the primary NAV feed and its operator", tx: e.txHash });
+    }
     return out.map((a) => ({ detector: "price", threat: "Tamper.1", ...a }));
   },
   nav(s, monitor, { limits }) {

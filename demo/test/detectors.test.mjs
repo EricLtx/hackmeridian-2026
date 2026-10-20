@@ -107,6 +107,19 @@ test("price: a feed failing inside the valuation pauses like a refusal; another 
   assert.notEqual(other.action, "pause");
 });
 
+test("price: an opening the backup feed valued says the primary was stale or silent, without pausing (VAL-5 in the contract)", () => {
+  const events = [
+    { name: "repo_valued", ledger: 20, txHash: "t1", topics: [12n, "CF2"], data: { fallback: true, nav: 1n } },
+    { name: "repo_valued", ledger: 21, txHash: "t2", topics: [13n, "CF2"], data: { fallback: false, nav: 1n } },
+    // Journaled before rc5 added the field: nothing to say.
+    { name: "repo_valued", ledger: 22, txHash: "t3", topics: [14n, "CF2"], data: { nav: 1n } },
+  ];
+  const out = run("price", snap({ events, funds: [fund("fund 1", "CF1"), fund("fund 2", "CF2")] }));
+  assert.deepEqual(out.map((a) => [a.level, a.threat]), [["warning", "Tamper.1"]]);
+  assert.match(out[0].message, /^repo #12 was valued on the backup NAV feed at ledger 20: the primary feed was stale or silent \[fund 2\]$/);
+  assert.deepEqual(decideActions(out, snap(), {}, { actor: "sentinel" }).actions, []);
+});
+
 test("reference-age: quiet at the bound, a refresh beyond it when the NAV is newer", () => {
   const f = (label, shares, refAge, navAge) => fund(label, shares, {
     fundState: { reference_time: BigInt(NOW - refAge), outstanding: 0n, currency: "EUR" },

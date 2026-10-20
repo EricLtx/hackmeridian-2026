@@ -106,16 +106,23 @@ export const SFTR_COLUMNS = [
  * plus exchange rate, from the repo's `repo_valued` event (rc5) when the
  * journal has it; otherwise the fund's `haircut_bps` from the latest
  * `fund_set` or `fund_limits_set` before the opening, which leaves out the
- * exchange-rate haircut of a cross-priced fund. `source` says which.
+ * exchange-rate haircut of a cross-priced fund. `source` says which, and
+ * `nav:fallback` when the fund's backup feed supplied the NAV the opening
+ * was valued at (the primary being stale or silent; `fallback` in
+ * `repo_valued`, review finding VAL-5).
  */
 export function sftr(lines) {
   const rows = registry(lines);
   const haircuts = []; // { fund, at (ISO), bps }
   const applied = new Map(); // repo_id -> haircut_bps of its repo_valued event
+  const onFallback = new Set(); // repo_ids whose repo_valued says the backup feed priced them
   for (const line of lines) {
     const name = eventName(line);
     if (name === "fund_set" || name === "fund_limits_set") haircuts.push({ fund: str(line.topics?.[1]), at: line.closedAt, bps: str(line.data?.haircut_bps) });
-    else if (name === "repo_valued" && str(line.data?.haircut_bps) !== "") applied.set(str(line.topics?.[1]), str(line.data.haircut_bps));
+    else if (name === "repo_valued") {
+      if (str(line.data?.haircut_bps) !== "") applied.set(str(line.topics?.[1]), str(line.data.haircut_bps));
+      if (line.data?.fallback === true) onFallback.add(str(line.topics?.[1]));
+    }
   }
   const haircutAt = (fund, at) => {
     const known = haircuts.filter((h) => h.fund === fund && h.at <= at);
@@ -129,6 +136,7 @@ export function sftr(lines) {
     const notes = [r.source];
     if (valued !== undefined) notes.push("haircut:repo_valued");
     else if (r.fund && r.opened_at) notes.push(haircut ? "haircut:fund_set/fund_limits_set" : "haircut:not in chain");
+    if (onFallback.has(r.repo_id)) notes.push("nav:fallback");
     const values = {
       uti: r.repo_id,
       sft_type: "REPO",
