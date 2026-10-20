@@ -187,6 +187,34 @@ test("reconciliation: a waiting delivery warns once per reason, then stays silen
   assert.deepEqual(monitor.releaseSeen, {});
 });
 
+test("stablecoins: an issuer that deauthorized the contract's balance is critical, without a pause (DoS.8)", () => {
+  const coins = [
+    { token: "CEUR", label: "tEUR", held: 0n, owed: 0n, authorized: false },
+    { token: "CEURB", label: "tEURB", held: 0n, owed: 0n, authorized: true },
+    { token: "COTHER", label: "COTHE…", held: 0n, owed: 0n, authError: "no function authorized" },
+  ];
+  const out = run("stablecoins", snap({ stablecoins: coins }));
+  assert.deepEqual(out.map((a) => [a.level, a.threat]), [["critical", "DoS.8"], ["warning", "DoS.8"]]);
+  assert.match(out[0].message, /^tEUR has deauthorized the contract's balance: every repurchase in it fails while seizures go ahead$/);
+  assert.equal(decideActions(out, snap(), {}, {}).actions.length, 0);
+});
+
+test("lenders: a lender revoked while its repos are open warns once per count; its removed entry is not an archival (DoS.7)", () => {
+  const monitor = {};
+  const lenders = (open, approved = false) => [{ fund: "CF1", lender: "GLENDERXX", approved, open }];
+  let out = run("lenders", snap({ lenders: lenders(2) }), monitor);
+  assert.deepEqual(out.map((a) => [a.level, a.threat]), [["warning", "DoS.7"]]);
+  assert.match(out[0].message, /lender GLENDE… is no longer approved on fund 1 while 2 of its repo\(s\) are open/);
+  assert.deepEqual(run("lenders", snap({ lenders: lenders(2) }), monitor), []);
+  assert.equal(run("lenders", snap({ lenders: lenders(1) }), monitor).length, 1);
+  assert.deepEqual(run("lenders", snap({ lenders: lenders(0) }), monitor), []);
+  assert.deepEqual(run("lenders", snap({ lenders: lenders(3, true) }), {}), []);
+  // A removed fund is reported as such, not lender by lender.
+  assert.deepEqual(run("lenders", snap({ funds: [fund("fund 1", "CF1", { removed: true, config: null })], lenders: lenders(2) }), {}), []);
+  const ttl = [{ label: "lender GLENDE on fund 1", key: "k", revoked: true, days: null }, { label: "lender GOTHER on fund 1", key: "k2", days: null }];
+  assert.deepEqual(run("ttl", snap({ ttl })).map((a) => a.message), ["lender GOTHER on fund 1 is archived or missing"]);
+});
+
 test("journal: an RPC event the journal covers but lacks warns; one it does not cover yet waits", () => {
   const c = ctx();
   const events = [{ name: "repo_opened", ledger: 100, txHash: "aa", id: "e1" }, { name: "repo_opened", ledger: 120, txHash: "cc", id: "e3" }, { name: "pause_changed", ledger: 200, txHash: "bb", id: "e2" }];

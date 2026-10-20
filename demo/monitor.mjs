@@ -284,6 +284,14 @@ async function readStablecoins(offers) {
       } catch (error) {
         coin.error = firstLine(error);
       }
+      // DoS.8: an issuer that deauthorizes the contract's balance blocks every
+      // repurchase in that stablecoin while seizures go ahead. A Stellar
+      // Asset Contract answers `authorized`; another token may not.
+      try {
+        coin.authorized = await read(state, token, "authorized", [sv.address(C.openWindow)]);
+      } catch (error) {
+        coin.authError = firstLine(error);
+      }
       return coin;
     }),
   );
@@ -334,6 +342,16 @@ async function snapshot(monitor) {
   }
   const liveOffers = offers.filter((o) => BigInt(o.available) > 0n);
   const stablecoins = await readStablecoins(offers);
+  // DoS.7: whether each lender is still approved on each fund it lends on or
+  // has open repos in, as the contract answers it.
+  const lenders = await Promise.all(
+    lenderPairs(liveOffers, openRepos).map(async ([fund, lender]) => ({
+      fund,
+      lender,
+      approved: await read(state, C.openWindow, "is_lender_approved", [sv.address(fund), sv.address(lender)]).catch(() => undefined),
+      open: openRepos.filter((r) => String(r.fund) === fund && String(r.lender) === lender).length,
+    })),
+  );
   const keyed = [
     ["contract instance", storageKey(C.openWindow)],
     ...funds.flatMap((f) => [
@@ -346,9 +364,12 @@ async function snapshot(monitor) {
     // A lender's approval is read by every exit that delivers shares to it
     // (seize, redirect): an archived approval would block a seizure, which
     // decision S6 forbids. Watch one entry per (fund, lender) an exit may read.
-    ...lenderPairs(liveOffers, openRepos).map(([fund, lender]) => [
+    // A revoked approval has no entry left: that is not an archival (below).
+    ...lenders.map(({ fund, lender, approved }) => [
       `lender ${lender.slice(0, 6)} on ${labelOf(funds, fund)}`,
       storageKey(C.openWindow, sv.variant("Lender", sv.address(fund), sv.address(lender))),
+      undefined,
+      approved === false,
     ]),
   ];
   // The contract no longer extends its own code (rent grows with size): the operator does.
@@ -356,10 +377,11 @@ async function snapshot(monitor) {
   const rawCode = head.entries[0]?.value?.contractData?.val?.instance?.executable?.wasmHash;
   if (rawCode) keyed.push(["contract code", codeKey(typeof rawCode.toXDR === "function" ? rawCode.toXDR() : rawCode), "code"]);
   const ledger = await ledgerEntries(keyed.map(([, k]) => k));
-  const ttl = keyed.map(([label, key, kind], i) => ({
+  const ttl = keyed.map(([label, key, kind, revoked], i) => ({
     label,
     key,
     kind,
+    revoked: revoked || undefined,
     days: ledger.entries[i] ? ((ledger.entries[i].liveUntil - ledger.latest) * LEDGER_SECS) / 86_400 : null,
   }));
   const instance = ledger.entries[0]?.value?.contractData?.val?.instance;
@@ -389,7 +411,7 @@ async function snapshot(monitor) {
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl() };
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl() };
 }
 
 /**

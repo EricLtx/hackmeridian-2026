@@ -253,6 +253,41 @@ export const DETECTORS = {
     for (const id of Object.keys(monitor.releaseSeen)) if (!pending.has(id)) delete monitor.releaseSeen[id];
     return out.map((a) => ({ detector: "reconciliation", ...a }));
   },
+  stablecoins(s) {
+    // DoS.8 (econ-6, state-4): an issuer that deauthorizes the contract's
+    // balance makes every repurchase in that stablecoin fail while seizures
+    // go ahead, so borrowers lose their collateral through no fault of
+    // theirs. A pause would not help (new entries in that coin fail anyway):
+    // people must act before the maturities.
+    const out = [];
+    for (const c of s.stablecoins ?? []) {
+      if (c.authorized === false) {
+        out.push({ level: "critical", message: `${c.label} has deauthorized the contract's balance: every repurchase in it fails while seizures go ahead`, action: `contact the issuer of ${c.label}; warn the borrowers of open repos in it before their maturity`, token: c.token });
+      } else if (c.authError) {
+        out.push({ level: "warning", message: `${c.label}: the contract's authorization is unreadable (${c.authError}); a token other than a Stellar Asset Contract may not answer it`, action: "check that token's own freeze by hand" });
+      }
+    }
+    return out.map((a) => ({ detector: "stablecoins", threat: "DoS.8", ...a }));
+  },
+  lenders(s, monitor) {
+    // DoS.7: a steward may revoke a lender's approval while its repos are
+    // open. Since rc5 the seizure still settles to that lender, and the
+    // shares then wait for its approval or a redirection. Warned when it
+    // appears or the number of open repos changes, not every pass.
+    const out = [];
+    monitor.revokedSeen ??= {};
+    const current = {};
+    for (const l of s.lenders ?? []) {
+      const f = s.funds.find((x) => x.shares === l.fund);
+      if (l.approved !== false || !l.open || f?.removed) continue;
+      const key = `${l.fund}:${l.lender}`;
+      current[key] = l.open;
+      if (monitor.revokedSeen[key] === l.open) continue;
+      out.push({ level: "warning", message: `lender ${l.lender.slice(0, 6)}… is no longer approved on ${f?.label ?? l.fund.slice(0, 6)} while ${l.open} of its repo(s) are open: a seizure still settles, and the shares wait for its approval`, action: "ask the fund's steward why; after maturity the lender seizes, then is approved again or redirects the release (redirect_release)" });
+    }
+    monitor.revokedSeen = current;
+    return out.map((a) => ({ detector: "lenders", threat: "DoS.7", ...a }));
+  },
   privileged(s, monitor) {
     const out = s.events
       .filter((e) => PRIVILEGED.has(e.name))
@@ -341,6 +376,8 @@ export const DETECTORS = {
   },
   ttl(s, _monitor, { limits }) {
     return s.ttl
+      // A revoked approval is removed, not archived: the lenders detector reports it.
+      .filter((t) => !(t.revoked && t.days === null))
       .filter((t) => t.days === null || t.days < (t.kind === "code" ? limits.codeTtlDays : limits.ttlDays))
       .map((t) => ({
         detector: "ttl",
