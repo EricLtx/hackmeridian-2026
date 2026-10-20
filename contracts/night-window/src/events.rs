@@ -56,6 +56,11 @@ pub struct ReanchorCancelled {
     pub by: Address,
 }
 
+/// The references a re-anchor installed, not the proposal's readings: the
+/// NAV read at the apply, carried along the model path from the proposed
+/// NAV and never below it, timed at that reading, and the FX rate the two
+/// signers proposed. Since rc5 `nav` and `nav_time` may differ from those
+/// of `ReanchorProposed` (review finding VAL-1, 20 October 2026).
 #[contractevent]
 pub struct Reanchored {
     #[topic]
