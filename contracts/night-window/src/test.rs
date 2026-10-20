@@ -6580,6 +6580,115 @@ fn the_first_admission_drops_a_bootstrap_handover() {
     assert_eq!(f.client.admin(), f.governor);
 }
 
+/// Review finding auth-4 (20 October 2026): before the first admission the
+/// governor may shorten the delay at will. An upgrade proposed under a
+/// one-minute delay kept that eta once value was at stake, the delay back
+/// at 48 hours. The first admission drops it, as it drops a bootstrap
+/// handover. What else the governor sets during bootstrap takes effect at
+/// once and leaves no proposal, and a forced guardian change keeps its
+/// thirty days.
+#[test]
+fn the_first_admission_drops_a_bootstrap_upgrade() {
+    let f = bare();
+    f.client.set_timelock_delay(&MIN_TIMELOCK_SECS);
+    let hash = wasm_hash(&f.env, 5);
+    f.client.propose_upgrade(&hash);
+    assert_eq!(
+        f.client.pending_upgrade().map(|p| p.eta),
+        Some(T0 + MIN_TIMELOCK_SECS)
+    );
+    f.client.set_timelock_delay(&DEFAULT_TIMELOCK_SECS);
+    let guardian = Address::generate(&f.env);
+    f.client.set_guardian(&guardian);
+    f.client.set_max_term(&(10 * DAY));
+    f.client.set_envelope(&looser_envelope());
+    f.client.set_stablecoin(&f.eurc, &eur(&f.env));
+    f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
+    let forced = Address::generate(&f.env);
+    f.client.force_guardian_change(&forced);
+
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    assert_eq!(
+        own_events(&f),
+        std::vec![
+            UpgradeCancelled {
+                wasm_hash: hash.clone(),
+                by: f.contract_id.clone()
+            }
+            .to_xdr(&f.env, &f.contract_id),
+            FundSet {
+                fund: f.shares.clone(),
+                oracle: f.nav_oracle.clone(),
+                haircut_bps: 200
+            }
+            .to_xdr(&f.env, &f.contract_id)
+        ]
+    );
+    assert_eq!(f.client.pending_upgrade(), None);
+    assert_eq!(f.client.guardian(), guardian);
+    assert_eq!(f.client.max_term(), 10 * DAY);
+    assert_eq!(f.client.envelope(), looser_envelope());
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(f.client.pending_max_term_change(), None);
+    assert_eq!(f.client.pending_envelope_change(), None);
+    assert_eq!(f.client.pending_currency_cap_change(&eur(&f.env)), None);
+    assert_eq!(f.client.pending_stablecoin_change(&f.eurc), None);
+    assert_eq!(
+        f.client.pending_forced_guardian_change().map(|p| p.eta),
+        Some(T0 + MAX_TIMELOCK_SECS)
+    );
+
+    // A minute later there is nothing to apply; proposed again, the upgrade
+    // waits for the delay in force.
+    advance(&f, MIN_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_upgrade(&hash),
+        Err(Ok(raised(Error::NotProposed)))
+    );
+    f.client.propose_upgrade(&hash);
+    assert_eq!(
+        f.client.pending_upgrade().map(|p| p.eta),
+        Some(T0 + MIN_TIMELOCK_SECS + DEFAULT_TIMELOCK_SECS)
+    );
+}
+
+/// A contract upgraded from version 2 has offers but no admission flag. It
+/// left the bootstrap with its first offer, so its proposals waited for the
+/// delay in force: the admission that sets the flag keeps them.
+#[test]
+fn an_admission_on_a_contract_upgraded_with_offers_keeps_its_proposals() {
+    let (f, _) = ready();
+    f.env.as_contract(&f.contract_id, || {
+        f.env.storage().instance().remove(&DataKey::FundsAdmitted);
+    });
+    let hash = wasm_hash(&f.env, 6);
+    f.client.propose_upgrade(&hash);
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    let other = new_token(&f.env);
+    f.oracle
+        .set_price(&Asset::Stellar(other.clone()), &NAV_EUR, &T0);
+    let config = FundConfig {
+        oracle_asset: Asset::Stellar(other.clone()),
+        ..fund_config(&f)
+    };
+    f.client.set_fund(&other, &config);
+    assert_eq!(
+        own_events(&f),
+        std::vec![FundSet {
+            fund: other,
+            oracle: f.nav_oracle.clone(),
+            haircut_bps: 200
+        }
+        .to_xdr(&f.env, &f.contract_id)]
+    );
+    assert_eq!(
+        f.client.pending_upgrade().map(|p| p.eta),
+        Some(T0 + DEFAULT_TIMELOCK_SECS)
+    );
+    assert_eq!(f.client.pending_admin().map(|p| p.admin), Some(successor));
+}
+
 /// Custody gap I13: a thief holding the hot guardian key cannot hand the
 /// role to itself; the legitimate rotation goes to the registered backup.
 #[test]

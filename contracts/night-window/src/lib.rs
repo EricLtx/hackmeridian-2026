@@ -2400,22 +2400,37 @@ fn ensure_not_trustee(env: &Env, who: &Address) -> Result<(), Error> {
     Ok(())
 }
 
-/// Records that value can be at stake. On the first admission, a governor
-/// handover proposed during bootstrap goes: it was due at once, and from
-/// now on a handover must wait for the delay.
+/// Records that value can be at stake. The first admission ends the
+/// bootstrap, and the proposals timed under its rules go, each cancelled by
+/// the contract: a governor handover, which was due at once, and an upgrade,
+/// whose eta followed a delay the governor could still shorten at will
+/// (review finding auth-4, 20 October 2026). From now on both wait for the
+/// delay in force, which only grows. The guardian, the term ceiling, the
+/// envelope, the currency caps and the stablecoin registry change at once
+/// during bootstrap, so they leave no proposal behind, and a forced guardian
+/// change always waits for the longest delay.
 fn mark_funds_admitted(env: &Env) {
     if storage::funds_admitted(env) {
         return;
     }
+    // A contract upgraded from version 2 has offers but no flag: it left
+    // the bootstrap with its first offer, and its proposals already waited
+    // for the delay in force.
+    let bootstrap = !storage::past_bootstrap(env);
     storage::mark_funds_admitted(env);
+    if !bootstrap {
+        return;
+    }
+    let by = env.current_contract_address();
     if let Some(pending) = pending_admin_change(env) {
         remove_pending_admin(env);
         AdminProposalCancelled {
             proposed: pending.admin,
-            by: env.current_contract_address(),
+            by: by.clone(),
         }
         .publish(env);
     }
+    drop_pending_upgrade(env, &by);
 }
 
 /// The pending governor handover: the version 4 record, or a version 3
