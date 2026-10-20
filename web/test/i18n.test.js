@@ -143,6 +143,26 @@ test("an element whose name the HTML parser accepts beyond letters, digits and d
   assert.equal(tagsOf("Q <shares> [FUND]"), "", "usage notation is still read as words");
 });
 
+test("a tag a translation leaves unterminated is a tag too: the markup that follows the text would close it", () => {
+  // The footer concatenates the translated sentence with ' <span class="rpc-note">…': an unterminated <b style=…> at its
+  // end became, in Chrome, a <b> with position:fixed wrapping the rest of the footer.
+  const source = "Open Window contract {contract} on Stellar {network}. Every figure is read from the chain.";
+  for (const unterminated of [
+    'Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.<b style="position:fixed;inset:0;z-index:99;background:#fff"',
+    "Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.<b",
+    "Contrat Open Window {contract} sur Stellar {network}.<b style=\"position:fixed\" Chaque chiffre est lu sur la chaîne.",
+    "Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.</b",
+    "Contrat Open Window {contract} sur Stellar {network}. Chaque chiffre est lu sur la chaîne.<x:y style='position:fixed'",
+  ]) {
+    assert.notEqual(tagsOf(unterminated), tagsOf(source), unterminated);
+    assert.match(tagsOf(unterminated), /<\/?[a-z:]+…/, unterminated);
+  }
+  // Complete tags around it are still read on their own; a `<` that starts no tag name is text.
+  assert.equal(tagsOf("Dernier : <code>{hash}</code>.<b style=\"x\""), "</code> <b… <code>");
+  assert.equal(tagsOf("a < b, 1 <2 and <> or <-"), "");
+  assert.equal(tagsOf("Q <shares> [FUND]"), "");
+});
+
 test("tc picks the entry of its context, then the plain entry, then English", async () => {
   const { tc } = await import("../src/i18n.js");
   assert.equal(tc("wallet", "none"), "none");
