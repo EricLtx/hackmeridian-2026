@@ -8332,6 +8332,7 @@ fn stablecoin_registration_is_immediate_before_admission_and_waits_after() {
     );
     advance(&f, f.client.timelock_delay());
     f.client.apply_stablecoin_change(&usdc);
+    assert_eq!(signers(&f), std::vec![f.governor.clone()]);
     assert_eq!(
         f.client.get_stablecoin(&usdc).unwrap().currency,
         usd(&f.env)
@@ -8378,6 +8379,43 @@ fn a_proposed_stablecoin_is_cancelled_dropped_by_a_removal_or_expires() {
     assert_eq!(
         f.client.try_apply_stablecoin_change(&usdc),
         Err(Ok(Error::ProposalExpired))
+    );
+}
+
+/// Review finding auth-3 (20 October 2026): a governor handover drops what
+/// the governor proposed alone, but not a stablecoin registration, kept per
+/// token where nothing can list it. A compromised governor key proposes a
+/// coin of its own, the operator answers with a handover: the proposal
+/// survives it, due. Only the governor in office applies it, so neither the
+/// replaced key nor anyone else can, and the successor takes it up or lets
+/// it expire.
+#[test]
+fn a_stablecoin_proposed_by_a_replaced_governor_needs_its_successor() {
+    let (f, _offer_id) = ready();
+    let rogue = new_token(&f.env);
+    f.client.set_stablecoin(&rogue, &usd(&f.env));
+    let successor = Address::generate(&f.env);
+    f.client.set_admin(&successor);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    f.client.accept_admin();
+    assert!(f.client.pending_stablecoin_change(&rogue).is_some());
+
+    let args: soroban_sdk::Vec<Val> = (rogue.clone(),).into_val(&f.env);
+    let intruder = Address::generate(&f.env);
+    for signer in [&intruder, &f.governor] {
+        sign_only(&f, &[signer], "apply_stablecoin_change", args.clone());
+        assert!(f.client.try_apply_stablecoin_change(&rogue).is_err());
+    }
+    f.env.set_auths(&[]);
+    assert!(f.client.try_apply_stablecoin_change(&rogue).is_err());
+    assert_eq!(f.client.get_stablecoin(&rogue), None);
+
+    sign_only(&f, &[&successor], "apply_stablecoin_change", args);
+    f.client.apply_stablecoin_change(&rogue);
+    assert_eq!(signers(&f), std::vec![successor]);
+    assert_eq!(
+        f.client.get_stablecoin(&rogue).unwrap().currency,
+        usd(&f.env)
     );
 }
 

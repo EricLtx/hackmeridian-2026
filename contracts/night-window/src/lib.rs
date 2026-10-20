@@ -29,7 +29,8 @@
 //! - lenders: independent of the fund's steward; in a sole-lender instance,
 //!   one lender fixed before anything is at stake;
 //! - anyone: refreshes a fund's NAV reference inside the corridor, applies a
-//!   change whose time delay has elapsed, retries a deferred share release.
+//!   change whose time delay has elapsed (a stablecoin registration takes the
+//!   current governor), retries a deferred share release.
 //!
 //! The pause stops new offers and new repos; it never blocks a repurchase, a
 //! withdrawal of an offer or a seizure. Upgrades, replacements of an admitted
@@ -693,8 +694,13 @@ impl OpenWindow {
         install_stablecoin(&env, stablecoin, currency, decimals);
     }
 
-    /// Applies a proposed stablecoin once its delay has elapsed. Anyone.
+    /// Applies a proposed stablecoin once its delay has elapsed. Governor.
     pub fn apply_stablecoin_change(env: Env, stablecoin: Address) -> Result<(), Error> {
+        // The current governor, not anyone (review finding auth-3, 20
+        // October 2026): these proposals are kept per token, so a governor
+        // handover cannot enumerate and drop them. One made by a replaced
+        // governor then applies only if its successor takes it up.
+        storage::require_governor(&env);
         let pending = storage::pending_stablecoin(&env, &stablecoin).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
         // Checked again: a proposal made before rc5 was not, and a token's
@@ -2723,7 +2729,8 @@ fn drop_pending_fund_limits(env: &Env, fund: &Address, by: &Address) -> bool {
 
 /// Drops every proposal a governor makes alone, when the role changes hands.
 /// Fund replacements, fallbacks and fund limits carry a steward's signature
-/// and stay.
+/// and stay. Stablecoin registrations stay too, as they cannot be listed:
+/// only the governor in office applies one (`apply_stablecoin_change`).
 fn drop_governor_proposals(env: &Env, by: &Address) {
     drop_pending_upgrade(env, by);
     drop_pending_guardian(env, by);
