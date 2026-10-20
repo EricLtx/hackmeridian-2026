@@ -12,5 +12,6 @@ import wallet from "./wallet.js";
 import chain from "./chain.js";
 import history from "./history.js";
 import terms from "./terms.js";
+import deployment from "./deployment.js";
 
-export default { ...common, ...page, ...main, ...terminal, ...command, ...blotter, ...guide, ...timeline, ...errors, ...wallet, ...chain, ...history, ...terms };
+export default { ...common, ...page, ...main, ...terminal, ...command, ...blotter, ...guide, ...timeline, ...errors, ...wallet, ...chain, ...history, ...terms, ...deployment };

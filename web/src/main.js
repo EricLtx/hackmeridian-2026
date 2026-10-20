@@ -5,6 +5,7 @@
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
 import { Chain, rpcChangeText } from "./chain.js";
+import { checkDeployment } from "./deployment.js";
 import { describeError } from "./errors.js";
 import {
   UNSHOWABLE,
@@ -1391,20 +1392,6 @@ function wire() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) refreshAll();
   });
-}
-
-/**
- * The deployment file's symbols and URLs end up in markup and links; accept
- * only plain tickers and https URLs so a tampered file cannot inject either.
- */
-function checkDeployment(dep) {
-  const ticker = /^[A-Za-z0-9]{1,12}$/;
-  const symbols = [dep?.stablecoin?.code, dep?.stablecoin?.currency, dep?.fund?.symbol, dep?.fund?.navCurrency];
-  if (!symbols.every((s) => ticker.test(String(s)))) throw new Error(t("unexpected asset symbol"));
-  if (dep.rpcFallbacks !== undefined && !Array.isArray(dep.rpcFallbacks)) throw new Error(t("unexpected URL"));
-  if (![dep.rpcUrl, dep.explorer, ...(dep.rpcFallbacks ?? [])].every((u) => /^https:\/\/[^\s"'<>]+$/.test(String(u)))) throw new Error(t("unexpected URL"));
-  if (!Number.isInteger(dep.stablecoin.decimals) || !Number.isInteger(dep.fund.decimals)) throw new Error(t("unexpected decimals"));
-  return dep;
 }
 
 /** The indexer's export, when it sits next to the page: it dates and links the closing steps of the timelines. Optional. */

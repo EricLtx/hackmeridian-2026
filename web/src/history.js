@@ -9,14 +9,15 @@ import "@fontsource-variable/inter";
 import { tapeLine } from "./blotter.js";
 import { formatAmount, formatOrDash, formatRate, shortAddress } from "./format.js";
 import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
+import { addr, contractLink, esc, explorerOf, exportDecimals, txLink, when } from "./journal.js";
 import { initMotion, setLoading, transition } from "./motion.js";
 
 const $ = (id) => document.getElementById(id);
-const esc = (value) =>
-  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-/** Decimals of the amounts: both demo tokens use 7, read from deployment.testnet.json when present. */
-const decimals = { shares: 7, stablecoin: 7, code: "" };
+/** Decimals of the amounts: both demo tokens use 7, read from deployment.testnet.json when it gives usable ones. */
+let decimals = exportDecimals(null);
+/** The explorer the links point to, checked like the deployment file's URLs; null for no link. */
+let explorer = null;
 
 const STATUS_LABEL = {
   open: [tk("Open"), "pill-ok"],
@@ -28,10 +29,6 @@ const STATUS_LABEL = {
 /** What the page shows: the export once loaded, or the reason it could not be loaded. */
 const view = { history: null, error: null };
 
-const when = (iso) => (iso ? esc(iso.replace("T", " ").replace(/(:\d\d)Z$/, "$1 UTC")) : "—");
-const txLink = (explorer, hash) =>
-  hash ? `<a href="${esc(explorer)}/tx/${esc(hash)}" target="_blank" rel="noopener noreferrer" title="${esc(hash)}">${esc(hash.slice(0, 8))}…</a>` : "—";
-const addr = (a) => (a ? `<span title="${esc(a)}">${esc(shortAddress(a))}</span>` : "—");
 // An amount or a rate of the export, or a dash when the cell is empty or not an integer: a malformed export never stops the page.
 const units = (raw, d) => formatOrDash(raw, (value) => formatAmount(value, d));
 const rate = (raw) => formatOrDash(raw, formatRate);
@@ -57,7 +54,7 @@ function tile(label, value, sub = "") {
 
 function renderJournal(h) {
   const j = h.journal;
-  $("journal-meta").textContent = t("export of {time} UTC", { time: h.generatedAt.replace("T", " ").slice(0, 19) });
+  $("journal-meta").textContent = t("export of {time} UTC", { time: String(h.generatedAt ?? "").replace("T", " ").slice(0, 19) });
   $("journal-tiles").innerHTML = [
     tile(t("Events journaled"), esc(j.lines)),
     tile(t("First event"), when(j.firstClosedAt), j.firstLedger ? esc(t("ledger {ledger}", { ledger: j.firstLedger })) : ""),
@@ -114,7 +111,7 @@ function renderRegistry(h) {
         <td data-label="${col.opened}">${when(r.opened_at)}</td>
         <td data-label="${col.maturity}">${when(r.maturity)}</td>
         <td data-label="${col.closed}">${when(r.closed_at)}${r.interest ? `<div class="small muted">${esc(t("interest {amount} {currency}", { amount: units(r.interest, decimals.stablecoin), currency: cur }))}</div>` : ""}</td>
-        <td data-label="${col.lastTx}">${txLink(h.explorer, r.last_tx)}</td>
+        <td data-label="${col.lastTx}">${txLink(explorer, r.last_tx)}</td>
       </tr>`;
     })
     .join("");
@@ -144,7 +141,7 @@ function renderEvents(h) {
         <td data-label="${col.event}">${label ? `<span class="badge badge-muted">${esc(label)}</span> ` : ""}<code>${esc(e.event)}</code></td>
         <td data-label="${col.topics}">${esc((e.topics ?? []).map((topic) => (typeof topic === "string" && /^[GC][A-Z2-7]{55}$/.test(topic) ? shortAddress(topic) : topic)).join(", ")) || "—"}</td>
         <td data-label="${col.data}"><code class="small">${esc(JSON.stringify(e.data))}</code></td>
-        <td data-label="Tx">${txLink(h.explorer, e.txHash)}</td>
+        <td data-label="Tx">${txLink(explorer, e.txHash)}</td>
       </tr>`,
     )
     .join("");
@@ -155,11 +152,8 @@ function renderEvents(h) {
 }
 
 function renderFoot(h) {
-  const contract = h.contract
-    ? `<a href="${esc(h.explorer)}/contract/${esc(h.contract)}" target="_blank" rel="noopener noreferrer">${esc(shortAddress(h.contract))}</a>`
-    : "—";
   $("foot").innerHTML = t("Contract {contract} on Stellar {network}. Journal and exports: <code>indexer/</code> in the repository.", {
-    contract,
+    contract: contractLink(explorer, h.contract),
     network: esc(h.network),
   });
 }
@@ -215,16 +209,16 @@ async function main() {
   initMotion();
   setLoading(true);
   wireLanguage();
+  let dep = null;
   try {
-    const dep = await loadJson("deployment.testnet.json");
-    decimals.shares = dep.fund?.decimals ?? 7;
-    decimals.stablecoin = dep.stablecoin?.decimals ?? 7;
-    decimals.code = dep.stablecoin?.code ?? "";
+    dep = await loadJson("deployment.testnet.json");
+    decimals = exportDecimals(dep);
   } catch {
     // The deployment file is optional here: defaults apply.
   }
   try {
     view.history = await loadJson("history.json");
+    explorer = explorerOf(view.history, dep);
   } catch (error) {
     view.error = error;
   }

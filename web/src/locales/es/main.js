@@ -185,9 +185,6 @@ export default {
   "{code} added to your wallet.": "{code} añadido a su billetera.",
   "Asking the testnet faucet for XLM.": "Solicitando XLM al grifo de testnet.",
   "Test XLM received.": "XLM de prueba recibidos.",
-  "unexpected asset symbol": "símbolo de activo inesperado",
-  "unexpected URL": "URL inesperada",
-  "unexpected decimals": "decimales inesperados",
   "Open Window contract {contract} on Stellar {network}. Fund shares {shares}, {code} {stablecoin}. Every figure is read from the chain; nothing here has real value. Apache-2.0.":
     "Contrato Open Window {contract} en Stellar {network}. Participaciones del fondo {shares}, {code} {stablecoin}. Cada cifra se lee en la cadena; nada aquí tiene valor real. Apache-2.0.",
   "The deployment file could not be loaded ({reason}). The interface needs deployment.testnet.json next to this page.":
