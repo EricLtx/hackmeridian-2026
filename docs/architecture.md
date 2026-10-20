@@ -1,6 +1,6 @@
 # Architecture of Open Window
 
-What the system is made of, how a repo flows through it, how it is governed, priced, stored, upgraded and operated. State of 19 October 2026: contract version 4, audit candidate rc4 (tag `audit-v4-rc4`), deployed, upgraded and migrated on Stellar testnet. Diagrams are Mermaid; GitHub renders them. The authoritative descriptions are [security.md](security.md) (decisions S1 to S29), [interface-reference.md](interface-reference.md) (every entry point) and [operations.md](operations.md) (running an instance); this page is the map.
+What the system is made of, how a repo flows through it, how it is governed, priced, stored, upgraded and operated. State of 20 October 2026: contract version 4; the testnet instance runs rc4 (tag `audit-v4-rc4`), deployed, upgraded and migrated on Stellar testnet; the map describes the rc5 candidate, which fixes the findings of the security pass of that day and becomes the tag `audit-v4-rc5` after an adversarial review, then a governed upgrade of the instance. Diagrams are Mermaid; GitHub renders them. The authoritative descriptions are [security.md](security.md) (decisions S1 to S34), [interface-reference.md](interface-reference.md) (every entry point) and [operations.md](operations.md) (running an instance); this page is the map.
 
 An embedded-systems reading helps: the contract is firmware, the Stellar ledger is a shared RAM and flash paid by the byte and by the day, SEP-40 feeds are sensors, SEP-41 tokens are peripherals driven over a bus, and the time delay is a watchdog that lets a second person stop a bad command before it takes effect.
 
@@ -28,10 +28,10 @@ flowchart LR
   subgraph Tooling["Tooling (demo/, indexer/, web/)"]
     W[Web interface on GitHub Pages<br/>Freighter; guided view and terminal view;<br/>EN, FR, ES; two public RPCs]
     D[setup / run / upgrade / inventory]
-    M[monitor: 13 detectors per fund<br/>actor with the sentinel, witness elsewhere]
+    M[monitor: 19 detectors<br/>acts with the sentinel and keeper keys<br/>once a second RPC agrees; witness elsewhere]
     X[indexer: append-only journal,<br/>hash chain anchored on chain,<br/>register and SFTR views]
-    K[keeper: pays rent]
-    C[CI: fmt, build, size budget,<br/>clippy, tests, deny, audit, links]
+    K[keeper: pays rent,<br/>steps price references]
+    C[CI: fmt, build, size budget,<br/>clippy, tests, stack canary,<br/>tooling tests, npm audit,<br/>deny, audit, links]
   end
   B -- open_repo / repurchase --> OW
   L -- create_offer / withdraw_offer / seize --> OW
@@ -49,7 +49,7 @@ flowchart LR
   D --> OW
   M -- reads state and events,<br/>acts with the sentinel key --> OW
   X -- reads events --> OW
-  K -- extends rent --> OW
+  K -- extends rent, refresh_reference --> OW
   C -. gates every commit .-> OW
 ```
 
@@ -59,14 +59,14 @@ Three facts shape everything else. The issuer never lends against its own fund (
 
 | Unit | Technology | Role | Where it runs |
 |---|---|---|---|
-| `night_window.wasm` | Rust `no_std`, soroban-sdk 28, target `wasm32v1-none`; 100,757 bytes (76.9 % of the network cap) | the product: fund and stablecoin registry, offers, repos, delayed governance, price controls, schema version | the ledger; one instance per lender-operator |
+| `night_window.wasm` | Rust `no_std`, soroban-sdk 28, target `wasm32v1-none`, a 64 KiB stack (S34); about 100 KB, under the 120 KB CI budget (exact size and hash of the rc5 candidate in [audit-scope.md](audit-scope.md)) | the product: fund and stablecoin registry, offers, repos, delayed governance, price controls, schema version | the ledger; one instance per lender-operator |
 | `fund_token.wasm` | Rust, SEP-41 with allowlist, freeze and clawback | stand-in for a permissioned fund share, tests and demo only | testnet |
 | `nav_oracle.wasm` | Rust, SEP-40 fed by an operator | stand-in for a NAV feed and a backup feed | testnet |
 | Stellar Asset Contract | Stellar's own token contract for classic assets | the third demo fund's share: a token this repository did not write, with the issuer's native flags | testnet |
-| `demo/` | Node 20, `@stellar/stellar-sdk` 17 | `setup` (deployment, roles, admissions, offers), `run` (scenes), `upgrade` (governed upgrade and migration), `inventory`, `monitor`, `keys` (ceremonies), `measure`, `fxlog`, `onboard` | the operator's host |
+| `demo/` | Node 20, `@stellar/stellar-sdk` 17 | `setup` (deployment, roles, admissions, offers), `run` (scenes), `upgrade` (governed upgrade and migration), `inventory`, `monitor` (its detectors in `detectors.mjs`), `keys` (ceremonies), `measure`, `fxlog`, `onboard`; every write checked before signing (its own call's authorizations only, its footprint, a fee cap); offline tests (`npm test`) | the operator's host |
 | `indexer/` | Node 20 | event journal beyond the RPC's retention, SHA-256 hash chain, on-chain anchor, CSV, register and SFTR exports, `history.json` for the web | the operator's host |
-| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page; English, French and Spanish; two public RPCs with failover; every value read from the chain checked before display, a content security policy, simulated fees capped before signing | static files, published on GitHub Pages by `pages.yml` |
-| CI | GitHub Actions | `cargo fmt --check`, `stellar contract build`, size budget, `clippy -D warnings`, `cargo test`, web tests and build, `cargo deny`, RustSec audit, link check; Pages deployment of `web/` | GitHub |
+| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page; English, French and Spanish; two public RPCs, with failover on an error or on staleness, and every write confirmed on the second; every value read from the chain checked before display, a content security policy, the fee of the transaction to sign checked before the wallet is asked, no run inside another site's frame | static files, published on GitHub Pages by `pages.yml` |
+| CI | GitHub Actions | `cargo fmt --check`, `stellar contract build`, size budget, `clippy -D warnings`, `cargo test`; the contract's suite against a WASM with an 8 KiB stack (`wasm-canary`); web tests and build after an install without scripts and an advisory gate; the demo's and indexer's tests (`tooling`); `cargo deny`, RustSec audit, link check; Pages deployment of `web/` | GitHub |
 
 ## 3. The contract's components
 
@@ -83,12 +83,12 @@ flowchart TB
   end
   subgraph MOD["Internal modules"]
     ST[storage.rs<br/>DataKey, typed reads and writes,<br/>bump_instance, schema version]
-    OR[oracle.rs<br/>SEP-40 reads, freshness,<br/>divergence, scaling]
-    MA[math.rs<br/>checked i128: corridor, haircut,<br/>hourly interest, exchange rate]
+    OR[oracle.rs<br/>SEP-40 reads, freshness,<br/>divergence, scaling,<br/>FX on the lender side]
+    MA[math.rs<br/>checked i128: corridor over one NAV age,<br/>haircut, share value, hourly interest,<br/>exchange rate, inward rounding]
     TK[token_io.rs<br/>transfer with balance checks,<br/>try_push for deferred delivery]
     TY[types.rs<br/>Offer, Repo, FundConfig, FundState,<br/>RiskEnvelope, Pending*]
     ER[error.rs<br/>51 codes, append-only]
-    EV[events.rs<br/>66 events, one per transition]
+    EV[events.rs<br/>67 events, one per transition]
   end
   A --> ST
   R --> ST
@@ -113,12 +113,12 @@ stateDiagram-v2
   Offer --> Offer: withdraw_offer (unlent part, any time, even paused)
   Offer --> Open: open_repo (borrower; price checked; caps checked; shares in, stablecoins out, one transaction)
   Open --> Repurchased: repurchase (any time; principal + interest per started hour, back into the offer)
-  Open --> Defaulted: seize (lender, after maturity; shares to an address the issuer approved)
+  Open --> Defaulted: seize (lender, from maturity; shares to the lender or another address the issuer approved)
   Repurchased --> [*]: shares delivered
   Defaulted --> [*]: shares delivered
   Repurchased --> ReleasePending: the share token refused the transfer (freeze, allowlist, clawback)
-  Defaulted --> ReleasePending: idem
-  ReleasePending --> [*]: release (anyone retries) or redirect_release (beneficiary)
+  Defaulted --> ReleasePending: idem, or the lender is no longer approved (rc5)
+  ReleasePending --> [*]: release (anyone retries) or redirect_release (beneficiary, to an approved holder after a seizure)
 ```
 
 The one-transaction opening:
@@ -136,13 +136,13 @@ sequenceDiagram
   OW->>OW: require_auth(borrower); not paused; schema current; fund admitted and not frozen; offer alive; term within ceilings
   OW->>NAV: lastprice(fund)
   OW->>FX: lastprice(currency) when the NAV is not in the loan currency
-  OW->>OW: freshness, NAV corridor, FX band (backup feed if the primary is stale)
+  OW->>OW: freshness, NAV corridor, FX band, NAV divided by the higher of the rate and the reference (backup feed if the primary is stale)
   OW->>OW: ceiling = value x (1 - haircut) rounded down; caps per repo, per fund, per currency
   OW->>OW: sole lender; lender approved by the steward in place
   OW->>FT: transfer(borrower -> contract, shares)
   OW->>EU: transfer(contract -> borrower, amount)
   OW->>OW: Repo{opened_at, maturity, rate}; offer debited; instance rent extended
-  OW-->>B: repo_id, event repo_opened
+  OW-->>B: repo_id; events repo_opened, repo_valued (rc5), reference_updated when the reference moves
 ```
 
 Measured on testnet: about 6.9 million instructions, 27 entries read and 8 written, 0.81 XLM including the 120-day rent of the new entries; a cycle (open + repurchase) costs 0.836 XLM, about 0.06 % of a weekend's interest on one million. The footprint is constant whatever the number of open repos (load test, 200 repos).
@@ -154,18 +154,23 @@ flowchart LR
   N[Raw NAV<br/>SEP-40] --> F1{fresh?<br/>per-fund age bound}
   F1 -- no --> BKq{backup feed?}
   BKq -- no --> E1[StalePrice: no new repo]
-  BKq -- yes, fresh and within max_divergence --> C
-  F1 -- yes --> C{inside the model corridor?<br/>reference, floor, max yield}
+  BKq -- yes, and fresh --> C
+  F1 -- yes --> AG{fresh backup too?<br/>then within max_divergence}
+  AG -- no --> E3[PriceDivergence]
+  AG -- yes, or no fresh backup --> C{inside the model corridor?<br/>reference, floor, max yield<br/>over at most one NAV age}
   C -- no --> E2[PriceOutOfBand]
   C -- yes --> X{cross-currency fund?}
   X -- yes --> FXc{rate fresh and within the band?<br/>band never wider than the FX haircut}
   FXc -- no --> E2
-  FXc -- yes --> Q
+  FXc -- yes --> FXd[divide by the higher of<br/>the rate and the reference]
+  FXd --> Q
   X -- no --> Q[quote: value, haircut,<br/>borrowing ceiling]
   RA[propose_reanchor<br/>governor + steward, behind the delay] -. moves the reference .-> C
 ```
 
-The reference follows the feed only along the model path and never ratchets up on a faulty reading; only admission and the two-key re-anchor move it elsewhere (S2, S21). The risk envelope (S27) bounds every per-fund setting so that the corridor's maximum drift over the NAV age bound stays below the haircut, and the FX band stays within the FX haircut (S22).
+The reference follows the feed only along the model path, never faster than the maximum yield even on a faulty reading published at every ledger; only admission and the two-key re-anchor move it elsewhere (S2, S21). The risk envelope (S27) bounds each per-fund setting on its own. Since rc5 the corridor grows over at most the NAV age bound after the reference, and each fund's haircut must cover it from its bottom to its top, two floors plus one NAV age of growth, at admission, replacement and limits (S30); the FX band stays within the FX haircut and the rate divides the NAV only on the lender's side of the band (S22); feeds publish with at least 6 decimals and every bound rounds inward (S32). A reference nobody moves fails closed once an honest NAV outgrows its corridor: the keeper steps it with `refresh_reference` (section 10).
+
+A backup feed's reading goes through the same corridor. Since rc5 a backup is never the primary feed itself, and it is installed only against a fresh primary it agrees with (S1); once installed, it stands in alone when the primary is stale, checked by its own age and the corridor: that is what a backup is for.
 
 ## 6. Governance: one automaton for every change
 
@@ -185,18 +190,18 @@ stateDiagram-v2
   end note
 ```
 
-The automaton covers upgrades, the governor handover, the guardian (and its 30-day forced replacement), the term ceiling, the envelope, fund replacements and limit loosenings, currency caps, stablecoin registrations after the first admission (S29), the backup feed, the re-anchor, the steward backup and the steward recovery. Before the first admission (bootstrap) settings apply at once, and the sole lender and the trustee can only be fixed then.
+The automaton covers upgrades, the governor handover, the guardian (and its 30-day forced replacement), the term ceiling, the envelope, fund replacements and limit loosenings, currency caps, stablecoin registrations after the first admission (S29; since rc5 applied by the governor in office, not by anyone), the backup feed, the re-anchor, the steward backup and the steward recovery. Before the first admission (bootstrap) settings apply at once, and the sole lender and the trustee can only be fixed then; at the first admission the contract cancels a governor handover and, since rc5, an upgrade proposed during bootstrap.
 
 Roles and their reach:
 
 | Role | May | May not |
 |---|---|---|
-| Governor | propose everything above, lift a pause, admit and remove funds with the steward, `migrate` with the trustee | skip a delay; lend; move a reference alone |
+| Governor | propose everything above, apply a stablecoin registration (rc5), lift a pause, admit and remove funds with the steward, `migrate` with the trustee | skip a delay; lend; move a reference alone |
 | Guardian | pause entries, cancel any proposal, veto a handover or a forced change, name the sentinel, hand over to its registered backup only | lift a pause; block an exit |
-| Sentinel | pause, cancel | veto, lift a pause, decide anything |
-| Trustee | co-sign upgrades and forced guardian changes, replace itself | anything else; it is checked independent of every other role |
+| Sentinel | pause, cancel | veto, lift a pause, decide anything; hold or be proposed for any other role (rc5, both ways) |
+| Trustee | co-sign upgrades and forced guardian changes, replace itself | anything else; it is checked independent of every other role, proposed roles included (rc5) |
 | Steward (issuer) | admit its fund with the governor, approve and revoke lenders, tune limits inside the envelope, lower the reference, freeze, register its backup | lend against its fund, in any way (S24) |
-| Lender | create and withdraw offers, seize at maturity | lend on a fund whose steward did not approve it |
+| Lender | create and withdraw offers, seize at maturity, even after a revocation, its shares then waiting for an approval (rc5) | lend on a fund whose steward did not approve it |
 
 ## 7. Storage and rent
 
@@ -206,15 +211,15 @@ flowchart TB
     I1[Admin, Guardian, Sentinel, Trustee, SoleLender]
     I2[TimelockDelay, MaxTerm, Envelope, Paused, SchemaVersion]
     I3[NextOfferId, NextRepoId, FundsAdmitted]
-    I4[Stablecoin per token, CurrencyCap and CurrencyOutstanding per currency]
-    I5[Pending*: upgrade, admin, guardian, envelope, max term, currency caps, stablecoins]
+    I4[CurrencyCap and CurrencyOutstanding per currency]
+    I5[Pending*: upgrade, admin, guardian, envelope, max term, currency caps]
   end
   subgraph Persistent["Persistent entries: one per object, each with its own rent"]
-    P1[Fund config and FundState per fund]
+    P1[Fund config and FundState per fund; Stablecoin per token]
     P2[Offer per id, Repo per id]
     P3["Lender approval per fund and lender; attestation; LastSteward"]
     P4[PendingRelease per repo]
-    P5["Fallback feed per fund; pending fund changes, backups, recoveries"]
+    P5["Fallback feed per fund; pending fund changes, backups, recoveries, stablecoin registrations"]
   end
   subgraph Code["Contract code: extended by the keeper only (S20)"]
     W[night_window.wasm]
@@ -224,6 +229,8 @@ flowchart TB
 Persistent entries are extended at every write and, for the entries an exit reads (lender approvals, attestations, steward backups), at every read; the monitor alerts when an open entry nears archival. The schema version (S29) names the stored layout: after an upgrade, `migrate` (governor and trustee) transforms it; entries refuse to open while the layout is behind the code, exits never check.
 
 Cost per call, measured on the testnet instance from the validators' own metrics of executed rc4 transactions (20 October 2026): the heaviest opening (a cross-currency fund, three price reads) used 6,645,361 instructions, 1.66 % of the 400 million a transaction may use, and about 1.9 ms of execution; an opening on a share held through the Stellar Asset Contract used 3,611,825. Every path is bounded by constants (at most eight funds per offer, no loop over positions), so the cost does not grow with usage, and the time a user waits is the ledger close (about five seconds) and the RPC, not the contract. Fees are dominated by rent: an opening was charged about 0.74 to 0.76 XLM of resource fees, most of it for the new repo entry, which receives a lifetime of 120 days at once.
+
+The rc5 candidate lowers the fixed part of every call: each call of the contract allocates its whole linear memory before any work, and a 64 KiB stack instead of the linker's default 1 MiB starts the module with 2 pages instead of 17, which saves 122,880 instructions and 983,040 bytes of memory per call (S34, `contracts/night-window/build.rs`). The bench of the release WASM (`test_perf.rs`) checks every user-facing call against a budget of 12 million instructions, 12 entries written, 8,192 bytes written and 2,048 bytes of events. Its figures are the host's model: a transaction declares the RPC's padded simulation of the network path, which costs 17 to 20 % more than the bench before the padding. The testnet figures above are rc4's; rc5's follow its governed upgrade.
 
 ## 8. Several funds and stablecoins as data
 
@@ -260,19 +267,21 @@ sequenceDiagram
   Op->>M: move the code baseline
 ```
 
-Before an upgrade that tightens an admission rule, `npm run inventory` lists the funds the new rule would refuse, so their replacements can be proposed in the same delay window (18 October 2026 lesson). The tag of the audited code is `audit-v4-rc4`; any change to `contracts/` means a new tag and a new rehearsal.
+Before an upgrade that tightens an admission rule, `npm run inventory` lists the funds the new rule would refuse, so their replacements can be proposed in the same delay window (18 October 2026 lesson); for rc5 it checks the haircut against the corridor, the feeds' decimals and the stablecoins' decimals. An upgrade is proposed after the first admission: one proposed before is cancelled at it (rc5). The testnet instance runs the tag `audit-v4-rc4`; the rc5 candidate becomes `audit-v4-rc5` after its adversarial review and then goes through this sequence, with no `migrate` since its stored layout is rc4's. Any change to `contracts/` means a new tag and a new rehearsal.
 
 ## 10. Operations: monitoring, journal, interface
 
 ```mermaid
 flowchart LR
   RPC1[(RPC 1)] --> MON
-  RPC2[(RPC 2, optional)] --> MON[monitor.mjs<br/>--watch --act with the sentinel key]
-  MON --> DET[13 detectors per fund:<br/>price, frozen NAV, frozen rate, reconciliation,<br/>privileged changes, proposals, schema, pause,<br/>TTL, exposure, event trail, keeper float, RPC cross-check]
+  RPC2[(RPC 2: second reading,<br/>journal content)] --> MON[monitor.mjs<br/>--watch --act with the sentinel key]
+  MON --> DET[19 detectors, detectors.mjs:<br/>funds, price, NAV, reference age, reconciliation,<br/>stablecoins, lenders, privileged changes, proposals,<br/>pause, TTL, exposure, FX, flat feeds, keeper float,<br/>event trail, RPC agreement, schema, journal]
   DET --> A1["pause (sentinel)"]
   DET --> A2["cancel unannounced proposals (sentinel)"]
-  DET --> A3["veto handovers (guardian)"]
-  DET --> A4["extend entries near archival (keeper)"]
+  DET --> A3["veto handovers (guardian or trustee key on the host,<br/>else a critical alert)"]
+  DET --> A4["extend entries near archival, code below 90 days (keeper)"]
+  DET --> A5["refresh_reference, release (keeper)"]
+  RPC2 -. confirms each action .-> A1
   WIT[monitor --witness<br/>another host] -. same detectors, never acts .-> RPC1
   RPC1 --> IDX[indexer: journal + hash chain]
   IDX --> ANC[anchor on chain]
@@ -281,9 +290,9 @@ flowchart LR
   IDX --> MON
 ```
 
-Nineteen drills, one per detector with a real trigger, were rehearsed on the testnet instance on 18 October 2026 ([incident-procedure.md](incident-procedure.md), section 5).
+Nineteen drills, one per detector with a real trigger, were rehearsed on the testnet instance on 18 October 2026, against rc4 ([incident-procedure.md](incident-procedure.md), section 5). The detectors rc5 adds (reference age, flat feeds, stablecoin authorization, revoked lenders, proposals read from state, unreadable funds, the journal checked by content) have offline tests in `demo/test/` and no drill yet. With two endpoints, the default, every action waits for the second endpoint's own reading of the facts it rests on; reads simulate from the null account, so the host holds no governor key.
 
-The web interface sits on its own trust boundary (F7 in [threat-model-stride.md](threat-model-stride.md)). It reads the chain through public RPCs, SDF's first and Gateway.fm's when the first is slow or down, each call with its own time limit. Every value it decodes is checked before it reaches the page; the content security policy of its pages limits connections to those endpoints and Friendbot; a simulation that asks more than 25 XLM of fees is refused before the wallet is asked to sign. The published deployment file lists only keyless public endpoints.
+The web interface sits on its own trust boundary (F7 in [threat-model-stride.md](threat-model-stride.md)). It reads the chain through public RPCs, SDF's first and Gateway.fm's when the first is slow, down or, since rc5, more than 10 ledgers behind, each call with its own time limit; it returns to SDF's once that one is level again. Every value it decodes is checked before it reaches the page; the content security policy of its pages limits connections to those endpoints and Friendbot. Since rc5 the fee of the transaction the wallet will sign is checked (25 XLM at most, equal to the simulation's estimate), a write shows as confirmed only once the second endpoint sees it, the page refuses to run inside another site's frame, and the footer names the RPC providers, which see the visitor's IP address. The published deployment file lists only keyless public endpoints, and the page accepts only one for the test network.
 
 ## 11. Build and audit chain
 
@@ -293,11 +302,12 @@ flowchart LR
   FMT --> BLD[stellar contract build]
   BLD --> SZ{size budget<br/>122,880 bytes}
   SZ --> CL[clippy -D warnings]
-  CL --> TST[cargo test: 210 contract tests<br/>incl. the rc2 WASM upgraded and migrated]
-  TST --> DENY[cargo deny]
+  CL --> TST[cargo test: contract host tests<br/>incl. the rc2 WASM upgraded and migrated,<br/>the real-time budget]
+  TST --> CAN[wasm-canary: the suite against<br/>a WASM with an 8 KiB stack]
+  CAN --> DENY[cargo deny]
   DENY --> AUD[RustSec audit]
   AUD --> HASH[reproducible WASM hash<br/>= executable on the ledger]
-  HASH --> TAG[tag audit-v4-rc4]
+  HASH --> TAG[tag audit-v4-rc4 on testnet;<br/>audit-v4-rc5 after review]
   TAG --> EXT[external audit<br/>through the Audit Bank: to come]
 ```
 
