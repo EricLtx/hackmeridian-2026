@@ -171,13 +171,31 @@ fn balance(env: &Env, token: &Address, who: &Address) -> i128 {
     TokenClient::new(env, token).balance(who)
 }
 
+/// Registers Open Window: the natively compiled contract, or in the WASM
+/// test mode (`NIGHT_WINDOW_TEST_WASM=1`, see build.rs) the release WASM,
+/// so that the whole suite runs in the VM on the stack that WASM was linked
+/// with.
+#[cfg(not(night_window_test_wasm))]
+fn register_open_window(env: &Env, governor: &Address) -> Address {
+    env.register(OpenWindow, (governor.clone(),))
+}
+
+#[cfg(night_window_test_wasm)]
+fn register_open_window(env: &Env, governor: &Address) -> Address {
+    env.register(NIGHT_WINDOW_WASM, (governor.clone(),))
+}
+
+/// Ledger entries an invocation of Open Window reads beyond those it reads
+/// natively compiled: its code entry, in the WASM test mode.
+const CODE_ENTRY: u32 = cfg!(night_window_test_wasm) as u32;
+
 /// Deployed contract, roles, tokens and a EUR NAV oracle. Nothing admitted.
 fn bare() -> Fixture {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(T0);
     let governor = Address::generate(&env);
-    let contract_id = env.register(OpenWindow, (governor.clone(),));
+    let contract_id = register_open_window(&env, &governor);
     let client = OpenWindowClient::new(leak(env.clone()), leak(contract_id.clone()));
     let nav_oracle = env.register(MockOracle, (Asset::Other(eur(&env)), NAV_DECIMALS));
     let oracle = MockOracleClient::new(leak(env.clone()), leak(nav_oracle.clone()));
@@ -4949,8 +4967,9 @@ fn opening_a_repo_touches_a_constant_number_of_entries() {
     let (read, written) = constant_open_footprint(&f, offer_id, "no fallback");
     // Version 2 read 17 entries and wrote 9. Extending the instance alone
     // (`storage::bump_instance`) no longer reads the code entry: 16. The
-    // fallback check costs a fund without fallback nothing.
-    assert_eq!((read, written), (16, 9));
+    // fallback check costs a fund without fallback nothing. Run from its
+    // WASM (WASM test mode), the contract's code entry is read to run it.
+    assert_eq!((read, written), (16 + CODE_ENTRY, 9));
 }
 
 /// The same with a fallback feed: the footprint grows by the fallback's own
@@ -4962,7 +4981,7 @@ fn opening_a_repo_with_a_fallback_touches_a_constant_number_of_entries() {
     publish_on(&f, &feed, NAV_EUR_8);
     let (read, written) = constant_open_footprint(&f, offer_id, "with a fallback");
     // The fallback's entry and its oracle's instance.
-    assert_eq!((read, written), (18, 9));
+    assert_eq!((read, written), (18 + CODE_ENTRY, 9));
 }
 
 /// Opens 152 repos and checks the second and the last touch the same number
@@ -5213,7 +5232,8 @@ fn snapshot(f: &Fixture, offers: &[u64], repos: &[u64]) -> Snapshot {
 /// proposes the release WASM, waits for the time delay (S7), then switches
 /// the contract to it. Every value survives, and the WASM, now
 /// running in the VM, still serves the open repos, opens new ones and refuses
-/// an intruder's upgrade.
+/// an intruder's upgrade. In the WASM test mode the contract already runs
+/// the release WASM, and the same path installs the same code.
 #[cfg(night_window_wasm)]
 #[test]
 fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
@@ -5249,9 +5269,14 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
     // Decision S7: the upgrade is proposed, waits for its delay, and only
     // then can the governor apply it.
     let hash = f.env.deployer().upload_contract_wasm(NIGHT_WINDOW_WASM);
-    let native = executable_hash(&f.env, &f.contract_id);
-    assert!(native.is_some());
-    assert_ne!(native, Some(hash.to_array()));
+    let initial = executable_hash(&f.env, &f.contract_id);
+    assert!(initial.is_some());
+    if cfg!(night_window_test_wasm) {
+        assert_eq!(initial, Some(hash.to_array()));
+    } else {
+        // A natively compiled contract has a pseudo hash.
+        assert_ne!(initial, Some(hash.to_array()));
+    }
     f.client.propose_upgrade(&hash);
     assert_eq!(f.env.auths()[0].0, f.governor);
     assert_eq!(
@@ -5259,7 +5284,7 @@ fn upgrade_to_the_built_wasm_keeps_offers_repos_and_roles() {
         Err(Ok(raised(Error::TimelockPending)))
     );
     advance(&f, DEFAULT_TIMELOCK_SECS);
-    assert_eq!(executable_hash(&f.env, &f.contract_id), native);
+    assert_eq!(executable_hash(&f.env, &f.contract_id), initial);
     // The NAV feed kept publishing during the delay.
     publish_nav(&f, NAV_EUR);
 
@@ -5456,7 +5481,7 @@ mod integration {
         let steward = Address::generate(&env);
         let lender = Address::generate(&env);
         let borrower = Address::generate(&env);
-        let contract_id = env.register(OpenWindow, (governor.clone(),));
+        let contract_id = register_open_window(&env, &governor);
         let client = OpenWindowClient::new(leak(env.clone()), leak(contract_id.clone()));
 
         let shares = env.register(
@@ -6291,7 +6316,7 @@ fn sole_lender_mode_leaves_the_offer_footprint_unchanged() {
     assert_eq!((without.0, without.1), (with.0, with.1));
     // With one fund listed: 10 entries. The approval read carries the
     // steward that granted it, so no attestation is read (rc2, second review).
-    assert_eq!((with.0, with.1), (10, 5));
+    assert_eq!((with.0, with.1), (10 + CODE_ENTRY, 5));
     std::println!(
         "create_offer footprint: {} entries read, {} written, with or without a sole lender",
         with.0,

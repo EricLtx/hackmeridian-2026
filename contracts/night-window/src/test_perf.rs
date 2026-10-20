@@ -6,9 +6,14 @@
 //!
 //! cargo test -p night-window --lib test_perf -- --nocapture --test-threads=1
 //!
-//! The figures are the host's model: deterministic, the same on every run,
-//! and the basis of what a transaction declares and pays. Nothing asserts on
-//! them except the per-transaction ceilings the default test host enforces.
+//! The figures are the host's model: deterministic, the same on every run.
+//! They are not what a transaction declares. A transaction declares the
+//! RPC's simulation of the network path, padded, and that path costs 17 to
+//! 20 % more than the bench before the padding: the network decodes every
+//! ledger entry it loads, which the test host keeps decoded. `check_budget`
+//! asserts a real-time budget on every measured call: 12 million
+//! instructions, 12 entries written, 8,192 bytes written and 2,048 bytes of
+//! events.
 #![cfg(all(test, night_window_wasm))]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -393,17 +398,27 @@ fn memory_layout(wasm: &[u8]) -> (i64, i64) {
     (pages, stack)
 }
 
-/// The stack build.rs sizes: 64 KiB, first in linear memory, 2 pages in all.
+/// The stack build.rs sizes, first in linear memory, then at most one page
+/// of data: 64 KiB and 2 pages in all, as shipped. In the WASM test mode, the
+/// size build.rs was given (`NIGHT_WINDOW_STACK_SIZE`), such as the 8 KiB of
+/// the CI canary; out of it, a size left set in the environment when the
+/// release WASM was built fails here.
 #[test]
 fn test_perf_wasm_memory_is_sized() {
+    const PAGE: i64 = 64 * 1024;
+    let expected: i64 = if cfg!(night_window_test_wasm) {
+        env!("NIGHT_WINDOW_STACK_BYTES").parse().unwrap()
+    } else {
+        64 * 1024
+    };
     let (pages, stack) = memory_layout(NIGHT_WINDOW_WASM);
     assert_eq!(
-        stack,
-        64 * 1024,
-        "the stack pointer starts at the top of a 64 KiB stack"
+        stack, expected,
+        "the stack pointer starts at the top of a {expected}-byte stack"
     );
+    let stack_pages = expected / PAGE + i64::from(expected % PAGE != 0);
     assert!(
-        pages <= 2,
+        pages <= stack_pages + 1,
         "the module starts with {pages} pages of linear memory"
     );
 }

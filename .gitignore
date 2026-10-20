@@ -1,5 +1,6 @@
-# Rust's output directory
+# Rust's output directory, and the stack canary's (CI job wasm-canary)
 target
+target-canary
 
 # Local settings
 .soroban

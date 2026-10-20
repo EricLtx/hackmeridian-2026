@@ -42,6 +42,38 @@ jobs:
       - name: Test
         run: cargo test
 
+  wasm-canary:
+    # The contract's whole test suite run in the VM, against a WASM linked
+    # with an 8 KiB stack instead of the 64 KiB it ships with (WASM test
+    # mode, contracts/night-window/build.rs). The suite passes with 2 KiB and
+    # fails with 1 KiB, so a change that deepens the stack fails here long
+    # before it nears the shipped margin. A target directory of its own keeps
+    # this WASM apart from the release one.
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target-canary
+      NIGHT_WINDOW_STACK_SIZE: "8192"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: ". -> target-canary"
+      # The action derives the CLI version from the action ref; a SHA pin would
+      # yield a non-existent release, so the version is passed explicitly.
+      - uses: stellar/stellar-cli@c0f4d0da891bbf214c08b8c5035ae6db80e9a3bd # v28.1.0
+        with:
+          version: 28.1.0
+      # Every member: the real-time profile also runs the share token's and
+      # the feed's WASM.
+      - name: Build the WASM with an 8 KiB stack
+        run: stellar contract build
+      - name: Test against that WASM
+        run: cargo test -p night-window
+        env:
+          NIGHT_WINDOW_TEST_WASM: "1"
+
   web:
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     defaults:
