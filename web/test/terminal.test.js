@@ -2,7 +2,7 @@
 // blanks that panel only, never the whole screen (WEB-5). No network and no
 // browser: a stand-in chain and a small stand-in DOM.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createTerminal } from "../src/terminal.js";
@@ -63,7 +63,7 @@ const offer = { id: 1, lender: G, stablecoin: dep.contracts.stablecoin, availabl
  * and a stand-in DOM; `run` gets `$` and runs the assertions once the
  * positions panel has drawn its table.
  */
-async function withTerminal(readRepos, run) {
+async function withTerminal(readRepos, run, overrides = {}) {
   const elements = new Map();
   const $ = (id) => {
     if (!elements.has(id)) elements.set(id, element(id));
@@ -83,6 +83,7 @@ async function withTerminal(readRepos, run) {
     pendingRelease: async () => null,
     contractEvents: async () => ({ events: [], nextLedger: 10 }),
     pendingChanges: async () => ({}),
+    ...overrides,
   };
   const S = {
     dep,
@@ -115,7 +116,7 @@ async function withTerminal(readRepos, run) {
   try {
     terminal.mount();
     for (let wait = 0; wait < 40 && !$("t-pos").innerHTML.includes("<table"); wait += 1) await new Promise((resolve) => setTimeout(resolve, 5));
-    await run($);
+    await run($, terminal);
   } finally {
     terminal.unmount();
     globalThis.document = realDocument;
@@ -153,4 +154,33 @@ test("a repo the scan could not read is counted in the positions panel, and the 
       assert.doesNotMatch($("t-band").innerHTML, /cannot show/);
     },
   );
+});
+
+test("a tracked open repo whose re-read fails keeps its last reading and is counted, as the guided view counts it (WEB-5)", async () => {
+  // The first scan reads repo 1; the next passes start past it, and its own read then fails (a field missing from the answer).
+  const repo = repoOf({ id: 1 });
+  let reads = 0;
+  const warn = mock.method(console, "warn", () => {});
+  try {
+    await withTerminal(
+      async (from) => ({ repos: from === 1 ? [repo] : [], unreadable: [] }),
+      async ($, terminal) => {
+        assert.match($("t-pos").innerHTML, /#1/);
+        assert.doesNotMatch($("t-pos-meta").textContent, /could not be read/);
+        await terminal.refresh({ force: true });
+        assert.ok(reads >= 1, "the open repo was read again");
+        assert.match($("t-pos").innerHTML, /#1/, "its last reading stays");
+        assert.match($("t-pos-meta").textContent, /1 open · 1 repo could not be read$/);
+        assert.ok(warn.mock.calls.some((c) => /repo #1 could not be read again: missing repo\.principal/.test(c.arguments.join(" "))));
+      },
+      {
+        repo: async () => {
+          reads += 1;
+          throw new TypeError("missing repo.principal from the chain");
+        },
+      },
+    );
+  } finally {
+    warn.mock.restore();
+  }
 });

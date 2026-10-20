@@ -173,8 +173,16 @@ export function createTerminal(ctx) {
     for (const id of unreadable) m.unreadable.add(id);
     const freshIds = new Set(fresh.map((r) => r.id));
     const stale = [...m.repos.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
-    for (const r of await Promise.all(stale.map((x) => S.chain.repo(x.id).catch(() => null)))) {
+    // One that cannot be read again keeps its last reading and is counted, as the guided view counts it.
+    const again = await Promise.all(stale.map((x) => S.chain.repo(x.id).then((r) => ({ id: x.id, r }), (error) => ({ id: x.id, error }))));
+    for (const { id, r, error } of again) {
+      if (error) {
+        console.warn(`repo #${id} could not be read again: ${error?.message ?? error}`);
+        m.unreadable.add(id);
+        continue;
+      }
       if (!r) continue;
+      m.unreadable.delete(id);
       if (r.status !== "Open") m.toCheck.add(r.id);
       m.repos.set(r.id, r);
     }

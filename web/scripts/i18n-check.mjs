@@ -127,9 +127,11 @@ export function tagsOf(s) {
   const tags = found
     .filter(([, slash, name, rest]) => slash || (rest ?? "").trim() || ALWAYS_TAGS.has(name.toLowerCase()) || closed.has(name.toLowerCase()))
     .map((m) => m[0].replace(/\s+/g, " "));
-  // What is left once every complete tag is removed holds no `>`: an open `<letter` there never ends.
-  const rest = text.replace(/<(\/?)([A-Za-z][^\s/>]*)([\s/][^>]*)?>/g, " ");
-  for (const m of rest.matchAll(/<\/?[A-Za-z][^\s/<]*/g)) tags.push(`${m[0]}…`);
+  // A comment or a processing instruction is markup too, complete or not.
+  for (const m of text.matchAll(/<!--[^]*?-->|<\?[^>]*>/g)) tags.push(m[0].replace(/\s+/g, " "));
+  // What is left once every complete tag is removed holds no `>`: an open `<letter`, `<!--` or `<?` there never ends.
+  const rest = text.replace(/<!--[^]*?-->|<\?[^>]*>/g, " ").replace(/<(\/?)([A-Za-z][^\s/>]*)([\s/][^>]*)?>/g, " ");
+  for (const m of rest.matchAll(/<(?:\/?[A-Za-z][^\s/<]*|!--|\?)/g)) tags.push(`${m[0]}…`);
   return tags.sort().join(" ");
 }
 

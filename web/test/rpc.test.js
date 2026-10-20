@@ -467,6 +467,41 @@ test("an endpoint that answers HTTP 429 to everything is left after three in a r
   assert.equal(bursty.rpcInfo().host, "bursty.example");
 });
 
+test("calls that come back to an endpoint start its count of 429 polls again: one 429 poll after the return moves nothing, three do", async () => {
+  let polls = 0;
+  let aHealth = async () => {
+    polls += 1;
+    throw tooManyWith("0");
+  };
+  const a = fake("a.example", { getHealth: () => aHealth(), simulateTransaction: never });
+  const b = fake("b.example", { getHealth: healthAt(100), simulateTransaction: never });
+  const chain = chainWith(a, b);
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(`${change.reason}:${change.to}`);
+  // Two 429 polls on a, then a call that times out: calls move to b.
+  await chain.checkHeights();
+  await chain.checkHeights();
+  assert.equal(polls, 2);
+  assert.equal(chain.rpcInfo().host, "a.example");
+  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 2 }), RpcTimeout);
+  assert.equal(chain.rpcInfo().host, "b.example");
+  // b fails too while a rests: the calls come back to a by net()'s own return.
+  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 2 }), RpcTimeout);
+  assert.equal(chain.rpcInfo().host, "a.example");
+  assert.deepEqual(changes, ["timeout:b.example", "timeout:a.example"]);
+  // b's rest is over by now; a answers its poll with a 429 once: no move.
+  b.failedAt = Date.now() - 2 * RETURN_QUIET_MS;
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "a.example", "one 429 poll after the return");
+  assert.equal(changes.length, 2);
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "a.example", "two");
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "b.example", "three in a row");
+  assert.equal(changes[2], "rate-limited:b.example");
+  aHealth = healthAt(100);
+});
+
 test("a Retry-After longer than a timeout leaves the endpoint at the first 429; with every other endpoint resting, the call keeps waiting instead", async () => {
   let busyCalls = 0;
   const busy = (retryAfter) =>

@@ -160,7 +160,25 @@ test("a tag a translation leaves unterminated is a tag too: the markup that foll
   // Complete tags around it are still read on their own; a `<` that starts no tag name is text.
   assert.equal(tagsOf("Dernier : <code>{hash}</code>.<b style=\"x\""), "</code> <b… <code>");
   assert.equal(tagsOf("a < b, 1 <2 and <> or <-"), "");
+  assert.equal(tagsOf("1 < 2"), "");
   assert.equal(tagsOf("Q <shares> [FUND]"), "");
+  // The parser reads `a<b` as a tag start too, whatever comes before the `<`: it is listed, not read as text.
+  assert.equal(tagsOf("a<b"), "<b…");
+  // A comment or a processing instruction left open swallows the markup that follows; complete, it is markup the source does not have.
+  for (const markup of [
+    "Chaque chiffre est lu sur la chaîne.<!-- ",
+    "Chaque chiffre est lu sur la chaîne.<!--",
+    "Chaque chiffre est lu sur la chaîne.<?php",
+    "Chaque chiffre est lu sur la chaîne.<?",
+    "Chaque chiffre est lu sur la chaîne.<!-- caché -->",
+    "Chaque chiffre est lu sur la chaîne.<?xml version=\"1.0\"?>",
+  ]) {
+    assert.notEqual(tagsOf(markup), tagsOf(source), markup);
+  }
+  assert.equal(tagsOf("x<!-- y"), "<!--…");
+  assert.equal(tagsOf("x<?y"), "<?…");
+  assert.equal(tagsOf("x<!-- y -->"), "<!-- y -->");
+  assert.equal(tagsOf("<!-- a --><!-- b"), "<!-- a --> <!--…");
 });
 
 test("tc picks the entry of its context, then the plain entry, then English", async () => {

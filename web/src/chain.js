@@ -695,10 +695,16 @@ export class Chain {
     return (from + 1) % count;
   }
 
-  /** Sends calls to endpoint `index` from `now` on: the time counts for its rest if it fails soon after (`restAfterFailure`). */
+  /**
+   * Sends calls to endpoint `index` from `now` on: the time counts for its
+   * rest if it fails soon after (`restAfterFailure`). Its count of 429
+   * polls starts again: what it answered before calls left it is no reason
+   * to leave it again on one 429.
+   */
   moveTo(index, now = Date.now()) {
     this.active = index;
     this.endpoints[index].returnedAt = now;
+    this.endpoints[index].limitedPolls = 0;
   }
 
   /**
