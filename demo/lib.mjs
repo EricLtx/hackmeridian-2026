@@ -85,6 +85,43 @@ export const server = servers.length === 1
       };
     },
   });
+/** Each endpoint's own client, in `RPC_URLS` order (the offline tests stub them). */
+export const rpcServers = servers;
+
+/** An endpoint other than the active one, for a second reading of what an action rests on: its index, or null with a single endpoint. */
+export function secondEndpoint() {
+  const other = servers.findIndex((_, i) => i !== activeRpc);
+  return other < 0 ? null : other;
+}
+
+/**
+ * Reads through one endpoint only, bypassing the failover: the second
+ * reading that must agree with the first before the monitor acts (rpc-2).
+ * Simulations come from the null account, like `read`.
+ */
+export function endpointClient(index) {
+  const client = servers[index];
+  const readHere = async (contractId, fn, args = []) => {
+    const sim = await net(() => client.simulateTransaction(simulationTx(null, contractId, fn, args)), "read");
+    if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+    return scValToNative(sim.result.retval);
+  };
+  return {
+    url: RPC_URLS[index],
+    read: readHere,
+    async probe(contractId, fn, args = []) {
+      try {
+        await readHere(contractId, fn, args);
+        return null;
+      } catch (error) {
+        if (error instanceof ContractError) return error;
+        throw error;
+      }
+    },
+    latestLedger: () => net(() => client.getLatestLedger(), "ledger"),
+    ledgerEntries: (keys) => ledgerEntries(keys, client),
+  };
+}
 
 /** Reflector fiat FX feed on testnet (base USD, 14 decimals, 5-minute ticks). */
 export const REFLECTOR_FX_TESTNET = "CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W";

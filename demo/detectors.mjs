@@ -116,7 +116,7 @@ export const DETECTORS = {
         const { name } = f.priceError;
         const fromFeed = name.includes(":") || name === "HostError";
         if (fromFeed || PRICE_REFUSALS.includes(name)) {
-          out.push({ level: "critical", message: `the contract refuses the fund price: ${name}${fromFeed ? " (raised inside the valuation: the price feed fails)" : ""}${tag(s, f)}`, action: "pause" });
+          out.push({ level: "critical", message: `the contract refuses the fund price: ${name}${fromFeed ? " (raised inside the valuation: the price feed fails)" : ""}${tag(s, f)}`, action: "pause", ground: { type: "price", fund: f.shares, stablecoin: f.stablecoin } });
         } else {
           out.push({ level: "critical", message: `the price probe is refused with ${name}, which is not a price refusal${tag(s, f)}`, action: "check the fund's settings and the stablecoin registry: the probe quotes in the fund's stablecoin" });
         }
@@ -210,7 +210,7 @@ export const DETECTORS = {
       }
       balanced(`shares:${f.shares}`);
       if (held < owed) {
-        out.push({ threat: "DoS.5", level: "critical", message: `${accounts}: ${owed - held} units apart, shares missing (invariant I2)${tag(s, f)}`, action: "pause", fund: f.shares });
+        out.push({ threat: "DoS.5", level: "critical", message: `${accounts}: ${owed - held} units apart, shares missing (invariant I2)${tag(s, f)}`, action: "pause", fund: f.shares, ground: { type: "shares", fund: f.shares } });
       }
     }
     // Invariant I1, per stablecoin: the contract's balance against what the offers hold.
@@ -225,7 +225,7 @@ export const DETECTORS = {
       }
       balanced(`coin:${c.token}`);
       if (c.held < c.owed) {
-        out.push({ threat: "DoS.8", level: "critical", message: `${c.label}: the contract holds ${units(c.held, 7, 7)}, its offers ${units(c.owed, 7, 7)}: ${c.owed - c.held} units short (invariant I1)`, action: "pause", token: c.token });
+        out.push({ threat: "DoS.8", level: "critical", message: `${c.label}: the contract holds ${units(c.held, 7, 7)}, its offers ${units(c.owed, 7, 7)}: ${c.owed - c.held} units short (invariant I1)`, action: "pause", token: c.token, ground: { type: "coin", token: c.token } });
       }
     }
     // Deferred deliveries. A release that would return false is a waiting
@@ -261,12 +261,15 @@ export const DETECTORS = {
     for (const e of s.events.filter((ev) => ev.name === "steward_recovery_proposed")) {
       out.push({ level: "critical", message: `steward recovery proposed at ledger ${e.ledger}`, action: "tell the issuer; its steward key cancels it if the key is not lost", tx: e.txHash });
     }
-    // A governor handover waits for the delay since version 4; the guardian can veto it meanwhile.
+    // A governor handover waits for the delay since version 4; the guardian
+    // can veto it meanwhile. One announced beforehand (`--announce-admin=`)
+    // is a warning and is never vetoed.
     for (const e of s.events.filter((ev) => ev.name === "admin_proposed" || ev.name === "admin_changed")) {
+      const announced = e.name === "admin_proposed" && (monitor.announcedAdmins ?? []).includes(String(e.data?.proposed ?? ""));
       out.push({
-        level: "critical",
-        message: `${e.name === "admin_proposed" ? "governor handover proposed" : "governor changed"} at ledger ${e.ledger}`,
-        action: e.name === "admin_proposed" ? "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay and keys are rotated" : "verify; if unexpected, treat as a key compromise",
+        level: announced ? "warning" : "critical",
+        message: `${e.name === "admin_proposed" ? "governor handover proposed" : "governor changed"} at ledger ${e.ledger}${announced ? " (announced)" : ""}`,
+        action: announced ? "verify before it applies" : e.name === "admin_proposed" ? "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay and keys are rotated" : "verify; if unexpected, treat as a key compromise",
         tx: e.txHash,
       });
     }
@@ -274,11 +277,13 @@ export const DETECTORS = {
       out.push({ level: "warning", message: `the fund's steward has no registered backup: a lost key could never be replaced${tag(s, f)}`, action: "ask the issuer to call set_steward_backup" });
     }
     // The one change the guardian cannot veto: 30 days to react, from now.
+    // Announced beforehand (`--announce-guardian=`), the trustee does not veto it.
     for (const e of s.events.filter((ev) => ev.name === "guardian_change_forced")) {
+      const announced = (monitor.announcedGuardians ?? []).includes(String(e.data?.guardian ?? ""));
       out.push({
-        level: "critical",
-        message: `forced guardian change at ledger ${e.ledger}: the governor (with the trustee's consent, when one is named) replaces the guardian at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(0, 16) : "?"} UTC`,
-        action: "veto_forced",
+        level: announced ? "warning" : "critical",
+        message: `forced guardian change at ledger ${e.ledger}: the governor (with the trustee's consent, when one is named) replaces the guardian at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(0, 16) : "?"} UTC${announced ? " (announced)" : ""}`,
+        action: announced ? "verify before it applies" : "veto_forced",
         tx: e.txHash,
       });
     }
@@ -304,6 +309,28 @@ export const DETECTORS = {
       out.push({ level: "critical", message: `contract code changed: ${monitor.wasmHash.slice(0, 12)} to ${s.wasmHash.slice(0, 12)}`, action: "verify" });
     }
     return out.map((a) => ({ detector: "privileged", threat: "Elev.2", ...a }));
+  },
+  proposals(s, monitor) {
+    // Alert suppression (rpc-2): the proposals the automatic actions answer
+    // are read from state on every pass, not only from their events. An
+    // event an endpoint dropped, a pass that failed or an action that did
+    // not land no longer hides one: unannounced, it stays critical, with its
+    // action, until it is cancelled, vetoed or applied. The pass that reads
+    // its event reports it there instead.
+    const p = s.pending ?? {};
+    const out = [];
+    const at = (eta) => new Date(Number(eta) * 1000).toISOString().slice(0, 16);
+    const reported = (name) => s.events.some((e) => e.name === name);
+    if (p.upgrade && !(monitor.announced ?? []).includes(p.upgrade.hash) && !reported("upgrade_proposed")) {
+      out.push({ level: "critical", message: `upgrade proposal pending, code ${p.upgrade.hash.slice(0, 12)} (NOT announced), applicable from ${at(p.upgrade.eta)} UTC`, action: "cancel" });
+    }
+    if (p.admin && !(monitor.announcedAdmins ?? []).includes(p.admin.admin) && !reported("admin_proposed")) {
+      out.push({ level: "critical", message: `governor handover to ${p.admin.admin.slice(0, 8)}… pending (NOT announced), acceptable from ${at(p.admin.eta)} UTC`, action: "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay" });
+    }
+    if (p.forcedGuardian && !(monitor.announcedGuardians ?? []).includes(p.forcedGuardian.guardian) && !reported("guardian_change_forced")) {
+      out.push({ level: "critical", message: `forced guardian change to ${p.forcedGuardian.guardian.slice(0, 8)}… pending (NOT announced), applies at ${at(p.forcedGuardian.eta)} UTC`, action: "veto_forced" });
+    }
+    return out.map((a) => ({ detector: "proposals", threat: "Elev.2", ...a }));
   },
   pause(s) {
     const out = s.events
@@ -394,10 +421,23 @@ export const DETECTORS = {
     // more than `rpcLedgerGap` ledgers apart, mean one of them is lagging or
     // not on the same chain. The threat model's STRIDE table has no row for
     // the reading infrastructure; "Infra.1" names it until that row exists.
-    if (!s.rpcHeights) return [];
-    const out = s.rpcHeights
+    //
+    // Heights alone prove nothing about content (rpc-2): the pause flag and
+    // the pending proposals the actions answer are also read on a second
+    // endpoint, and any disagreement is critical. No automatic action rests
+    // on a fact the endpoints do not agree on (monitor.mjs, act).
+    const out = [];
+    if (s.second?.error) {
+      out.push({ level: "warning", message: `second endpoint ${s.second.url} unreadable: ${s.second.error}`, action: "no automatic action can be confirmed meanwhile; check the endpoint" });
+    } else if (s.second) {
+      for (const d of compareFacts(primaryFacts(s), s.second.facts)) {
+        out.push({ level: "critical", message: `RPC endpoints disagree on ${d.fact}: ${s.primaryUrl ?? "the active endpoint"} reads ${d.primary}, ${s.second.url} reads ${d.second}`, action: "a lying, lagging or forked endpoint: nothing automatic rests on this; check both by hand" });
+      }
+    }
+    if (!s.rpcHeights) return out.map((a) => ({ detector: "rpc", threat: "Infra.1", ...a }));
+    out.push(...s.rpcHeights
       .filter((h) => h.error)
-      .map((h) => ({ level: "warning", message: `RPC ${h.url} did not answer getLatestLedger: ${h.error}`, action: "check the endpoint; the pass used another one" }));
+      .map((h) => ({ level: "warning", message: `RPC ${h.url} did not answer getLatestLedger: ${h.error}`, action: "check the endpoint; the pass used another one" })));
     const answered = s.rpcHeights.filter((h) => !h.error);
     if (answered.length >= 2) {
       const top = answered.reduce((a, b) => (b.sequence > a.sequence ? b : a));
@@ -449,53 +489,97 @@ export function detect(s, monitor, ctx) {
 // The automatic actions (`--act`)
 // ---------------------------------------------------------------------------
 
-/** The proposals whose pending state the actions need: monitor.mjs reads only these before `decideActions`. */
-export function factsNeeded(alerts, { keys = {} } = {}) {
-  return {
-    admin: alerts.some((a) => /veto_admin/.test(a.action ?? "")),
-    forcedGuardian: Boolean(keys.trustee) && alerts.some((a) => a.action === "veto_forced"),
-    upgrade: alerts.some((a) => a.action === "cancel"),
-  };
+/**
+ * The pause flag and the pending proposals as plain values, for comparing
+ * two endpoints: a code hash, an address, or null when nothing is pending;
+ * undefined when the read failed (not compared).
+ */
+export function proposalFacts({ paused, upgrade, admin, forcedGuardian } = {}) {
+  const pick = (value, field) => (value === undefined ? undefined : value === null ? null : String(value[field]));
+  return { paused, upgrade: pick(upgrade, "hash"), admin: pick(admin, "admin"), forcedGuardian: pick(forcedGuardian, "guardian") };
+}
+
+/** The facts of the snapshot's own (active) endpoint. */
+export const primaryFacts = (s) => proposalFacts({ paused: s.paused, ...(s.pending ?? {}) });
+
+/** The facts two endpoints read differently: `[{ fact, primary, second }]`. */
+export function compareFacts(primary, second) {
+  const names = { paused: "the pause", upgrade: "the pending upgrade", admin: "the pending governor handover", forcedGuardian: "the pending forced guardian change" };
+  const show = (value) => (value === null ? "nothing" : String(value));
+  return Object.keys(names)
+    .filter((fact) => primary?.[fact] !== undefined && second?.[fact] !== undefined && primary[fact] !== second[fact])
+    .map((fact) => ({ fact: names[fact], primary: show(primary[fact]), second: show(second[fact]) }));
 }
 
 /**
- * The safe automatic actions, in the order they are sent: vetoes, the
- * cancellation of an unannounced upgrade or stablecoin, the pause on a
- * critical alert, the TTL extensions, the reference refresh. `s.pending`
- * holds the proposals read for them (`factsNeeded`); `ctx.actor` is the key
- * that pauses and cancels, `ctx.keys` says which keys this host holds.
- * Returns `{ actions, alerts }`: `alerts` are raised instead of an action.
+ * Records an announcement flag in the monitoring state, so that `--act`
+ * reports the planned change instead of answering it: an upgrade
+ * (`--announce=<wasm hash>`), a stablecoin registration
+ * (`--announce-stablecoin=<C...>`), a governor handover
+ * (`--announce-admin=<address>`) or a forced guardian change
+ * (`--announce-guardian=<address>`). Before the last two existed, nothing
+ * wrote their lists and `--act` vetoed every handover, planned or not.
+ * Returns the line to print, or null without such a flag; throws on an
+ * address `isAddress` refuses.
  */
-export function decideActions(alerts, s, monitor = {}, { actor = "guardian", keys = {} } = {}) {
+export function recordAnnouncement(monitor, args, { isAddress = () => true } = {}) {
+  const flags = [
+    ["--announce=", "announced", "Upgrade", (value) => value.toLowerCase(), () => true],
+    ["--announce-stablecoin=", "announcedStablecoins", "Stablecoin", (value) => value, () => true],
+    ["--announce-admin=", "announcedAdmins", "Governor handover to", (value) => value, isAddress],
+    ["--announce-guardian=", "announcedGuardians", "Forced guardian change to", (value) => value, isAddress],
+  ];
+  for (const [flag, field, what, normalize, valid] of flags) {
+    const raw = args.find((a) => a.startsWith(flag))?.slice(flag.length);
+    if (!raw) continue;
+    if (!valid(raw)) throw new Error(`${flag} takes a G... or C... address, not ${raw}`);
+    const value = normalize(raw);
+    monitor[field] = [...new Set([...(monitor[field] ?? []), value])];
+    return `${what} ${value} recorded as announced.`;
+  }
+  return null;
+}
+
+/**
+ * The safe automatic actions, in the order they are sent: the cancellation
+ * of an unannounced upgrade or stablecoin and the pause first, as the
+ * sentinel needs no other key; then the vetoes; then the keeper's
+ * extensions, reference refresh and releases. `s.pending` holds the
+ * proposals the snapshot read; `ctx.actor` is the key that pauses and
+ * cancels, `ctx.keys` the keys this host holds, `ctx.limits` the thresholds.
+ * Returns `{ actions, alerts }`: `alerts` stand where a key is missing.
+ */
+export function decideActions(alerts, s, monitor = {}, { actor = "guardian", keys = {}, limits = LIMITS } = {}) {
   const actions = [];
+  const raised = [];
   const pending = s.pending ?? {};
-  if (alerts.some((a) => /veto_admin/.test(a.action ?? ""))) {
-    if (pending.admin && !(monitor.announcedAdmins ?? []).includes(pending.admin.admin)) {
-      actions.push({ kind: "veto_admin", role: "guardian", admin: pending.admin.admin });
-    }
-  }
-  if (keys.trustee && alerts.some((a) => a.action === "veto_forced")) {
-    if (pending.forcedGuardian && !(monitor.announcedGuardians ?? []).includes(pending.forcedGuardian.guardian)) {
-      actions.push({ kind: "veto_forced", role: "trustee", guardian: pending.forcedGuardian.guardian });
-    }
-  }
-  if (alerts.some((a) => a.action === "cancel") && pending.upgrade) {
-    actions.push({ kind: "cancel_upgrade", role: actor });
+  const asked = (test) => alerts.some(test);
+  if (asked((a) => a.action === "cancel") && pending.upgrade && !(monitor.announced ?? []).includes(pending.upgrade.hash)) {
+    actions.push({ kind: "cancel_upgrade", role: actor, hash: pending.upgrade.hash });
   }
   // rc4: a stablecoin proposed without an announcement is withdrawn the same way.
-  for (const a of alerts.filter((x) => x.action === "cancel stablecoin" && x.token)) {
-    actions.push({ kind: "cancel_stablecoin", role: actor, token: a.token });
+  for (const token of new Set(alerts.filter((x) => x.action === "cancel stablecoin" && x.token).map((x) => x.token))) {
+    actions.push({ kind: "cancel_stablecoin", role: actor, token });
   }
-  if (!s.paused && alerts.some((a) => a.level === "critical" && a.action === "pause")) {
-    actions.push({ kind: "pause", role: actor });
+  const pauses = alerts.filter((a) => a.level === "critical" && a.action === "pause");
+  if (!s.paused && pauses.length) actions.push({ kind: "pause", role: actor, grounds: pauses.map((a) => a.ground).filter(Boolean) });
+  // A veto needs its key on this host (auth-6): without it, a critical alert
+  // asks a human to veto inside the delay; the other actions go on.
+  if (asked((a) => /veto_admin/.test(a.action ?? "")) && pending.admin && !(monitor.announcedAdmins ?? []).includes(pending.admin.admin)) {
+    if (keys.guardian) actions.push({ kind: "veto_admin", role: "guardian", admin: pending.admin.admin });
+    else raised.push({ detector: "act", threat: "Elev.2", level: "critical", message: `governor handover to ${pending.admin.admin} pending and not announced; this host holds no guardian key`, action: "the guardian vetoes by hand (veto_admin) inside the delay; a planned handover is announced with --announce-admin=" });
+  }
+  if (asked((a) => a.action === "veto_forced") && pending.forcedGuardian && !(monitor.announcedGuardians ?? []).includes(pending.forcedGuardian.guardian)) {
+    if (keys.trustee) actions.push({ kind: "veto_forced", role: "trustee", guardian: pending.forcedGuardian.guardian });
+    else raised.push({ detector: "act", threat: "Elev.2", level: "critical", message: `forced guardian change to ${pending.forcedGuardian.guardian} pending and not announced; this host holds no trustee key`, action: "the trustee vetoes by hand (veto_forced_guardian_change) inside the 30 days; a planned change is announced with --announce-guardian=" });
   }
   const extend = alerts.filter((a) => a.action === "extend" && a.key);
   const small = extend.filter((a) => a.kind !== "code").map((a) => a.key);
-  if (small.length) actions.push({ kind: "extend", keys: small, ledgers: ENTRY_EXTEND_LEDGERS });
+  if (small.length) actions.push({ kind: "extend", keys: small, ledgers: ENTRY_EXTEND_LEDGERS, belowDays: limits.ttlDays });
   // The code entry is large: extend it by 30 days at most per transaction, so
   // its rent stays well under the largest fee a transaction may carry.
   for (const a of extend.filter((x) => x.kind === "code")) {
-    actions.push({ kind: "extend_code", key: a.key, targetDays: Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120) });
+    actions.push({ kind: "extend_code", key: a.key, targetDays: Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120), belowDays: limits.codeTtlDays });
   }
   // rc5: an old price reference is stepped along the model by the keeper.
   for (const a of alerts.filter((x) => x.action === "refresh_reference" && x.fund)) {
@@ -506,5 +590,49 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
   for (const a of alerts.filter((x) => x.action === "release" && x.repoId !== undefined)) {
     actions.push({ kind: "release", repoId: a.repoId });
   }
-  return { actions, alerts: [] };
+  return { actions, alerts: raised };
+}
+
+/** Whether one ground of a pause holds in a second reading. */
+function groundHolds(ground) {
+  if (!ground) return false;
+  if (ground.type === "price") return Boolean(ground.refusal);
+  return ground.held !== undefined && ground.owed !== undefined && BigInt(ground.held) < BigInt(ground.owed);
+}
+
+/**
+ * Whether what a second endpoint read (`seen`, the facts monitor.mjs reads
+ * for each kind of action) supports the action the first endpoint's facts
+ * decided (rpc-2): `{ agree, detail, action }`. Anything the second reading
+ * lacks counts as no. An extension keeps only the entries the second
+ * endpoint also finds short-lived.
+ */
+export function confirmation(action, seen) {
+  const no = (detail) => ({ agree: false, detail, action });
+  const yes = (narrowed = action) => ({ agree: true, detail: "", action: narrowed });
+  switch (action.kind) {
+    case "cancel_upgrade":
+      return hex(seen.pendingUpgrade?.wasm_hash) === action.hash ? yes() : no(`its pending upgrade is ${seen.pendingUpgrade ? hex(seen.pendingUpgrade.wasm_hash).slice(0, 12) : "none"}`);
+    case "cancel_stablecoin":
+      return seen.pendingStablecoin ? yes() : no("no such stablecoin proposal is pending there");
+    case "veto_admin":
+      return seen.pendingAdmin && String(seen.pendingAdmin.admin) === action.admin ? yes() : no(`its pending handover is ${seen.pendingAdmin ? String(seen.pendingAdmin.admin) : "none"}`);
+    case "veto_forced":
+      return seen.pendingForcedGuardian && String(seen.pendingForcedGuardian.guardian) === action.guardian ? yes() : no(`its pending forced change is ${seen.pendingForcedGuardian ? String(seen.pendingForcedGuardian.guardian) : "none"}`);
+    case "pause":
+      return (seen.grounds ?? []).some(groundHolds) ? yes() : no("neither the price refusal nor the deficit is read there");
+    case "extend":
+    case "extend_code": {
+      const keys = action.kind === "extend" ? action.keys : [action.key];
+      const short = keys.filter((_, i) => seen.ttlDays?.[i] === null || seen.ttlDays?.[i] < action.belowDays);
+      if (!short.length) return no(`every entry has ${action.belowDays} days or more to live there`);
+      return yes(action.kind === "extend" ? { ...action, keys: short } : action);
+    }
+    case "refresh_reference":
+      return seen.now - seen.referenceTime > seen.navMaxAge ? yes() : no("the reference is within its NAV age bound there");
+    case "release":
+      return seen.release === true ? yes() : no("the release would not deliver there");
+    default:
+      return no(`no second reading for ${action.kind}`);
+  }
 }

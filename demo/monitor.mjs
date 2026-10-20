@@ -11,26 +11,40 @@
 //   npm run monitor -- --witness     a second watch from another machine:
 //                                    alerts, never acts; own files, own heartbeat
 //
-// A detector never moves funds. The only actions are the guardian's pause,
-// which blocks new entries and never exits, a TTL extension, which anyone
-// may pay for, and a step of a fund's price reference along its model
-// (`refresh_reference`), which anyone may call. Unpausing stays a human
-// decision for the governor.
+// A planned change is announced first, so that --act reports it instead of
+// cancelling or vetoing it:
+//   npm run monitor -- --announce=<wasm hash>          an upgrade proposal
+//   npm run monitor -- --announce-stablecoin=<C...>    a stablecoin registration
+//   npm run monitor -- --announce-admin=<G...>         a governor handover to that address
+//   npm run monitor -- --announce-guardian=<G...>      a forced guardian change to that address
+//
+// A detector never moves funds. The only actions are the sentinel's (or the
+// guardian's) pause, which blocks new entries and never exits, and the
+// cancellation of an unannounced proposal; the guardian's and the
+// trustee's vetoes, only when their key is on this host; and the keeper's
+// TTL extensions, steps of a fund's price reference along its model
+// (`refresh_reference`) and deliveries of owed shares (`release`), which
+// anyone may call. With two endpoints in STELLAR_RPC_URLS, every action is
+// taken only once the second endpoint reads the same facts; otherwise it is
+// a critical alert for a human. Unpausing stays a human decision for the
+// governor.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { Keypair, xdr } from "@stellar/stellar-sdk";
+import { Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import {
   ONE,
   ROOT,
   RPC_URLS,
   STATE_DIR,
   WASM_DIR,
+  activeRpcUrl,
   codeKey,
   asset,
   contractEvents,
   deploy,
+  endpointClient,
   saveState,
   REFLECTOR_FX_TESTNET as REFLECTOR_FX,
   explorer,
@@ -45,12 +59,13 @@ import {
   loadState,
   probe,
   read,
+  secondEndpoint,
   sleep,
   storageKey,
   sv,
 } from "./lib.mjs";
 import { FUND_SETTINGS, navAt } from "./config.mjs";
-import { LEDGER_SECS, LIMITS, decideActions, detect, factsNeeded, labelOf, lenderPairs, statusOf } from "./detectors.mjs";
+import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, statusOf } from "./detectors.mjs";
 
 const args = process.argv.slice(2);
 /** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
@@ -276,11 +291,12 @@ async function readStablecoins(offers) {
 
 async function snapshot(monitor) {
   const now = await ledgerTime();
-  const [paused, repos, offers] = await Promise.all([
+  const [pausedRead, repos, offers] = await Promise.all([
     read(state, C.openWindow, "is_paused"),
     scan("get_repo"),
     scan("get_offer"),
   ]);
+  let paused = pausedRead;
   // One block per admitted fund: settings, state, NAV, shares held, quote probe, steward backup, FX leg.
   const funds = await Promise.all(fundsOf().map(readFund));
   // Caps are per currency: two stablecoins of one currency share one cap.
@@ -358,10 +374,64 @@ async function snapshot(monitor) {
     read(state, C.openWindow, "schema_version").then(Number, () => null),
     read(state, C.openWindow, "sentinel").catch(() => null),
   ]);
+  // The proposals the automatic actions answer, from state on every pass:
+  // a dropped event or a failed action does not hide one (rpc-2).
+  const primaryRead = (contractId, fn, args) => read(state, contractId, fn, args);
+  let pending = await pendingProposals(primaryRead);
+  // The same facts on a second endpoint: they must agree before anything is
+  // done about them. A proposal landing between the two readings is not a
+  // disagreement: the first endpoint is read once more before comparing.
+  const second = await secondFacts(ledger.latest);
+  if (second?.facts && compareFacts(proposalFacts({ paused, ...pending }), second.facts).length) {
+    paused = await read(state, C.openWindow, "is_paused");
+    pending = await pendingProposals(primaryRead);
+  }
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, releases, stablecoins, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel };
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl() };
+}
+
+/**
+ * The pending upgrade, governor handover and forced guardian change, read
+ * through `reader`: null when none is pending, undefined when the read fails
+ * (code older than rc4 has no such function).
+ */
+async function pendingProposals(reader) {
+  const [upgrade, admin, forcedGuardian] = await Promise.all([
+    reader(C.openWindow, "pending_upgrade", []).catch(() => undefined),
+    reader(C.openWindow, "pending_admin", []).catch(() => undefined),
+    reader(C.openWindow, "pending_forced_guardian_change", []).catch(() => undefined),
+  ]);
+  return {
+    upgrade: upgrade ? { hash: hex(upgrade.wasm_hash), eta: Number(upgrade.eta) } : upgrade,
+    admin: admin ? { admin: String(admin.admin), eta: Number(admin.eta) } : admin,
+    forcedGuardian: forcedGuardian ? { guardian: String(forcedGuardian.guardian), eta: Number(forcedGuardian.eta) } : forcedGuardian,
+  };
+}
+
+/** Waits, about 15 s at most, for an endpoint to reach `ledger`; a lagging endpoint then answers from an older ledger. */
+async function caughtUp(client, ledger) {
+  for (let tries = 0; tries < 15; tries += 1) {
+    const { sequence } = await client.latestLedger();
+    if (Number(sequence) >= ledger) return true;
+    await sleep(1_000);
+  }
+  return false;
+}
+
+/** The pause flag and the pending proposals on a second endpoint, once it has reached `latest`; null with a single endpoint. */
+async function secondFacts(latest) {
+  const index = secondEndpoint();
+  if (index === null) return null;
+  const client = endpointClient(index);
+  try {
+    await caughtUp(client, latest);
+    const [paused, proposals] = await Promise.all([client.read(C.openWindow, "is_paused"), pendingProposals(client.read)]);
+    return { url: client.url, facts: proposalFacts({ paused, ...proposals }) };
+  } catch (error) {
+    return { url: client.url, error: firstLine(error) };
+  }
 }
 
 async function pass(monitor, { quiet = false } = {}) {
@@ -389,13 +459,107 @@ function actorRole(s) {
   return s?.sentinel && ours && s.sentinel === ours ? "sentinel" : "guardian";
 }
 
-/** The proposals the decided actions depend on, read only when an alert calls for them. */
-async function readPending(needed) {
-  const pending = {};
-  if (needed.admin) pending.admin = await read(state, C.openWindow, "pending_admin");
-  if (needed.forcedGuardian) pending.forcedGuardian = await read(state, C.openWindow, "pending_forced_guardian_change").catch(() => null);
-  if (needed.upgrade) pending.upgrade = await read(state, C.openWindow, "pending_upgrade");
-  return pending;
+/** An action in a few words, for an alert. */
+function describeAction(action) {
+  const detail = {
+    cancel_upgrade: ` of code ${action.hash?.slice(0, 12)}`,
+    cancel_stablecoin: ` of ${action.token?.slice(0, 8)}…`,
+    veto_admin: ` of the handover to ${action.admin?.slice(0, 8)}…`,
+    veto_forced: ` of the change to ${action.guardian?.slice(0, 8)}…`,
+    extend: ` of ${action.keys?.length} entries`,
+    refresh_reference: ` of ${action.fund?.slice(0, 8)}…`,
+    release: ` of repo #${action.repoId}`,
+  }[action.kind];
+  return `${action.kind}${detail ?? ""}`;
+}
+
+/** One ground of a pause, read again on a second endpoint: the quote's refusal, or what is held against what is owed. */
+async function groundOn(client, ground, s) {
+  try {
+    if (ground.type === "price") {
+      let refusal = null;
+      try {
+        refusal = (await client.probe(C.openWindow, "quote", [sv.address(ground.fund), sv.i128(ONE), sv.address(ground.stablecoin)]))?.name ?? null;
+      } catch (error) {
+        if (!error.simulation) throw error;
+        refusal = "HostError";
+      }
+      return { ...ground, refusal };
+    }
+    if (ground.type === "shares") {
+      let owed = 0n;
+      for (const r of s.openRepos.filter((x) => String(x.fund) === ground.fund)) {
+        const repo = await client.read(C.openWindow, "get_repo", [sv.u64(r.id)]);
+        if (repo && statusOf(repo) === "Open") owed += BigInt(repo.shares);
+      }
+      for (const r of s.releases.filter((x) => String(x.fund) === ground.fund)) {
+        const pendingRelease = await client.read(C.openWindow, "pending_release", [sv.u64(r.id)]);
+        if (pendingRelease) owed += BigInt(pendingRelease.shares);
+      }
+      return { ...ground, held: BigInt(await client.read(ground.fund, "balance", [sv.address(C.openWindow)])), owed };
+    }
+    if (ground.type === "coin") {
+      let owed = 0n;
+      for (const o of (s.offers ?? []).filter((x) => String(x.stablecoin) === ground.token)) {
+        const offer = await client.read(C.openWindow, "get_offer", [sv.u64(o.id)]);
+        if (offer) owed += BigInt(offer.available);
+      }
+      return { ...ground, held: BigInt(await client.read(ground.token, "balance", [sv.address(C.openWindow)])), owed };
+    }
+  } catch (error) {
+    return { ...ground, error: firstLine(error) };
+  }
+  return ground;
+}
+
+/**
+ * Reads again, on a second endpoint, the facts an action rests on, and asks
+ * detectors.mjs whether they agree (rpc-2). One lying or compromised RPC can
+ * then neither trigger a pause, a cancellation or a veto, nor make the
+ * keeper pay for what is not needed.
+ */
+async function secondReading(client, action, s) {
+  await caughtUp(client, s.latest);
+  const seen = {};
+  const owAddress = (value) => sv.address(value);
+  switch (action.kind) {
+    case "cancel_upgrade":
+      seen.pendingUpgrade = await client.read(C.openWindow, "pending_upgrade");
+      break;
+    case "cancel_stablecoin":
+      seen.pendingStablecoin = await client.read(C.openWindow, "pending_stablecoin_change", [owAddress(action.token)]);
+      break;
+    case "veto_admin":
+      seen.pendingAdmin = await client.read(C.openWindow, "pending_admin");
+      break;
+    case "veto_forced":
+      seen.pendingForcedGuardian = await client.read(C.openWindow, "pending_forced_guardian_change");
+      break;
+    case "pause":
+      seen.grounds = await Promise.all(action.grounds.map((ground) => groundOn(client, ground, s)));
+      break;
+    case "extend":
+    case "extend_code": {
+      const read2 = await client.ledgerEntries(action.kind === "extend" ? action.keys : [action.key]);
+      seen.ttlDays = read2.entries.map((e) => (e ? ((e.liveUntil - read2.latest) * LEDGER_SECS) / 86_400 : null));
+      break;
+    }
+    case "refresh_reference": {
+      const [fundState, config, head] = await Promise.all([
+        client.read(C.openWindow, "get_fund_state", [owAddress(action.fund)]),
+        client.read(C.openWindow, "get_fund", [owAddress(action.fund)]),
+        client.latestLedger(),
+      ]);
+      Object.assign(seen, { referenceTime: Number(fundState?.reference_time), navMaxAge: Number(config?.nav_max_age_secs), now: Number(head.closeTime ?? 0) });
+      break;
+    }
+    case "release":
+      seen.release = await client.read(C.openWindow, "release", [sv.u64(action.repoId)]);
+      break;
+    default:
+      break;
+  }
+  return confirmation(action, seen);
 }
 
 /** Sends one decided action; returns the word the rehearsal records. */
@@ -470,15 +634,40 @@ async function perform(action, s) {
   }
 }
 
-/** The safe automatic actions (detectors.mjs decides them): pause on a critical alert, cancel an unannounced upgrade, extend TTLs. */
+/**
+ * The safe automatic actions, decided by detectors.mjs from the alerts and
+ * the snapshot. With a second endpoint configured, each one waits for that
+ * endpoint to read the same facts; otherwise, or when it fails, it becomes a
+ * critical alert and the next action still runs (auth-6, rpc-2). Returns
+ * the words the rehearsal records.
+ */
 async function act(alerts, s, monitor = {}) {
-  const ctx = { actor: actorRole(s), keys: { trustee: Boolean(state.keys.trustee), guardian: Boolean(state.keys.guardian) } };
-  const pending = await readPending(factsNeeded(alerts, ctx));
-  const { actions } = decideActions(alerts, { ...s, pending }, monitor, ctx);
+  const ctx = { actor: actorRole(s), keys: { trustee: Boolean(state.keys.trustee), guardian: Boolean(state.keys.guardian) }, limits: LIMITS };
+  const plan = decideActions(alerts, s, monitor, ctx);
+  const raised = [...plan.alerts];
   const done = [];
-  for (const action of actions) {
-    const word = await perform(action, s);
-    if (word) done.push(word);
+  const index = secondEndpoint();
+  const second = index === null ? null : endpointClient(index);
+  for (const decided of plan.actions) {
+    let action = decided;
+    try {
+      if (second) {
+        const check = await secondReading(second, action, s);
+        if (!check.agree) {
+          raised.push({ detector: "act", threat: "Infra.1", level: "critical", message: `${describeAction(action)} not taken: ${second.url} does not confirm it (${check.detail})`, action: "check both endpoints; act by hand if the condition is real" });
+          continue;
+        }
+        action = check.action;
+      }
+      const word = await perform(action, s);
+      if (word) done.push(word);
+    } catch (error) {
+      raised.push({ detector: "act", threat: "DoS.10", level: "critical", message: `${describeAction(action)} failed: ${firstLine(error)}`, action: "act by hand; the next pass tries again while the condition lasts" });
+    }
+  }
+  for (const a of raised) {
+    console.log(`  ${a.level.toUpperCase().padEnd(8)} ${a.threat.padEnd(9)} ${a.message}  (action: ${a.action})`);
+    fs.appendFileSync(ALERT_FILE, `${JSON.stringify({ at: new Date().toISOString(), ledger: s.latest, ...a })}\n`);
   }
   return done;
 }
@@ -828,22 +1017,22 @@ async function rehearse() {
 async function main() {
   if (REHEARSE) return rehearse();
   const monitor = loadMonitor();
-  // An upgrade announced in advance is reported as a warning, not cancelled.
-  const announce = args.find((a) => a.startsWith("--announce="))?.slice(11);
-  if (announce) {
-    monitor.announced = [...new Set([...(monitor.announced ?? []), announce.toLowerCase()])];
+  // A change announced in advance is reported as a warning, never cancelled
+  // or vetoed: an upgrade, a stablecoin, a governor handover, a forced
+  // guardian change (detectors.mjs, recordAnnouncement).
+  let announcement;
+  try {
+    announcement = recordAnnouncement(monitor, args, { isAddress: (value) => StrKey.isValidEd25519PublicKey(value) || StrKey.isValidContract(value) });
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+  if (announcement) {
     saveMonitor(monitor);
-    console.log(`Upgrade ${announce} recorded as announced.`);
+    console.log(announcement);
     return;
   }
-  const announceToken = args.find((a) => a.startsWith("--announce-stablecoin="))?.slice(22);
-  if (announceToken) {
-    monitor.announcedStablecoins = [...new Set([...(monitor.announcedStablecoins ?? []), announceToken])];
-    saveMonitor(monitor);
-    console.log(`Stablecoin ${announceToken} recorded as announced.`);
-    return;
-  }
-  if (RPC_URLS.length === 1) console.log("single RPC endpoint, no cross-check (set STELLAR_RPC_URLS to compare two)");
+  if (RPC_URLS.length === 1) console.log("single RPC endpoint, no cross-check and no second reading before an action (set STELLAR_RPC_URLS to two)");
   for (;;) {
     try {
       const { s, alerts } = await pass(monitor);

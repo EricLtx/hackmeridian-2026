@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DETECTORS, LIMITS, decideActions, detect, factsNeeded } from "../detectors.mjs";
+import { DETECTORS, LIMITS, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement } from "../detectors.mjs";
 
 const H = 3600;
 const DAY = 86_400;
@@ -311,14 +311,121 @@ test("decideActions: cancellation and extensions follow the alerts, in order", (
   const alerts = [
     { level: "critical", action: "cancel" },
     { level: "critical", action: "cancel stablecoin", token: "CTOKEN" },
+    { level: "critical", action: "cancel stablecoin", token: "CTOKEN" },
     { level: "warning", action: "extend", key: "k1", kind: undefined, days: 3 },
     { level: "warning", action: "extend", key: "kc", kind: "code", days: 89 },
     { level: "warning", action: "refresh_reference", fund: "CF1" },
   ];
-  const s = snap({ pending: { upgrade: { wasm_hash: Buffer.alloc(32), eta: 1n } } });
+  const s = snap({ pending: { upgrade: { hash: "ab".repeat(32), eta: 1 } } });
   const { actions } = decideActions(alerts, s, {}, { actor: "sentinel", keys: {} });
   assert.deepEqual(actions.map((a) => a.kind), ["cancel_upgrade", "cancel_stablecoin", "extend", "extend_code", "refresh_reference"]);
-  assert.equal(actions[0].role, "sentinel");
-  assert.equal(actions[3].targetDays, 119);
-  assert.deepEqual(factsNeeded(alerts), { admin: false, forcedGuardian: false, upgrade: true });
+  assert.deepEqual([actions[0].role, actions[0].hash], ["sentinel", "ab".repeat(32)]);
+  assert.deepEqual([actions[3].targetDays, actions[3].belowDays, actions[2].belowDays], [119, 90, 14]);
+  // An announced code is never cancelled, whatever an event alert asked.
+  assert.deepEqual(decideActions(alerts.slice(0, 1), s, { announced: ["ab".repeat(32)] }, {}).actions, []);
+});
+
+test("decideActions: cancellations and the pause come before vetoes; a veto without its key is a critical alert (auth-6)", () => {
+  const alerts = [
+    { level: "critical", action: "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay" },
+    { level: "critical", action: "veto_forced" },
+    { level: "critical", action: "cancel" },
+    { level: "critical", action: "pause", ground: { type: "price", fund: "CF1", stablecoin: "CEUR" } },
+  ];
+  const s = snap({ pending: { upgrade: { hash: "cd".repeat(32), eta: 1 }, admin: { admin: "GATTACKER", eta: 1 }, forcedGuardian: { guardian: "GOTHER", eta: 1 } } });
+  let plan = decideActions(alerts, s, {}, { actor: "sentinel", keys: { guardian: true, trustee: true } });
+  assert.deepEqual(plan.actions.map((a) => a.kind), ["cancel_upgrade", "pause", "veto_admin", "veto_forced"]);
+  assert.deepEqual(plan.actions[1].grounds, [{ type: "price", fund: "CF1", stablecoin: "CEUR" }]);
+  // The rc4 layout keeps the guardian's and trustee's keys off the monitoring host.
+  plan = decideActions(alerts, s, {}, { actor: "sentinel", keys: {} });
+  assert.deepEqual(plan.actions.map((a) => a.kind), ["cancel_upgrade", "pause"]);
+  assert.deepEqual(plan.alerts.map((a) => [a.level, /veto_admin|veto_forced_guardian_change/.test(a.action)]), [["critical", true], ["critical", true]]);
+});
+
+test("--announce-admin= and --announce-guardian= record a planned change, which is then never vetoed", () => {
+  const alerts = [{ level: "critical", action: "guardian vetoes (veto_admin)" }, { level: "critical", action: "veto_forced" }];
+  const s = snap({ pending: { admin: { admin: "GNEXT", eta: 1 }, forcedGuardian: { guardian: "GNEWGUARD", eta: 1 } } });
+  const keys = { guardian: true, trustee: true };
+  const monitor = {};
+  assert.equal(decideActions(alerts, s, monitor, { keys }).actions.length, 2);
+  const isAddress = (value) => /^[GC][A-Z0-9]+$/.test(value);
+  assert.equal(recordAnnouncement(monitor, ["--watch", "--announce-admin=GNEXT"], { isAddress }), "Governor handover to GNEXT recorded as announced.");
+  assert.equal(recordAnnouncement(monitor, ["--announce-guardian=GNEWGUARD"], { isAddress }), "Forced guardian change to GNEWGUARD recorded as announced.");
+  assert.deepEqual([monitor.announcedAdmins, monitor.announcedGuardians], [["GNEXT"], ["GNEWGUARD"]]);
+  const plan = decideActions(alerts, s, monitor, { keys });
+  assert.deepEqual([plan.actions, plan.alerts], [[], []]);
+  // The older flags keep their meaning; a malformed address is refused; no flag, no change.
+  assert.equal(recordAnnouncement(monitor, ["--announce=ABCD"]), "Upgrade abcd recorded as announced.");
+  assert.equal(recordAnnouncement(monitor, ["--announce-stablecoin=CTOKEN"]), "Stablecoin CTOKEN recorded as announced.");
+  assert.throws(() => recordAnnouncement(monitor, ["--announce-admin=not-an-address"], { isAddress }), /takes a G\.\.\. or C\.\.\. address/);
+  assert.equal(recordAnnouncement(monitor, ["--watch"]), null);
+});
+
+test("privileged: an announced handover and an announced forced change are warnings", () => {
+  const events = [
+    { name: "admin_proposed", ledger: 3, txHash: "t3", topics: ["GNOW"], data: { proposed: "GNEXT" } },
+    { name: "guardian_change_forced", ledger: 4, txHash: "t4", data: { guardian: "GNEWGUARD", eta: BigInt(NOW + DAY) } },
+  ];
+  const monitor = { announcedAdmins: ["GNEXT"], announcedGuardians: ["GNEWGUARD"] };
+  const out = run("privileged", snap({ events }), monitor).filter((a) => !/verify before it applies/.test(a.action) || /announced/.test(a.message));
+  assert.deepEqual(out.map((a) => [a.level, /announced/.test(a.message)]), [["warning", true], ["warning", true]]);
+  assert.deepEqual(run("privileged", snap({ events })).filter((a) => a.level === "critical").length, 2);
+});
+
+test("proposals: an unannounced proposal read from state stays critical on every pass until it is gone", () => {
+  const pending = { upgrade: { hash: "ef".repeat(32), eta: NOW + 300 }, admin: { admin: "GATTACKERXXXX", eta: NOW + 300 }, forcedGuardian: { guardian: "GOTHERGUARDIAN", eta: NOW + 30 * DAY } };
+  // Its event dropped by a lying endpoint, or read by a pass that failed: the state still shows it.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const out = run("proposals", snap({ pending }));
+    assert.deepEqual(out.map((a) => a.level), ["critical", "critical", "critical"]);
+    assert.deepEqual([out[0].action, /veto_admin/.test(out[1].action), out[2].action], ["cancel", true, "veto_forced"]);
+  }
+  // Announced, or reported by its own event in this pass: nothing more.
+  const monitor = { announced: ["ef".repeat(32)], announcedAdmins: ["GATTACKERXXXX"], announcedGuardians: ["GOTHERGUARDIAN"] };
+  assert.deepEqual(run("proposals", snap({ pending }), monitor), []);
+  const events = [{ name: "upgrade_proposed" }, { name: "admin_proposed" }, { name: "guardian_change_forced" }];
+  assert.deepEqual(run("proposals", snap({ pending, events })), []);
+  assert.deepEqual(run("proposals", snap({ pending: { upgrade: null, admin: undefined } })), []);
+});
+
+test("rpc: two endpoints that read the pause or a proposal differently raise a critical alert", () => {
+  const pending = { upgrade: { hash: "aa".repeat(32), eta: 1 }, admin: null, forcedGuardian: undefined };
+  const same = { url: "https://two", facts: proposalFacts({ paused: false, ...pending }) };
+  assert.deepEqual(run("rpc", snap({ pending, second: same })), []);
+  const other = { url: "https://two", facts: proposalFacts({ paused: true, upgrade: null, admin: { admin: "GX" }, forcedGuardian: { guardian: "GY" } }) };
+  const out = run("rpc", snap({ pending, second: other, primaryUrl: "https://one" }));
+  assert.deepEqual(out.map((a) => a.level), ["critical", "critical", "critical"]);
+  assert.match(out[0].message, /disagree on the pause: https:\/\/one reads false, https:\/\/two reads true/);
+  assert.match(out[1].message, /the pending upgrade: .* reads a{64}, .* reads nothing/);
+  // A fact one side could not read is not compared; an unreadable endpoint warns.
+  assert.deepEqual(compareFacts({ paused: undefined, forcedGuardian: "GY" }, { paused: true, forcedGuardian: undefined }), []);
+  assert.equal(run("rpc", snap({ second: { url: "https://two", error: "timeout" } }))[0].level, "warning");
+});
+
+test("confirmation: an action goes ahead only on the second endpoint's own reading (rpc-2)", () => {
+  const hash = Buffer.alloc(32, 1);
+  const cancel = { kind: "cancel_upgrade", hash: hash.toString("hex") };
+  assert.equal(confirmation(cancel, { pendingUpgrade: { wasm_hash: hash } }).agree, true);
+  assert.equal(confirmation(cancel, { pendingUpgrade: { wasm_hash: Buffer.alloc(32, 2) } }).agree, false);
+  assert.equal(confirmation(cancel, { pendingUpgrade: null }).agree, false);
+  assert.equal(confirmation({ kind: "cancel_stablecoin", token: "C" }, { pendingStablecoin: { currency: "EUR", eta: 1n } }).agree, true);
+  assert.equal(confirmation({ kind: "cancel_stablecoin", token: "C" }, { pendingStablecoin: null }).agree, false);
+  assert.equal(confirmation({ kind: "veto_admin", admin: "GA" }, { pendingAdmin: { admin: "GA" } }).agree, true);
+  assert.equal(confirmation({ kind: "veto_admin", admin: "GA" }, { pendingAdmin: { admin: "GB" } }).agree, false);
+  assert.equal(confirmation({ kind: "veto_forced", guardian: "GA" }, { pendingForcedGuardian: null }).agree, false);
+  const pause = { kind: "pause", grounds: [] };
+  assert.equal(confirmation(pause, { grounds: [{ type: "price", refusal: null }, { type: "shares", held: 20n, owed: 20n }] }).agree, false);
+  assert.equal(confirmation(pause, { grounds: [{ type: "price", refusal: "StalePrice" }] }).agree, true);
+  assert.equal(confirmation(pause, { grounds: [{ type: "coin", held: 9n, owed: 10n }] }).agree, true);
+  assert.equal(confirmation(pause, { grounds: [{ type: "shares", error: "timeout" }] }).agree, false);
+  const extend = { kind: "extend", keys: ["a", "b", "c"], belowDays: 14 };
+  const narrowed = confirmation(extend, { ttlDays: [3, 30, null] });
+  assert.deepEqual([narrowed.agree, narrowed.action.keys], [true, ["a", "c"]]);
+  assert.equal(confirmation(extend, { ttlDays: [30, 30, 30] }).agree, false);
+  assert.equal(confirmation(extend, {}).agree, false);
+  assert.equal(confirmation({ kind: "extend_code", key: "k", belowDays: 90 }, { ttlDays: [89] }).agree, true);
+  assert.equal(confirmation({ kind: "refresh_reference", fund: "CF" }, { now: 1000, referenceTime: 100, navMaxAge: 800 }).agree, true);
+  assert.equal(confirmation({ kind: "refresh_reference", fund: "CF" }, { now: 1000, referenceTime: 300, navMaxAge: 800 }).agree, false);
+  assert.equal(confirmation({ kind: "release", repoId: 1 }, { release: true }).agree, true);
+  assert.equal(confirmation({ kind: "release", repoId: 1 }, { release: false }).agree, false);
 });
