@@ -19,6 +19,7 @@ import path from "node:path";
 import {
   Operation,
   STATE_DIR,
+  UPLOAD_MAX_FEE,
   WASM_DIR,
   explorer,
   invoke,
@@ -87,10 +88,11 @@ async function propose() {
     return null;
   }
   // The upload needs a funded account, not a role: the operator pays it.
-  await send(state, "operator", Operation.uploadContractWasm({ wasm }), "upload night_window.wasm");
+  await send(state, "operator", Operation.uploadContractWasm({ wasm }), "upload night_window.wasm", { maxResourceFee: UPLOAD_MAX_FEE });
   // The proposal takes the governor and, when named, the trustee: both keys
   // are in the demo state, so the authorization entries are signed here.
-  const r = await invoke(state, "governor", ow, "propose_upgrade", [sv.bytes(hash)]);
+  // The trustee is declared: a key signs only what its call expects (rpc-1).
+  const r = await invoke(state, "governor", ow, "propose_upgrade", [sv.bytes(hash)], { cosigners: ["trustee"] });
   announce(hex);
   const pending = await read(state, ow, "pending_upgrade");
   const eta = Number(pending.eta);
@@ -120,7 +122,7 @@ async function apply(hash) {
   const version = Number(await read(state, ow, "schema_version"));
   const expected = await expectedSchema();
   if (version < expected) {
-    const m = await invoke(state, "governor", ow, "migrate", []);
+    const m = await invoke(state, "governor", ow, "migrate", [], { cosigners: ["trustee"] });
     console.log(`migrated schema ${version} -> ${await read(state, ow, "schema_version")} in ${m.seconds.toFixed(1)} s  ${explorer(m.hash)}`);
   } else {
     console.log(`schema ${version}: nothing to migrate`);

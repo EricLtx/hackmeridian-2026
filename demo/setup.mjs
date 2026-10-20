@@ -48,6 +48,7 @@ import {
   saveState,
   WASM_DIR,
   codeKey,
+  CODE_SLICE_MAX_FEE,
   extendTtl,
   sleep,
   sv,
@@ -216,7 +217,7 @@ async function main() {
     const wasm = fs.readFileSync(path.join(WASM_DIR, "night_window.wasm"));
     const hash = crypto.createHash("sha256").update(wasm).digest();
     if (!state.keys.keeper) throw new Error("no keeper key: rerun setup from the Accounts step");
-    const r = await extendTtl(state, "keeper", [codeKey(hash)], 30 * 17_280);
+    const r = await extendTtl(state, "keeper", [codeKey(hash)], 30 * 17_280, { maxResourceFee: CODE_SLICE_MAX_FEE });
     console.log(`  code ${hash.toString("hex").slice(0, 12)}… extended, fee ${(Number(r.fee ?? 0n) / 1e7).toFixed(2)} XLM`);
   });
 
@@ -257,7 +258,7 @@ async function main() {
     await invoke(state, "governor", ow, "set_sole_lender", [sv.address(pub("provider"))]);
     console.log(`  sole lender (mode D3): the provider ${pub("provider").slice(0, 8)}…`);
     // The guardian may only hand its role to this backup, registered by governor and guardian together.
-    await invoke(state, "governor", ow, "set_guardian_backup", [sv.address(pub("guardianBackup"))]);
+    await invoke(state, "governor", ow, "set_guardian_backup", [sv.address(pub("guardianBackup"))], { cosigners: ["guardian"] });
     console.log("  guardian backup registered by the governor and the guardian");
     // The trustee co-signs every upgrade and forced guardian change and can
     // veto them: fixed during bootstrap, independent of the other roles.
@@ -371,7 +372,8 @@ async function main() {
     // The declaration (eligibility, independence from the fund) lives off chain; its hash is signed by both.
     for (const role of ["provider", "lender"]) {
       const declaration = crypto.createHash("sha256").update(`demo declaration of ${pub(role)} for ${shares}`).digest();
-      await invoke(state, role, ow, "attest_lender", [sv.address(shares), sv.address(pub(role)), sv.bytes(declaration)]);
+      // The steward on record co-signs: declared, since a key signs only what its call expects.
+      await invoke(state, role, ow, "attest_lender", [sv.address(shares), sv.address(pub(role)), sv.bytes(declaration)], { cosigners: ["steward"] });
       await invoke(state, "steward", ow, "approve_lender", [sv.address(shares), sv.address(pub(role)), sv.bool(true)]);
     }
     console.log("  provider: attested and approved, the instance's sole lender");
@@ -545,7 +547,7 @@ async function secondFund(state, ow, shares, teur) {
   console.log(`  NAV feed (EUR)   ${state.contracts.navOracle2}`);
   const shares2 = state.contracts.shares2;
 
-  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4)", async () => {
+  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4, applied by the governor from rc5)", async () => {
     const token = sv.address(state.contracts.euro2);
     await invoke(state, "governor", ow, "set_stablecoin", [token, sv.symbol("EUR")]);
     // From rc4 a registration after the first admission is a proposal (S29).
@@ -554,8 +556,11 @@ async function secondFund(state, ow, shares, teur) {
       const wait = Math.max(0, Number(pending.eta) - (await ledgerTime()));
       console.log(`  proposed; applying it after the time delay (${Math.ceil(wait / 60)} min)`);
       while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
-      await invoke(state, "operator2", ow, "apply_stablecoin_change", [token]);
-      console.log("  applied by a third party after the delay");
+      // Since rc5 only the current governor applies it (auth-3): a proposal
+      // left by a governor since replaced can no longer be applied by anyone.
+      // On rc4 code anyone may, the governor included.
+      await invoke(state, "governor", ow, "apply_stablecoin_change", [token]);
+      console.log("  applied by the governor after the delay");
     }
     console.log("  two stablecoins now share the EUR cap");
   });
@@ -610,7 +615,7 @@ async function secondFund(state, ow, shares, teur) {
 
   await once(state, "secondLenders", "Second fund: the provider is attested and approved by the second issuer", async () => {
     const declaration = crypto.createHash("sha256").update(`demo declaration of ${pub("provider")} for ${shares2}`).digest();
-    await invoke(state, "provider", ow, "attest_lender", [sv.address(shares2), sv.address(pub("provider")), sv.bytes(declaration)]);
+    await invoke(state, "provider", ow, "attest_lender", [sv.address(shares2), sv.address(pub("provider")), sv.bytes(declaration)], { cosigners: ["steward2"] });
     await invoke(state, "steward2", ow, "approve_lender", [sv.address(shares2), sv.address(pub("provider")), sv.bool(true)]);
     console.log("  provider approved on both funds, by each fund's own issuer");
   });
@@ -744,7 +749,7 @@ async function thirdFund(state, ow, shares, teur) {
 
   await once(state, "thirdLenders", "Third fund: the provider is attested and approved by the issuer", async () => {
     const declaration = crypto.createHash("sha256").update(`demo declaration of ${pub("provider")} for ${shares3}`).digest();
-    await invoke(state, "provider", ow, "attest_lender", [sv.address(shares3), sv.address(pub("provider")), sv.bytes(declaration)]);
+    await invoke(state, "provider", ow, "attest_lender", [sv.address(shares3), sv.address(pub("provider")), sv.bytes(declaration)], { cosigners: ["issuer3"] });
     await invoke(state, "issuer3", ow, "approve_lender", [sv.address(shares3), sv.address(pub("provider")), sv.bool(true)]);
     console.log("  provider approved on the third fund by its issuer");
   });

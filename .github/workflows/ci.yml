@@ -11,11 +11,15 @@ permissions:
 
 # Third-party actions are pinned to a full commit SHA (the tag is a comment).
 # Dependabot (.github/dependabot.yml) proposes the bumps as reviewable PRs.
+# No job pushes: every checkout leaves the token out of the git config
+# (persist-credentials: false), so no later step or dependency can reuse it.
 jobs:
   contracts:
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -55,6 +59,8 @@ jobs:
       NIGHT_WINDOW_STACK_SIZE: "8192"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -81,23 +87,62 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Install (exact versions from the lockfile)
-        run: npm ci
+      # No package of the bundle needs an install script (only the optional
+      # fsevents has one): a compromised release cannot run code at install.
+      - name: Install (exact versions from the lockfile, no install scripts)
+        run: npm ci --ignore-scripts
+      # The bundle asks visitors for signatures: a runtime dependency with a
+      # known high or critical advisory stops the build (web-5).
+      - name: Advisories on the runtime dependencies
+        run: npm audit --omit=dev --audit-level=high
       - name: Build
         run: npm run build
       # Unit tests only: the testnet tests need the demo keys and run locally.
       - name: Test
         run: npm test
 
+  tooling:
+    # The monitor's detectors and actions, the demo library's checks before
+    # signing, and the indexer: offline tests on stubbed chain reads, no key.
+    # The testnet scripts themselves (setup, run, the rehearsal) run locally.
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            demo/package-lock.json
+            indexer/package-lock.json
+      - name: Install the demo (exact versions, no install scripts)
+        working-directory: demo
+        run: npm ci --ignore-scripts
+      - name: Test the demo
+        working-directory: demo
+        run: npm test
+      - name: Install the indexer (exact versions, no install scripts)
+        working-directory: indexer
+        run: npm ci --ignore-scripts
+      - name: Test the indexer
+        working-directory: indexer
+        run: npm test
+
   deny:
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # Licences, advisories, sources and duplicate versions (deny.toml).
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -111,6 +156,8 @@ jobs:
       issues: write # audit-check opens an issue when an advisory lands
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: RustSec advisories on Cargo.lock
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
@@ -124,6 +171,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Markdown links (offline)
         uses: lycheeverse/lychee-action@885c65f3dc543b57c898c8099f4e08c8afd178a2 # v2.6.1
         with:

@@ -14,7 +14,8 @@
     "fxlog": "node fxlog.mjs",
     "keys": "node keys.mjs",
     "upgrade": "node upgrade.mjs",
-    "inventory": "node inventory.mjs"
+    "inventory": "node inventory.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=20"

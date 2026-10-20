@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  Account,
   Address,
   Asset,
   Keypair,
@@ -22,6 +23,7 @@ import {
   StrKey,
   TransactionBuilder,
   authorizeEntry,
+  hash,
   nativeToScVal,
   rpc,
   scValToNative,
@@ -83,6 +85,46 @@ export const server = servers.length === 1
       };
     },
   });
+/** Each endpoint's own client, in `RPC_URLS` order (the offline tests stub them). */
+export const rpcServers = servers;
+
+/** An endpoint other than the active one, for a second reading of what an action rests on: its index, or null with a single endpoint. */
+export function secondEndpoint() {
+  const other = servers.findIndex((_, i) => i !== activeRpc);
+  return other < 0 ? null : other;
+}
+
+/**
+ * Reads through one endpoint only, bypassing the failover: the second
+ * reading that must agree with the first before the monitor acts (rpc-2).
+ * Simulations come from the null account, like `read`.
+ */
+export function endpointClient(index) {
+  const client = servers[index];
+  const readHere = async (contractId, fn, args = []) => {
+    const sim = await net(() => client.simulateTransaction(simulationTx(null, contractId, fn, args)), "read");
+    if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+    return scValToNative(sim.result.retval);
+  };
+  return {
+    url: RPC_URLS[index],
+    read: readHere,
+    async probe(contractId, fn, args = []) {
+      try {
+        await readHere(contractId, fn, args);
+        return null;
+      } catch (error) {
+        if (error instanceof ContractError) return error;
+        throw error;
+      }
+    },
+    latestLedger: () => net(() => client.getLatestLedger(), "ledger"),
+    /** `{ oldestLedger, latestLedger, ... }`: the ledgers this endpoint keeps. */
+    health: () => net(() => client.getHealth(), "health"),
+    ledgerEntries: (keys) => ledgerEntries(keys, client),
+    events: (contractId, startLedger) => contractEvents(contractId, startLedger, client),
+  };
+}
 
 /** Reflector fiat FX feed on testnet (base USD, 14 decimals, 5-minute ticks). */
 export const REFLECTOR_FX_TESTNET = "CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W";
@@ -163,10 +205,15 @@ export class ContractError extends Error {
 /**
  * Decodes the contract error of a failed simulation. The diagnostic log lists
  * events newest first; the oldest error event names the contract where the
- * error started (a token refusing a transfer inside `open_repo`, say).
+ * error started (a token refusing a transfer inside `open_repo`, say). The
+ * error carries `simulation: true`: the call ran and failed, which a caller
+ * tells apart from an RPC it could not reach.
  */
 function simulationError(sim) {
-  const text = sim.error ?? "";
+  return Object.assign(decodeSimulationError(sim.error ?? ""), { simulation: true });
+}
+
+function decodeSimulationError(text) {
   // The surfaced code heads the message. Error events are listed newest first:
   // the oldest event carrying that same code names the contract it came from.
   // An error a contract caught (a refused `try_transfer`) carries another code
@@ -329,6 +376,11 @@ export function keypair(state, role) {
   return Keypair.fromSecret(secret);
 }
 
+/** The public key of a role, or null when this host holds no key for it. */
+export function publicKeyOf(state, role) {
+  return state.keys?.[role] ? keypair(state, role).publicKey() : null;
+}
+
 /**
  * The keys that sign for a role. A role turned into a native multisig
  * account (`state.multisig[role]`, set by `setup -- --multisig`) needs every
@@ -426,9 +478,29 @@ export const ONE = 10_000_000n;
 // Transactions
 // ---------------------------------------------------------------------------
 
+/** The inclusion fee every transaction bids, in stroops; the resource fee comes on top. */
+const INCLUSION_FEE = "2000000";
+
+/**
+ * The most a simulation may ask in resource fees before anything is signed:
+ * 25 XLM, as the web interface (web/src/chain.js). Legitimate calls cost
+ * about 1 XLM on testnet; the caps below are for the two writes that pay
+ * rent on a large entry.
+ */
+export const MAX_RESOURCE_FEE = 250_000_000n;
+/**
+ * One 30-day slice of the contract code entry: about 215 XLM of rent at the
+ * testnet rate measured on 20 October 2026 (7.15 XLM a day for the 1.88 MB
+ * the network counts for the code). 300 XLM leaves 40 % for the rate to
+ * rise and stays under the 429 XLM a transaction fee can carry.
+ */
+export const CODE_SLICE_MAX_FEE = 3_000_000_000n;
+/** An upload creates the code entry with the network's minimum time to live: about 50 XLM for night_window.wasm on testnet. */
+export const UPLOAD_MAX_FEE = 1_000_000_000n;
+
 async function build(sourcePublicKey, operation) {
   const account = await net(() => server.getAccount(sourcePublicKey), "account");
-  return new TransactionBuilder(account, { fee: "2000000", networkPassphrase: PASSPHRASE })
+  return new TransactionBuilder(account, { fee: INCLUSION_FEE, networkPassphrase: PASSPHRASE })
     .addOperation(operation)
     .setTimeout(TX_VALIDITY_SECS)
     .build();
@@ -460,6 +532,182 @@ function credentialAddress(entry) {
   return Address.fromScAddress(ADDRESS_ARMS[credentials.type](credentials).address).toString();
 }
 
+// ---------------------------------------------------------------------------
+// What a simulation may ask before anything is signed (rpc-1)
+// ---------------------------------------------------------------------------
+//
+// The RPC answers the simulation, and the simulation decides what is signed:
+// the authorization entries, the footprint (with the entries to restore) and
+// the resource fee. A hostile or compromised endpoint could slip in an entry
+// for another call, signed with a role key and replayed elsewhere, or a
+// footprint and a fee that drain the paying account. Each is checked against
+// what the operation itself is; anything else is refused before a signature.
+
+/** The value of an XDR union's arm, whatever its name. */
+const armOf = (union) => union[Object.keys(union).find((key) => key !== "type")];
+
+/** The authorized function that stands for each host function. */
+const AUTHORIZED_FOR = {
+  hostFunctionTypeInvokeContract: "sorobanAuthorizedFunctionTypeContractFn",
+  hostFunctionTypeCreateContract: "sorobanAuthorizedFunctionTypeCreateContractHostFn",
+  hostFunctionTypeCreateContractV2: "sorobanAuthorizedFunctionTypeCreateContractV2HostFn",
+};
+
+/** Whether an authorized function is exactly the operation's own call, arguments included. */
+function isOwnCall(authorized, func) {
+  return AUTHORIZED_FOR[func.type] === authorized.type && armOf(authorized).toXDR("base64") === armOf(func).toXDR("base64");
+}
+
+/** A short name of an authorized function, for messages. */
+function describeCall(authorized) {
+  const call = armOf(authorized);
+  if (authorized.type === "sorobanAuthorizedFunctionTypeContractFn") return `${Address.fromScAddress(call.contractAddress).toString().slice(0, 8)}….${String(call.functionName)}`;
+  return "a contract creation";
+}
+
+/** Every address an ScVal carries, at any depth. */
+function addressesIn(value, out = new Set()) {
+  if (!value) return out;
+  if (value.type === "scvAddress") out.add(Address.fromScAddress(value.address).toString());
+  else if (value.type === "scvVec") for (const item of value.vec ?? []) addressesIn(item, out);
+  else if (value.type === "scvMap") for (const entry of value.map ?? []) addressesIn(entry.val, addressesIn(entry.key, out));
+  return out;
+}
+
+/** The contract a creation makes: sha256 of its id preimage on this network. */
+function createdContract(call) {
+  const preimage = xdr.HashIdPreimage.envelopeTypeContractId(new xdr.HashIdPreimageContractId({ networkId: hash(Buffer.from(PASSPHRASE)), contractIdPreimage: call.contractIdPreimage }));
+  return StrKey.encodeContract(hash(preimage.toXDR()));
+}
+
+/** The addresses an operation names: the contract it calls or creates, its arguments, its deployer. */
+function operationAddresses(func) {
+  const out = new Set();
+  const call = armOf(func);
+  if (func.type === "hostFunctionTypeInvokeContract") {
+    out.add(Address.fromScAddress(call.contractAddress).toString());
+    for (const arg of call.args) addressesIn(arg, out);
+  } else if (func.type === "hostFunctionTypeCreateContract" || func.type === "hostFunctionTypeCreateContractV2") {
+    out.add(createdContract(call));
+    for (const arg of call.constructorArgs ?? []) addressesIn(arg, out);
+    if (call.contractIdPreimage.type === "contractIdPreimageFromAddress") out.add(Address.fromScAddress(call.contractIdPreimage.fromAddress.address).toString());
+  }
+  return out;
+}
+
+/** The role a local key holds for an address, for messages. */
+function roleOf(state, address) {
+  const role = Object.keys(state.keys ?? {}).find((r) => publicKeyOf(state, r) === address);
+  return role ? `${role} (${address.slice(0, 6)}…)` : address;
+}
+
+/**
+ * The addresses expected to authorize an operation: its source, the
+ * addresses it names, and the co-signers the caller declares (a role the
+ * contract has on record, such as the steward for `propose_fallback`).
+ */
+export function expectedSigners(state, sourceRole, func, cosigners = []) {
+  const expected = operationAddresses(func);
+  expected.add(keypair(state, sourceRole).publicKey());
+  for (const role of cosigners) {
+    const address = publicKeyOf(state, role);
+    if (address) expected.add(address);
+  }
+  return expected;
+}
+
+/**
+ * Refuses an authorization entry that is not for the operation's own call,
+ * or an address-credential entry for an address the operation does not
+ * expect. A signature over another call could be replayed in a transaction
+ * the RPC builds (rpc-1); one from an unexpected role is never needed.
+ */
+export function checkAuthEntries(state, entries, func, expected, label) {
+  for (const entry of entries) {
+    const root = entry.rootInvocation.function;
+    if (!isOwnCall(root, func)) {
+      throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; nothing signed (rpc-1)`);
+    }
+    if (isAddressCredential(entry)) {
+      const address = credentialAddress(entry);
+      if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; nothing signed (rpc-1)`);
+    }
+  }
+}
+
+/** The Soroban data of an assembled transaction: footprint, resources, resource fee. */
+function sorobanDataOf(tx) {
+  const ext = tx.toEnvelope().value.tx.ext;
+  if (ext.type !== "sorobanData") throw new Error("not a Soroban transaction");
+  return ext.value;
+}
+
+/** What a footprint key names, or null when it is an entry `known` allows to write. */
+function foreignWrite(key, known) {
+  if (key.type === "contractCode") return known.code?.has(Buffer.from(key.contractCode.hash.toXDR()).toString("hex")) ? null : "a contract's code";
+  if (key.type === "contractData") {
+    const owner = Address.fromScAddress(key.contractData.contract).toString();
+    return known.addresses.has(owner) ? null : `data of ${owner}`;
+  }
+  if (key.type === "account" || key.type === "trustline") {
+    const accountId = key.type === "account" ? key.account.accountId : key.trustLine.accountId;
+    const owner = Address.fromScAddress(xdr.ScAddress.scAddressTypeAccount(accountId)).toString();
+    return known.addresses.has(owner) ? null : `the ${key.type} of ${owner}`;
+  }
+  return `a ${key.type} entry`;
+}
+
+/**
+ * Refuses a footprint that writes, or restores, an entry the operation does
+ * not touch: an invocation writes only the data of this deployment's
+ * contracts, of the contracts and accounts it names and of the local roles
+ * (balances, trustlines, signature nonces), never contract code; an upload
+ * writes only the code it uploads. Restoring a stranger's archived entry is
+ * how a simulation makes the payer buy rent it never needed.
+ */
+export function checkFootprint(state, ready, func, expected, label) {
+  const known = { addresses: new Set(expected) };
+  for (const id of Object.values(state.contracts ?? {})) if (typeof id === "string" && id.startsWith("C")) known.addresses.add(id);
+  for (const role of Object.keys(state.keys ?? {})) known.addresses.add(publicKeyOf(state, role));
+  // The SDK's hash() returns a Uint8Array: hex through a Buffer.
+  if (func.type === "hostFunctionTypeUploadContractWasm") known.code = new Set([Buffer.from(hash(Buffer.from(func.wasm))).toString("hex")]);
+  for (const key of sorobanDataOf(ready).resources.footprint.readWrite) {
+    const why = foreignWrite(key, known);
+    if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; nothing signed (rpc-1)`);
+  }
+}
+
+/**
+ * Refuses an extension whose footprint is not exactly the requested keys,
+ * read-only, with nothing to restore: the simulation chooses which entries
+ * the keeper pays to extend, and a swapped footprint (another contract's
+ * code, say) is rent the keeper never meant to pay (rpc-1).
+ */
+export function checkExtendFootprint(ready, keys, label) {
+  const data = sorobanDataOf(ready);
+  const asked = new Set(keys.map((k) => k.toXDR("base64")));
+  const { readOnly, readWrite } = data.resources.footprint;
+  const got = new Set(readOnly.map((k) => k.toXDR("base64")));
+  const restores = data.ext.type === "v0" ? [] : armOf(data.ext).archivedSorobanEntries ?? [];
+  if (readWrite.length || restores.length || got.size !== asked.size || [...got].some((k) => !asked.has(k))) {
+    throw new Error(`${label}: the simulation extends other entries than the ${keys.length} asked; nothing signed (rpc-1)`);
+  }
+}
+
+/**
+ * Refuses a transaction whose resource fee is above `cap`, or whose total fee
+ * is anything but the inclusion bid plus that resource fee: the fee signed is
+ * the fee checked.
+ */
+export function checkFee(ready, cap, label) {
+  const resourceFee = BigInt(sorobanDataOf(ready).resourceFee.toString());
+  const beyondInclusion = BigInt(ready.fee) - BigInt(INCLUSION_FEE);
+  if (resourceFee > cap || beyondInclusion > cap || beyondInclusion !== resourceFee) {
+    const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
+    throw new Error(`${label}: the simulation asks ${xlm(beyondInclusion > resourceFee ? beyondInclusion : resourceFee)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; nothing signed (rpc-1)`);
+  }
+}
+
 /** Signs every address-credential entry with the matching local key. */
 async function signAuth(state, entries) {
   const { sequence } = await net(() => server.getLatestLedger(), "ledger");
@@ -480,52 +728,87 @@ async function signAuth(state, entries) {
  * Returns `{ value, raw, hash, seconds, total, fee }`: the decoded return
  * value, the transaction hash, the seconds from submission to confirmation,
  * the seconds including simulation and signing, and the fee in stroops.
+ *
+ * Before anything is signed, the simulation must authorize only this call,
+ * by its source, the addresses it names and the declared `cosigners`; write
+ * only entries the call touches; and ask at most `maxResourceFee` (25 XLM by
+ * default). Otherwise it throws and nothing leaves this machine.
  */
-export async function send(state, sourceRole, operation, label = sourceRole) {
+export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE } = {}) {
   const begun = Date.now();
   const source = keypair(state, sourceRole);
   let tx = await build(source.publicKey(), operation);
+  const func = tx.operations[0].func;
+  const expected = expectedSigners(state, sourceRole, func, cosigners);
   let sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
 
   const recorded = normalizeAuth(sim.result?.auth);
+  checkAuthEntries(state, recorded, func, expected, label);
   if (recorded.some(isAddressCredential)) {
     const signed = await signAuth(state, recorded);
-    const func = tx.operations[0].func;
     tx = await build(source.publicKey(), Operation.invokeHostFunction({ func, auth: signed }));
     sim = await net(() => server.simulateTransaction(tx), "simulate");
     if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   }
 
   const ready = rpc.assembleTransaction(tx, sim).build();
+  // The assembled transaction keeps our entries when we signed some, else it
+  // takes the simulation's: check what is actually there.
+  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label);
+  checkFootprint(state, ready, func, expected, label);
+  checkFee(ready, maxResourceFee, label);
   signTx(state, sourceRole, ready);
-  const { result, hash, seconds, fee } = await submit(ready, label);
+  const { result, hash: txHash, seconds, fee } = await submit(ready, label);
   return {
     value: result.returnValue ? scValToNative(result.returnValue) : undefined,
     raw: result.returnValue,
-    hash,
+    hash: txHash,
     seconds,
     total: (Date.now() - begun) / 1000,
     fee,
   };
 }
 
-/** Calls a contract function in a transaction. */
-export function invoke(state, sourceRole, contractId, fn, args = []) {
+/**
+ * Calls a contract function in a transaction. `options.cosigners` names the
+ * roles the contract requires besides the source and the addresses in
+ * `args` (the steward on record for `propose_fallback`, the trustee for
+ * `propose_upgrade`...); `options.maxResourceFee` raises the fee cap.
+ */
+export function invoke(state, sourceRole, contractId, fn, args = [], options = {}) {
   const operation = Operation.invokeContractFunction({ contract: contractId, function: fn, args });
-  return send(state, sourceRole, operation, `${sourceRole} ${fn}`);
+  return send(state, sourceRole, operation, `${sourceRole} ${fn}`, options);
 }
 
-/** Simulates a contract call and returns the decoded value, or throws. */
-export async function read(state, contractId, fn, args = [], sourceRole = "governor") {
-  const source = keypair(state, sourceRole);
-  const tx = await build(source.publicKey(), Operation.invokeContractFunction({ contract: contractId, function: fn, args }));
-  const sim = await net(() => server.simulateTransaction(tx), "read");
+/**
+ * The source of a simulation that needs no account: an all-zero key nobody
+ * holds, as web/src/chain.js uses. A read then needs no role key on the host
+ * (the monitoring host keeps no governor secret) and no `getAccount` call.
+ */
+export const NULL_ACCOUNT = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+/** A call to simulate, from `sourcePublicKey` or the null account; never signed, never sent. */
+function simulationTx(sourcePublicKey, contractId, fn, args) {
+  return new TransactionBuilder(new Account(sourcePublicKey ?? NULL_ACCOUNT, "0"), { fee: "100", networkPassphrase: PASSPHRASE })
+    .addOperation(Operation.invokeContractFunction({ contract: contractId, function: fn, args }))
+    .setTimeout(0)
+    .build();
+}
+
+/**
+ * Simulates a contract call and returns the decoded value, or throws. The
+ * source is the null account unless a role is named: no key is needed to
+ * read, and the answer does not depend on who asks.
+ */
+export async function read(state, contractId, fn, args = [], sourceRole = null) {
+  const source = sourceRole ? keypair(state, sourceRole).publicKey() : null;
+  const sim = await net(() => server.simulateTransaction(simulationTx(source, contractId, fn, args)), "read");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   return scValToNative(sim.result.retval);
 }
 
-/** Simulates a call from `sourceRole` and reports the contract error it would hit, if any. */
+/** Simulates a call (from `sourceRole`, or the null account when it is null) and reports the contract error it would hit, if any. */
 export async function probe(state, sourceRole, contractId, fn, args = []) {
   try {
     await read(state, contractId, fn, args, sourceRole);
@@ -547,7 +830,7 @@ export async function classic(state, sourceRole, operation) {
 /** Uploads a WASM file and deploys it with constructor arguments. */
 export async function deploy(state, sourceRole, wasmFile, constructorArgs) {
   const wasm = fs.readFileSync(path.join(WASM_DIR, wasmFile));
-  const upload = await send(state, sourceRole, Operation.uploadContractWasm({ wasm }), `upload ${wasmFile}`);
+  const upload = await send(state, sourceRole, Operation.uploadContractWasm({ wasm }), `upload ${wasmFile}`, { maxResourceFee: UPLOAD_MAX_FEE });
   const wasmHash = Buffer.from(upload.value);
   const created = await send(
     state,
@@ -597,12 +880,29 @@ export function codeKey(hash) {
   return xdr.LedgerKey.contractCode(new xdr.LedgerKeyContractCode({ hash: bytes }));
 }
 
-/** Reads ledger entries: `{ latest, entries: [{ liveUntil, value }] }`, null for a missing entry. */
-export async function ledgerEntries(keys) {
-  const response = await net(() => server.getLedgerEntries(...keys), "ledger entries");
-  const byKey = new Map(response.entries.map((e) => [e.key.toXDR("base64"), e]));
+/** The most keys one `getLedgerEntries` call takes: the RPC refuses the 201st (live check, 20 October 2026). */
+export const LEDGER_KEYS_PER_CALL = 200;
+
+/**
+ * Reads ledger entries: `{ latest, entries: [{ liveUntil, value }] }`, null
+ * for a missing entry, in the order of `keys`. The keys go out in calls of at
+ * most 200, so a growing number of positions never makes the read fail
+ * (econ-3); `latest` is the highest ledger the calls answered at, which
+ * errs towards a shorter time to live. `client` defaults to the failover
+ * client; `endpointClient` passes one endpoint's.
+ */
+export async function ledgerEntries(keys, client = server) {
+  const byKey = new Map();
+  let latest = null;
+  for (let start = 0; start < keys.length; start += LEDGER_KEYS_PER_CALL) {
+    const chunk = keys.slice(start, start + LEDGER_KEYS_PER_CALL);
+    const response = await net(() => client.getLedgerEntries(...chunk), "ledger entries");
+    latest = Math.max(latest ?? 0, Number(response.latestLedger));
+    for (const e of response.entries) byKey.set(e.key.toXDR("base64"), e);
+  }
+  if (latest === null) latest = Number((await net(() => client.getLatestLedger(), "ledger")).sequence);
   return {
-    latest: response.latestLedger,
+    latest,
     entries: keys.map((k) => {
       const e = byKey.get(k.toXDR("base64"));
       return e ? { liveUntil: e.liveUntilLedgerSeq, value: e.val } : null;
@@ -610,11 +910,16 @@ export async function ledgerEntries(keys) {
   };
 }
 
-/** Extends the time to live of persistent entries to `ledgers` from now. Anyone may pay for it. */
-export async function extendTtl(state, sourceRole, keys, ledgers) {
+/**
+ * Extends the time to live of persistent entries to `ledgers` from now.
+ * Anyone may pay for it. The simulation must keep exactly these keys and ask
+ * at most `maxResourceFee` (25 XLM; `CODE_SLICE_MAX_FEE` for the code entry).
+ */
+export async function extendTtl(state, sourceRole, keys, ledgers, { maxResourceFee = MAX_RESOURCE_FEE } = {}) {
+  const label = `${sourceRole} extend TTL`;
   const source = keypair(state, sourceRole);
   const account = await net(() => server.getAccount(source.publicKey()), "account");
-  const tx = new TransactionBuilder(account, { fee: "2000000", networkPassphrase: PASSPHRASE })
+  const tx = new TransactionBuilder(account, { fee: INCLUSION_FEE, networkPassphrase: PASSPHRASE })
     .addOperation(Operation.extendFootprintTtl({ extendTo: ledgers }))
     .setSorobanData(new SorobanDataBuilder().setReadOnly(keys).build())
     .setTimeout(TX_VALIDITY_SECS)
@@ -622,9 +927,11 @@ export async function extendTtl(state, sourceRole, keys, ledgers) {
   const sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   const ready = rpc.assembleTransaction(tx, sim).build();
+  checkExtendFootprint(ready, keys, label);
+  checkFee(ready, maxResourceFee, label);
   signTx(state, sourceRole, ready);
-  const { hash, seconds, fee } = await submit(ready, `${sourceRole} extend TTL`);
-  return { hash, seconds, fee };
+  const { hash: txHash, seconds, fee } = await submit(ready, label);
+  return { hash: txHash, seconds, fee };
 }
 
 /**
@@ -649,25 +956,42 @@ export async function latestLedgers(timeoutMs = 10_000) {
   }));
 }
 
-/** Contract events since `startLedger`, decoded: `{ ledger, name, topics, data, txHash, id }`; `id` is the RPC event id, the key of the indexer's journal. */
-export async function contractEvents(contractId, startLedger) {
+/** Pages of events one read may fetch: a week of ledgers needs about 13 empty ones, and every 200 events one more. */
+const EVENT_PAGES = 1_000;
+
+/**
+ * Contract events since `startLedger`, decoded: `{ ledger, name, topics,
+ * data, txHash, id }`; `id` is the RPC event id, the key of the indexer's
+ * journal. The array also carries `startLedger`, where the read began (the
+ * RPC's oldest ledger when the one asked is past its retention), and
+ * `reachedLedger`, the last ledger it covered: the next read starts after it.
+ */
+export async function contractEvents(contractId, startLedger, client = server) {
   const out = [];
   let cursor;
-  for (let page = 0; page < 20; page += 1) {
+  let start = startLedger;
+  let reached = null;
+  for (let page = 0; page < EVENT_PAGES; page += 1) {
     const request = cursor
       ? { filters: [{ type: "contract", contractIds: [contractId] }], cursor, limit: 200 }
-      : { filters: [{ type: "contract", contractIds: [contractId] }], startLedger, limit: 200 };
+      : { filters: [{ type: "contract", contractIds: [contractId] }], startLedger: start, limit: 200 };
     let response;
     try {
-      response = await net(() => server.getEvents(request), "events");
+      response = await net(() => client.getEvents(request), "events");
     } catch (error) {
       // The public RPC keeps a window of events it announces in this error
       // (sometimes well under a day): start from its oldest ledger instead.
       const range = /startLedger must be within the ledger range: (\d+) - (\d+)/.exec(error.message ?? "");
-      if (!cursor && range && Number(range[1]) > startLedger) {
-        startLedger = Number(range[1]);
+      if (!cursor && range && Number(range[1]) > start) {
+        start = Number(range[1]);
         page -= 1;
         continue;
+      }
+      // Asked from a ledger this endpoint has not reached yet (a pass right
+      // after the last one, a lagging endpoint): nothing to read so far.
+      if (!cursor && range && Number(range[2]) < start) {
+        reached = start - 1;
+        break;
       }
       throw error;
     }
@@ -681,12 +1005,22 @@ export async function contractEvents(contractId, startLedger) {
     // latest ledger (the cursor is `<toid>-<index>`, ledger in the toid's
     // top 32 bits).
     const next = response.cursor;
-    if (!next || next === cursor) break;
+    const latest = response.latestLedger ? Number(response.latestLedger) : null;
+    if (!next || next === cursor) {
+      reached = latest ?? reached;
+      break;
+    }
     const reachedLedger = /^(\d+)-/.exec(String(next)) ? Number(BigInt(/^(\d+)-/.exec(String(next))[1]) >> 32n) : null;
-    if (response.events.length < 200 && (reachedLedger === null || !response.latestLedger || reachedLedger >= response.latestLedger)) break;
+    if (response.events.length < 200 && (reachedLedger === null || !latest || reachedLedger >= latest)) {
+      reached = latest ?? reachedLedger ?? reached;
+      break;
+    }
+    // Not done yet: if the page limit stops the read here, the next one
+    // resumes from this ledger.
+    reached = reachedLedger === null ? reached : reachedLedger - 1;
     cursor = next;
   }
-  return out;
+  return Object.assign(out, { startLedger: start, reachedLedger: reached });
 }
 
 /**
