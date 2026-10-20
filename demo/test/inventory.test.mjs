@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NEAR_TOP_DAYS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues } from "../inventory-rules.mjs";
+import { NEAR_TOP_DAYS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues } from "../inventory-rules.mjs";
 
 const DAY = 86_400;
 /** Fund 1 (tMMF): 10 bps floor, 5 % yield cap, 26 h NAV age bound; its reference and its NAV on 20 October 2026. */
@@ -49,6 +49,13 @@ test("a NAV outside the corridor, or within three days of its top, is a finding;
   assert.ok(Math.abs(fresh.daysAtMaxYield - (25 / 24 + (fresh.headroomBps * 365) / 500)) < 1e-9);
   // A flat NAV with no yield allowed never reaches its top.
   assert.equal(corridorHeadroom({ ...FUND1, maxYieldBps: 0, navPrice: FUND1.referenceNav }).daysAtMaxYield, Infinity);
+});
+
+test("a feed publishes with 6 to 18 decimals; above 18 is a finding (VAL-3 in the contract)", () => {
+  for (const decimals of [6, 14, 18]) assert.deepEqual(feedDecimalsIssues("NAV feed", decimals), []);
+  assert.match(feedDecimalsIssues("FX feed", 19)[0], /^rc5: the FX feed publishes with 19 decimals, above 18: a replacement, a fallback or a re-anchor that reads it is refused$/);
+  assert.match(feedDecimalsIssues("NAV feed", 5)[0], /^rc5: the NAV feed publishes with 5 decimals, under 6/);
+  assert.match(feedDecimalsIssues("fallback feed", null)[0], /does not answer decimals\(\); it must publish with 6 to 18 decimals$/);
 });
 
 test("a fallback that reads the fund's own NAV feed and asset is a finding (VAL-4 in the contract)", () => {

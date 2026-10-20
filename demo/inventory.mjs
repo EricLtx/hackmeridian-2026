@@ -12,7 +12,7 @@
 // October 2026, S22 on the first demo fund). The tool names those funds first.
 // The rules of rc5 (20 October 2026) are checked too: the haircut covers the
 // NAV corridor, the stablecoins of the fund's currency have 7 decimals, and
-// its feeds publish with 6 decimals or more. So is what rc5 enforces from
+// its feeds publish with 6 to 18 decimals. So is what rc5 enforces from
 // the moment it is installed (review finding TOOL-8): the live NAV against
 // the corridor around the stored reference, whose growth stops one NAV age
 // bound after the reference (a NAV past the top fails closed until a
@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { asset, codeKey, fmt, ledgerEntries, ledgerTime, loadState, read, storageKey, STATE_DIR, sv } from "./lib.mjs";
-import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues } from "./inventory-rules.mjs";
+import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues } from "./inventory-rules.mjs";
 
 const JSON_OUT = process.argv.includes("--json");
 const state = loadState();
@@ -147,10 +147,7 @@ async function main() {
     const feeds = [["NAV feed", Number(st.nav_decimals)]];
     if (fx) feeds.push(["FX feed", Number(st.fx_decimals)]);
     if (fallback) feeds.push(["fallback feed", fallbackDecimals]);
-    for (const [feed, decimals] of feeds) {
-      if (decimals === null) issues.push(`rc5: the ${feed} does not answer decimals(); it must publish with ${RC5.minFeedDecimals} decimals or more`);
-      else if (decimals < RC5.minFeedDecimals) issues.push(`rc5: the ${feed} publishes with ${decimals} decimals, under ${RC5.minFeedDecimals}: its bounds round inward to whole units of the feed, and a replacement or a fallback naming it is refused`);
-    }
+    for (const [feed, decimals] of feeds) issues.push(...feedDecimalsIssues(feed, decimals));
     for (const coin of stablecoins.filter((c) => c.currency === String(cfg.currency) && offPrecision(c))) {
       issues.push(`rc5: the ${coin.currency} stablecoin ${short(coin.token)} has ${coin.liveDecimals ?? coin.decimals} decimals, not ${RC5.stablecoinDecimals}: this fund's caps add raw units across the coins of its currency, and rc5 registers only ${RC5.stablecoinDecimals}-decimal coins`);
     }

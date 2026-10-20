@@ -8,8 +8,23 @@ import { LEDGER_SECS, LIMITS } from "./detectors.mjs";
 export const RC5 = {
   stablecoinDecimals: 7, // STABLECOIN_DECIMALS
   minFeedDecimals: 6, // MIN_FEED_DECIMALS: NAV, FX and fallback feeds
+  maxFeedDecimals: 18, // MAX_FEED_DECIMALS (review finding VAL-3)
   yearSecs: 31_536_000n, // math::YEAR_SECS
 };
+
+/**
+ * The inventory's findings on a feed's decimals. Since rc5 a NAV, FX or
+ * fallback feed must publish with 6 to 18 decimals: checked at admission,
+ * at a replacement, and when a fallback or a re-anchor is proposed or
+ * applied (OutsideEnvelope); a fund admitted before keeps running until
+ * then. `decimals` is null when the feed does not answer.
+ */
+export function feedDecimalsIssues(feed, decimals) {
+  if (decimals === null || decimals === undefined) return [`rc5: the ${feed} does not answer decimals(); it must publish with ${RC5.minFeedDecimals} to ${RC5.maxFeedDecimals} decimals`];
+  if (decimals < RC5.minFeedDecimals) return [`rc5: the ${feed} publishes with ${decimals} decimals, under ${RC5.minFeedDecimals}: its bounds round inward to whole units of the feed, and a replacement, a fallback or a re-anchor that reads it is refused`];
+  if (decimals > RC5.maxFeedDecimals) return [`rc5: the ${feed} publishes with ${decimals} decimals, above ${RC5.maxFeedDecimals}: a replacement, a fallback or a re-anchor that reads it is refused`];
+  return [];
+}
 
 /** A live NAV this close to the corridor's top, in days of growth at the fund's yield cap, is a finding. */
 export const NEAR_TOP_DAYS = 3;
