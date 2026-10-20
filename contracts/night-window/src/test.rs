@@ -648,6 +648,70 @@ fn a_feed_with_fewer_than_six_decimals_is_refused() {
     );
 }
 
+/// A re-anchor installs references in the decimals of the feeds it reads,
+/// so the same rule holds there: a NAV or FX feed publishing with fewer than
+/// `MIN_FEED_DECIMALS` is refused when the re-anchor is proposed, and when
+/// one proposed before rc5 applies. The feed here changes its decimals,
+/// which a SEP-40 feed should never do, as a fund admitted under rc4 with a
+/// coarse feed would read.
+#[test]
+fn a_reanchor_needs_feeds_of_six_decimals_or_more() {
+    let (f, _) = ready();
+    let shares = Asset::Stellar(f.shares.clone());
+    f.oracle.set_decimals(&(MIN_FEED_DECIMALS - 1));
+    f.oracle.set_price(&shares, &105_000, &T0);
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &105_000, &0),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    assert_eq!(f.client.pending_reanchor(&f.shares), None);
+
+    // The same readings, proposed under rc4.
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::set_pending_reanchor(
+            &f.env,
+            &f.shares,
+            &PendingReanchor {
+                nav_oracle: f.nav_oracle.clone(),
+                nav_asset: shares.clone(),
+                nav: 105_000,
+                nav_time: T0,
+                nav_decimals: MIN_FEED_DECIMALS - 1,
+                fx: AnchorFx::Direct,
+                eta: T0,
+            },
+        );
+    });
+    assert_eq!(
+        f.client.try_apply_reanchor(&f.shares),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!(
+        (state.reference_nav, state.nav_decimals),
+        (NAV_EUR, NAV_DECIMALS)
+    );
+
+    // The FX feed of a cross fund, refused below six decimals, read at six.
+    let (f, fx_oracle) = cross_fund();
+    let fx_feed = MockOracleClient::new(&f.env, &fx_oracle);
+    let eur_asset = Asset::Other(eur(&f.env));
+    fx_feed.set_decimals(&(MIN_FEED_DECIMALS - 1));
+    fx_feed.set_price(&eur_asset, &111_880, &T0);
+    assert_eq!(
+        f.client.try_propose_reanchor(&f.shares, &NAV_USD, &111_880),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    fx_feed.set_decimals(&MIN_FEED_DECIMALS);
+    fx_feed.set_price(&eur_asset, &1_118_800, &T0);
+    f.client.propose_reanchor(&f.shares, &NAV_USD, &1_118_800);
+    let pending = f.client.pending_reanchor(&f.shares).unwrap();
+    assert_eq!(
+        pending.fx.rate().map(|rate| rate.decimals),
+        Some(MIN_FEED_DECIMALS)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Valuation: direct, cross, corridor, freshness
 // ---------------------------------------------------------------------------

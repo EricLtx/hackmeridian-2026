@@ -2732,7 +2732,10 @@ fn pricing_config(env: &Env, fund: &Address) -> Result<FundConfig, Error> {
 
 /// Fresh readings of a configuration's NAV feed and, for a cross price, its
 /// FX feed, each with the feed's own decimals. The NAV follows the pricing
-/// rule: fresh primary, checked against an active fallback.
+/// rule: fresh primary, checked against an active fallback. Read when a
+/// re-anchor is proposed and again when it applies: the references it
+/// installs take these decimals, so a feed below `MIN_FEED_DECIMALS` is
+/// refused, as at admission.
 fn read_anchor(
     env: &Env,
     fund: &Address,
@@ -2742,7 +2745,7 @@ fn read_anchor(
     let nav = oracle::read_primary_checked(
         env,
         config,
-        OracleClient::new(env, &config.oracle).decimals(),
+        check_feed_decimals(OracleClient::new(env, &config.oracle).decimals())?,
         fallback.as_ref(),
     )?;
     let fx = match &config.source {
@@ -2750,7 +2753,7 @@ fn read_anchor(
             env,
             &leg.oracle,
             &leg.asset,
-            OracleClient::new(env, &leg.oracle).decimals(),
+            check_feed_decimals(OracleClient::new(env, &leg.oracle).decimals())?,
             leg.max_age_secs,
         )?),
         PriceSource::Direct => None,
@@ -3058,8 +3061,8 @@ fn check_fallback(
 }
 
 /// The decimals of a NAV, FX or fallback feed, refused below
-/// `MIN_FEED_DECIMALS`: at admission, at a replacement and when a fallback
-/// is proposed or applied.
+/// `MIN_FEED_DECIMALS`: at admission, at a replacement, and when a fallback
+/// or a re-anchor is proposed or applied.
 fn check_feed_decimals(decimals: u32) -> Result<u32, Error> {
     if decimals < MIN_FEED_DECIMALS {
         return Err(Error::OutsideEnvelope);
