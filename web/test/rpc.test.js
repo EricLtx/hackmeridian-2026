@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Chain, RpcTimeout, pickEndpoint, rpcChangeText, rpcServer, withTimeout } from "../src/chain.js";
+import { Chain, RETURN_QUIET_MS, RpcTimeout, pickEndpoint, rpcChangeText, rpcServer, withTimeout } from "../src/chain.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 const never = () => new Promise(() => {});
@@ -185,6 +185,20 @@ test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's
   await back.checkHeights();
   assert.equal(back.rpcInfo().host, "first.example");
   assert.deepEqual(returned, ["level"]);
+
+  // An endpoint left after a failed call rests before calls return to it, level or not.
+  const rested = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
+  rested.active = 1;
+  rested.endpoints[0].failedAt = Date.now();
+  await rested.checkHeights();
+  assert.equal(rested.rpcInfo().host, "second.example", "a minute of rest first");
+  rested.endpoints[0].failedAt = Date.now() - RETURN_QUIET_MS - 1;
+  await rested.checkHeights();
+  assert.equal(rested.rpcInfo().host, "first.example");
+  // failover marks the endpoint it leaves.
+  const marked = chainWith(fake("slow.example", { getHealth: never }), fake("fast.example", { getHealth: health(1) }));
+  await marked.net(() => marked.server.getHealth(), { timeoutMs: 20 });
+  assert.ok(Date.now() - marked.endpoints[0].failedAt < 5_000);
 
   // A silent endpoint has no height: nothing moves on its account.
   const down = async () => {

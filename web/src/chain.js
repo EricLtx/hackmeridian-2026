@@ -105,6 +105,13 @@ function isTransient(error) {
 export const STALE_LEDGERS = 10;
 /** Ledgers within which an endpoint counts as level with the highest: each one is read at a slightly different moment. */
 export const LEVEL_LEDGERS = 1;
+/**
+ * How long an endpoint whose call failed or timed out rests before calls may
+ * return to it, even level: a public RPC that answers its height but is slow
+ * to simulate (8.5 s on 20 October) would otherwise be left and rejoined at
+ * every pass.
+ */
+export const RETURN_QUIET_MS = 60_000;
 const HEIGHT_TIMEOUT_MS = 4000;
 
 /**
@@ -508,6 +515,7 @@ export class Chain {
     if (from !== this.active) return true;
     const previous = this.endpoints[this.active];
     previous.failures += 1;
+    previous.failedAt = Date.now();
     this.active = (this.active + 1) % this.endpoints.length;
     try {
       this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
@@ -547,14 +555,18 @@ export class Chain {
   /**
    * Moves calls away from an endpoint that answers but lags: compares every
    * endpoint's latest ledger and applies `pickEndpoint`, so a fallback is
-   * left for the first endpoint once that one is level again. The page runs
+   * left for the first endpoint once that one is level again, and, when it
+   * was left after a failed call, has rested RETURN_QUIET_MS. The page runs
    * it before each refresh: the pass, its clock included, then reads an
    * endpoint that is current. Never throws; returns the heights read.
    */
   async checkHeights() {
     if (this.endpoints.length < 2) return [];
     const heights = await this.heights();
-    const { index, reason, behind } = pickEndpoint(heights, this.active);
+    // An endpoint that just failed a call is no target yet, however level it is (RETURN_QUIET_MS).
+    const now = Date.now();
+    const candidates = heights.map((height, i) => (now - (this.endpoints[i].failedAt ?? -Infinity) < RETURN_QUIET_MS ? null : height));
+    const { index, reason, behind } = pickEndpoint(candidates, this.active);
     if (reason && index !== this.active) {
       const previous = this.endpoints[this.active];
       this.active = index;
