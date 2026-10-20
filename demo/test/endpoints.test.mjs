@@ -38,6 +38,8 @@ test("the second reading goes to the other endpoint only, from the null account"
   assert.equal(await lib.read({ keys: {} }, OW, "is_paused"), false);
   assert.deepEqual(asked, [["two", lib.NULL_ACCOUNT], "one"]);
   assert.equal((await client.latestLedger()).sequence, 42);
+  two.getHealth = async () => ({ status: "healthy", oldestLedger: 7, latestLedger: 42 });
+  assert.equal((await client.health()).oldestLedger, 7);
 });
 
 test("the second endpoint's ledger entries are read there, 200 keys at a time", async () => {

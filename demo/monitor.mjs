@@ -212,7 +212,9 @@ async function readTrail(journal) {
   const client = endpointClient(index);
   const independent = journal.endpoint ? client.url !== journal.endpoint : null;
   try {
-    const events = await client.events(C.openWindow, JOURNAL.trailCursor ?? 1);
+    // The first read starts at the oldest ledger the endpoint keeps, as the indexer's first run does.
+    JOURNAL.trailCursor ??= Number((await client.health()).oldestLedger) || 1;
+    const events = await client.events(C.openWindow, JOURNAL.trailCursor);
     if (events.reachedLedger !== null && events.reachedLedger !== undefined) JOURNAL.trailCursor = events.reachedLedger + 1;
     return {
       url: client.url,

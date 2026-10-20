@@ -119,6 +119,8 @@ export function endpointClient(index) {
       }
     },
     latestLedger: () => net(() => client.getLatestLedger(), "ledger"),
+    /** `{ oldestLedger, latestLedger, ... }`: the ledgers this endpoint keeps. */
+    health: () => net(() => client.getHealth(), "health"),
     ledgerEntries: (keys) => ledgerEntries(keys, client),
     events: (contractId, startLedger) => contractEvents(contractId, startLedger, client),
   };
@@ -983,6 +985,12 @@ export async function contractEvents(contractId, startLedger, client = server) {
         start = Number(range[1]);
         page -= 1;
         continue;
+      }
+      // Asked from a ledger this endpoint has not reached yet (a pass right
+      // after the last one, a lagging endpoint): nothing to read so far.
+      if (!cursor && range && Number(range[2]) < start) {
+        reached = start - 1;
+        break;
       }
       throw error;
     }

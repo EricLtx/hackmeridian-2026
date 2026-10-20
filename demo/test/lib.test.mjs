@@ -54,7 +54,7 @@ test("contractEvents starts at the RPC's oldest ledger, says so, and reads on un
   const ledgerOf = (cursor) => Number(BigInt(cursor.split("-")[0]) >> 32n);
   server.getEvents = async (request) => {
     requests.push(request);
-    if (request.startLedger !== undefined && request.startLedger < 500) throw new Error("startLedger must be within the ledger range: 500 - 400000");
+    if (request.startLedger !== undefined && request.startLedger < 600) throw new Error("startLedger must be within the ledger range: 600 - 400000");
     // About 10,000 ledgers scanned per request, as the public RPC does; one event on the way.
     const from = request.startLedger ?? ledgerOf(request.cursor);
     const to = Math.min(from + 10_000, LATEST);
@@ -63,10 +63,18 @@ test("contractEvents starts at the RPC's oldest ledger, says so, and reads on un
   };
   // A monitor back after a long outage asks for a ledger the RPC no longer keeps.
   const events = await lib.contractEvents("CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W", 100);
-  assert.equal(events.startLedger, 500);
+  assert.equal(events.startLedger, 600);
   assert.equal(events.reachedLedger, LATEST);
   assert.ok(requests.length > 20, `${requests.length} requests: a week of ledgers takes more than 20`);
   assert.deepEqual(events.map((e) => [e.ledger, e.name, Number(e.topics[0])]), [[150_000, "repo_opened", 7]]);
+});
+
+test("contractEvents asked from a ledger the endpoint has not reached returns nothing, and resumes there", async () => {
+  server.getEvents = async (request) => {
+    throw new Error(`startLedger must be within the ledger range: 600 - 1000 (asked ${request.startLedger})`);
+  };
+  const events = await lib.contractEvents("CCSSOHTBL3LEWUCBBEB5NJFC2OKFRC74OWEIJIZLRJBGAAU4VMU5NV4W", 1_001);
+  assert.deepEqual([events.length, events.startLedger, events.reachedLedger], [0, 1_001, 1_000]);
 });
 
 test("ledgerEntries asks for 200 keys at most per call and keeps the order", async () => {
