@@ -1,6 +1,6 @@
 # Security policy
 
-Open Window (crate `night-window`) is under development. No contract is deployed on mainnet, and testnet deployments hold no real value. The security baseline, threat model and invariants are documented in [docs/security.md](docs/security.md).
+Open Window (crate `night-window`) is under development. No contract is deployed on mainnet, and testnet deployments hold no real value. The testnet instance runs version 4, audit candidate rc4 (tag `audit-v4-rc4`); the rc5 candidate, with the fixes of the security pass of 20 October 2026, is under adversarial review before it becomes the tag `audit-v4-rc5`. The security baseline, threat model and invariants are documented in [docs/security.md](docs/security.md).
 
 ## Reporting a vulnerability
 
@@ -32,14 +32,15 @@ Out of scope:
 
 - Every privileged function loads its role (governor, guardian, or the fund's steward) from storage and requires its authorization; a fund is admitted only with both the governor's and the steward's signatures.
 - Every function that consumes a party's authority requires that party's signature; repurchase and seizure load the parties from the stored repo, never from arguments.
-- Upgrades, feed changes, re-anchoring, a new guardian and every loosening of a limit wait for a time delay (48 hours by default), can be cancelled by the guardian, and expire seven days after they fall due; tightening is immediate.
-- When the share token refuses a transfer at repurchase or seizure, the debt still settles and the shares are recorded for later delivery to the recorded beneficiary only.
+- Upgrades, feed changes, re-anchoring, a new guardian, a stablecoin registration and every loosening of a limit wait for a time delay (48 hours by default), can be cancelled by the guardian, and expire seven days after they fall due; tightening is immediate.
+- When the share token refuses a transfer at repurchase or seizure, the debt still settles and the shares are recorded for later delivery to the recorded beneficiary only. In the rc5 candidate a lender revoked after the opening still seizes, and its shares wait in the contract until it is approved again or names an approved holder.
 - The emergency pause blocks only new offers and new repos; repurchase, withdrawal and seizure always work.
-- Prices come only from the feeds fixed at a fund's admission, are refused when stale, and must lie inside a model-based corridor; caps per repo, per fund and per currency bound the exposure.
+- Prices come only from the feeds fixed at a fund's admission, are refused when stale, and must lie inside a model-based corridor; caps per repo, per fund and per currency bound the exposure. In the rc5 candidate the corridor grows over at most one NAV age and the haircut must cover it, the exchange rate is taken on the lender's side of its band, feeds need 6 decimals and stablecoins 7.
 - Arithmetic must be checked, and failure paths return typed errors; the lints that enforce this are denied at the workspace level.
 - Deadlines are stored values compared to the ledger timestamp, never inferred from storage TTLs.
-- CI runs formatting, Clippy with the security lints, the tests, the WASM build and a RustSec advisory check, with every third-party action pinned to a commit.
-- The web interface checks every value it reads from the chain before display, carries a content security policy, and refuses a simulation that asks more than 25 XLM of fees before the wallet is asked to sign.
+- CI runs formatting, Clippy with the security lints, the tests, the contract's suite against a WASM with an 8 KiB stack, the WASM build, the tooling's tests, `cargo deny` and a RustSec advisory check, with every third-party action pinned to a commit.
+- npm supply chain: packages install from the lockfile without install scripts (`npm ci --ignore-scripts`), the web is neither built nor published while one of its runtime dependencies has a high or critical advisory (`npm audit --omit=dev --audit-level=high`), no checkout keeps the token in the git config (`persist-credentials: false`), and Dependabot proposes updates as reviewed pull requests.
+- The web interface checks every value it reads from the chain before display, carries a content security policy, and checks the fee of the transaction the wallet will sign (25 XLM at most, equal to the simulation's estimate) before it is asked. In the rc5 candidate a write shows as confirmed only once a second RPC endpoint sees it, the page refuses to run inside another site's frame, and its footer names the RPC providers.
 
 ## Bug bounty
 

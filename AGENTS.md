@@ -20,6 +20,8 @@ That compiles every `cdylib` member to WASM. Artifacts land in `target/wasm32v1-
 
 Do not substitute this with `cargo build --target wasm32v1-none`. `stellar contract build` applies the flags and metadata the network expects.
 
+`contracts/night-window/build.rs` links the WASM with a 64 KiB stack (decision S34 in `docs/security.md`). `NIGHT_WINDOW_STACK_SIZE` (bytes, a positive multiple of 16) overrides it for a test build only: leave it unset when building the release WASM, which the layout test checks.
+
 `rust-toolchain.toml` pins the Rust version, the `wasm32v1-none` target and the `rustfmt` and `clippy` components; rustup installs them on the first `cargo` command. Do not override the toolchain. To bump it, edit that file, rebuild, rerun the tests and say so in the commit.
 
 ## Security baseline
@@ -30,7 +32,7 @@ Read `docs/security.md` before changing the contract. The enforced rules:
 - Every privileged function loads the admin from storage and calls `require_auth` on it. Every `Address` argument whose authority a function consumes gets its own `require_auth` in that function.
 - Deadlines live in stored values and are compared to the ledger timestamp, never inferred from a TTL.
 - Error codes and exported types are append-only.
-- Before finishing a change, run `cargo fmt --all --check`, `stellar contract build`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, in that order. CI runs the same, plus a RustSec advisory check.
+- Before finishing a change, run `cargo fmt --all --check`, `stellar contract build`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, in that order. CI runs the same, plus the WASM stack canary (see Test), the web's and the tooling's tests, `cargo deny` and a RustSec advisory check.
 
 ## Test
 
@@ -42,6 +44,16 @@ cargo test
 ```
 
 A single crate: `cargo test -p <name>`.
+
+WASM test mode: with `NIGHT_WINDOW_TEST_WASM=1`, the tests of `night-window` register the built release WASM instead of the natively compiled contract, so the whole suite runs in the VM on the stack that WASM was linked with. The CI job `wasm-canary` does so with an 8 KiB stack, in a target directory of its own so that `target/` keeps the shipped WASM:
+
+```sh
+export CARGO_TARGET_DIR=$PWD/target-canary NIGHT_WINDOW_STACK_SIZE=8192
+stellar contract build
+NIGHT_WINDOW_TEST_WASM=1 cargo test -p night-window
+```
+
+The tooling has offline tests too: `npm test` in `demo/` (the monitor's detectors and the library's checks before signing) and in `indexer/` (CI job `tooling`).
 
 ## Deploy and invoke
 
@@ -64,13 +76,13 @@ stellar contract invoke \
 
 The product contract is `night-window` (`contracts/night-window/`): the Open Window contract, a stablecoin liquidity facility for tokenized fund shares built as a repo. The crate keeps its historical name; the product name is Open Window. Its constructor takes `--admin <address>`, passed after the `--` separator at deploy time. `stellar contract invoke --id <id> -- -h` prints the generated CLI for the deployed contract.
 
-Version 4 is implemented and tested (audit candidate rc4, tag `audit-v4-rc4`, interface frozen on 18 October 2026): the full lifecycle, roles (governor, guardian, steward per fund, optional trustee, sentinel), price checks with a backup feed, deferred share delivery, lenders independent of the fund, a time delay on every upgrade, feed change and loosening (propose, wait, apply by anyone, cancel), a stablecoin registry behind that delay after the first admission, and a stored schema version with a governed `migrate`. Any change to `contracts/` after the tag means a new tag and a new rehearsal. Scripts that change an admitted fund, the guardian, the term ceiling, the envelope, fund limits or a currency cap must handle the proposal: these calls queue the change after bootstrap. Operations extend the contract instance, never its code (decision S20). `contracts/fund-token/` (allowlisted SEP-41 share token) and `contracts/nav-oracle/` (operator-fed SEP-40 feed) exist for the tests and the testnet demo in `demo/`; they are not part of the product. Error codes are public ABI: add new ones, never renumber; `NotImplemented` (code 1) stays reserved.
+Version 4 is implemented and tested (audit candidate rc4, tag `audit-v4-rc4`, interface frozen on 18 October 2026): the full lifecycle, roles (governor, guardian, steward per fund, optional trustee, sentinel), price checks with a backup feed, deferred share delivery, lenders independent of the fund, a time delay on every upgrade, feed change and loosening (propose, wait, apply by anyone, cancel), a stablecoin registry behind that delay after the first admission, and a stored schema version with a governed `migrate`. Any change to `contracts/` after the tag means a new tag and a new rehearsal. The rc5 candidate (20 October 2026) keeps that interface and the stored layout and fixes the contract findings of the security pass of that day (decisions S30 to S34 in `docs/security.md`); it becomes the tag `audit-v4-rc5` after an adversarial review, then a governed upgrade of the testnet instance, which runs rc4 until then. Scripts that change an admitted fund, the guardian, the term ceiling, the envelope, fund limits, a currency cap or the stablecoin registry must handle the proposal: these calls queue the change after bootstrap, and since rc5 the governor applies a stablecoin registration with its own key. Operations extend the contract instance, never its code (decision S20). `contracts/fund-token/` (allowlisted SEP-41 share token) and `contracts/nav-oracle/` (operator-fed SEP-40 feed) exist for the tests and the testnet demo in `demo/`; they are not part of the product. Error codes are public ABI: add new ones, never renumber; `NotImplemented` (code 1) stays reserved.
 
 ## Web interface
 
-`web/` is the interface (Vite, plain JavaScript); `.github/workflows/pages.yml` publishes it on GitHub Pages on every push that touches `web/`. Before finishing a change there, run `npm test` and `npm run build` in `web/`. Every visible text is written in English, marked with `t()` and translated in `web/src/locales/fr/` and `web/src/locales/es/`; `npm run check:i18n` and the tests fail on a missing translation.
+`web/` is the interface (Vite, plain JavaScript); `.github/workflows/pages.yml` publishes it on GitHub Pages on every push that touches `web/`. Before finishing a change there, run `npm test` and `npm run build` in `web/`. CI installs the web with `npm ci --ignore-scripts` and stops on a high or critical advisory in its runtime dependencies (`npm audit --omit=dev --audit-level=high`). Every visible text is written in English, marked with `t()` and translated in `web/src/locales/fr/` and `web/src/locales/es/`; `npm run check:i18n` and the tests fail on a missing translation, or on one whose placeholders or HTML tags differ from the source.
 
-`web/public/deployment.testnet.json` (written by `demo/` `setup`) and `web/public/history.json` (the indexer's export) are committed and published: public facts only, never a secret or an RPC URL that carries a key. Values read from the chain are untrusted: check them at the boundary in `web/src/chain.js` before they reach the markup. Both pages carry a content security policy; an RPC endpoint added to the deployment file must be added to `connect-src` in `web/index.html` and `web/history.html`.
+`web/public/deployment.testnet.json` (written by `demo/` `setup`) and `web/public/history.json` (the indexer's export) are committed and published: public facts only, never a secret or an RPC URL that carries a key. Values read from the chain are untrusted: check them at the boundary in `web/src/chain.js` before they reach the markup; the deployment file is checked in `web/src/deployment.js`, which accepts only the test network. Both pages carry a content security policy; an RPC endpoint added to the deployment file must be added to `connect-src` in `web/index.html` and `web/history.html`.
 
 ## Public repository: what stays out
 

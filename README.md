@@ -8,7 +8,7 @@ An on-chain repo contract on Stellar. Holders of tokenized money market funds bo
 
 **Try it on testnet:** [ericltx.github.io/hackmeridian-2026](https://ericltx.github.io/hackmeridian-2026/), the guided view, the terminal view ([`?view=terminal`](https://ericltx.github.io/hackmeridian-2026/?view=terminal)) and the History page, in English, French and Spanish. Reading needs nothing; signing needs Freighter set to Testnet and an onboarded address (see [web/README.md](web/README.md#use-it-with-a-wallet)).
 
-> **Status:** early development (October 2026). Version 4 (audit candidate rc4, tag `audit-v4-rc4`, interface frozen since 18 October 2026) is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed, deferred share delivery, lenders independent of the fund (an instance can be fixed to a single regulated lender), the custody safeguards (delayed governor handover, guardian and steward backups) and, as an option fixed at deployment, a trustee whose consent every upgrade needs; since rc4, a stored schema version with a governed `migrate`, a sentinel that can only pause and cancel, and a stablecoin registry that waits for the time delay after the first admission. The testnet instance was upgraded and migrated under governance on 18 October 2026; it serves three funds (one of them a classic Stellar asset held through the Stellar Asset Contract) and two euro stablecoins, with 210 host tests behind it and nineteen incident drills rehearsed against it. It runs on testnet; nothing is deployed on mainnet, and no external audit has been done yet. A security pass on 20 October 2026 hardened the web interface and recorded the contract's open findings, with their planned fixes, in the threat model. The critical path to any deployment that holds value is key custody: the governor, guardian and steward keys must sit with separate people on hardware devices, which the testnet demo does not do. The legal form of the transaction and the operator's status are being qualified with counsel. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
+> **Status:** early development (October 2026). Version 4 (audit candidate rc4, tag `audit-v4-rc4`, interface frozen since 18 October 2026) is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed, deferred share delivery, lenders independent of the fund (an instance can be fixed to a single regulated lender), the custody safeguards (delayed governor handover, guardian and steward backups) and, as an option fixed at deployment, a trustee whose consent every upgrade needs; since rc4, a stored schema version with a governed `migrate`, a sentinel that can only pause and cancel, and a stablecoin registry that waits for the time delay after the first admission. The testnet instance runs rc4: it was upgraded and migrated under governance on 18 October 2026, serves three funds (one of them a classic Stellar asset held through the Stellar Asset Contract) and two euro stablecoins, and nineteen incident drills were rehearsed against it. A security pass on 20 October 2026 hardened the web interface and the tooling the same day; the **rc5 candidate** fixes the contract findings it confirmed and keeps the interface of rc4: the lender of record still seizes after a revocation, the exchange rate is taken on the lender's side of its band, the price corridor grows over at most one NAV age and the haircut must cover it, one precision per currency, feeds of at least 6 decimals, the valuation of each loan recorded on chain, a 64 KiB stack (decisions S30 to S34 in [docs/security.md](docs/security.md)). The candidate passes 286 Rust host tests (243 of them for the contract), and its tooling 106 of its 108 web tests (the other two run only against testnet), 59 demo tests and 28 indexer tests; its WASM size and hash are in [docs/audit-scope.md](docs/audit-scope.md). It becomes the tag `audit-v4-rc5` after an adversarial review that runs now, then a governed upgrade of the testnet instance. Nothing is deployed on mainnet, and no external audit has been done yet. The critical path to any deployment that holds value is key custody: the governor, guardian and steward keys must sit with separate people on hardware devices, which the testnet demo does not do. The legal form of the transaction and the operator's status are being qualified with counsel. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
 
 ## Why
 
@@ -59,9 +59,9 @@ sequenceDiagram
 
 ## Contract interface
 
-The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 4, audit candidate rc2.
+The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry points; `math.rs`, `oracle.rs`, `storage.rs`, `token_io.rs`, `types.rs`, `error.rs`, `events.rs`); its tests in `src/test.rs`. Interface version 4, unchanged since rc4: the rc5 candidate adds one event (`RepoValued`) and changes what some functions check, as the table says.
 
-**Governance.** Upgrades, feed changes, re-anchoring, a new guardian, a longer maximum term, a looser risk envelope, looser fund limits and higher currency caps wait for a time delay (48 hours by default, settable until the first fund is admitted or the first offer is created, then only able to grow), can be cancelled during that window, and expire seven days after they fall due. Some changes stay immediate by design: tightening, `unpause`, the stablecoin registry, lender approvals, unfreezing a fund, the guardian handing its role over, and, for now, the governor handover (see the roadmap). Tightening is immediate. Anyone may apply a change once it is due: the signatures were given when it was proposed.
+**Governance.** Upgrades, feed changes, re-anchoring, a new guardian, a longer maximum term, a looser risk envelope, looser fund limits and higher currency caps wait for a time delay (48 hours by default, settable until the first fund is admitted or the first offer is created, then only able to grow), can be cancelled during that window, and expire seven days after they fall due. A stablecoin registration after the first admission waits for the delay too, and the governor handover waits for it with a guardian veto. Some changes stay immediate by design: tightening, `unpause`, the removal of a stablecoin, lender approvals, unfreezing a fund, the guardian handing its role over to its registered backup. Anyone may apply a change once it is due: the signatures were given when it was proposed. The exception, since rc5, is a stablecoin registration, which the governor in office applies.
 
 | Function | Who | What it does |
 |---|---|---|
@@ -75,25 +75,25 @@ The contract lives in `contracts/night-window/src/` (`lib.rs` for the entry poin
 | `set_sole_lender(lender)` | governor, before the first admission | Fixes the instance's only lender for good: a regulated lender running its own instance |
 | `attest_lender(fund, lender, declaration)` | lender **and** steward | Records the hash of the lender's off-chain declaration (eligibility, independence from the fund); required before approval |
 | `set_steward_backup(fund, backup)` (+ `apply_steward_backup_change`, `cancel_steward_backup_change`), `propose_steward_recovery` (+ apply, cancel) | steward **and** backup / governor **and** guardian | A lost steward key can be replaced only by the backup the issuer registered, after 30 days; any action by the steward cancels the recovery. A first backup is set at once; replacing it waits for the delay, and the governor may cancel the replacement (block, never choose) |
-| `set_stablecoin(token, currency)` (+ `apply_stablecoin_change`, `cancel_stablecoin_change`, `pending_stablecoin_change`), `remove_stablecoin(token)` | governor; anyone applies; guardian or sentinel may cancel | Stablecoin registry: immediate before the first admission, a proposal behind the delay afterwards (S29); removal immediate |
-| `set_sentinel(sentinel)`, `clear_sentinel(caller)`, `sentinel()` | guardian / guardian or governor | An automated key that may only pause and cancel proposals, never lift the pause, veto or hand over (S26); what a monitoring host holds instead of the guardian key |
+| `set_stablecoin(token, currency)` (+ `apply_stablecoin_change`, `cancel_stablecoin_change`, `pending_stablecoin_change`), `remove_stablecoin(token)` | governor, who also applies since rc5; guardian or sentinel may cancel | Stablecoin registry: 7-decimal tokens only (rc5, S31); immediate before the first admission, a proposal behind the delay afterwards (S29); removal immediate |
+| `set_sentinel(sentinel)`, `clear_sentinel(caller)`, `sentinel()` | guardian / guardian or governor | An automated key that may only pause and cancel proposals, never lift the pause, veto or hand over (S26); what a monitoring host holds instead of the guardian key. It holds no other role, proposed roles included, checked both ways since rc5 |
 | `schema_version()`, `migrate()` | anyone / governor **and** trustee | The stored layout's version; after an upgrade, `migrate` brings it to the code's version step by step; until then new offers and repos answer `SchemaOutdated`, exits never check (S29, S6) |
 | `set_fund(fund, config)` (+ `apply_fund_change`, `cancel_fund_change`) | governor **and** steward | Two-key admission, immediate the first time; a replacement waits for the delay, keeps the price references, and needs the steward on record |
 | `propose_reanchor(fund, expected_nav, expected_fx)` (+ apply, cancel) | governor **and** steward | The only way to move a fund's price reference off its model: the signers name the values, the contract checks today's feeds agree, and installs those values after the delay if the feeds still follow the model |
 | `propose_fallback(fund, feed)` (+ apply, cancel, `remove_fallback`) | governor **and** steward; removal also by the guardian alone | A backup NAV feed that stands in for a stale primary and must agree with a fresh one |
 | `remove_fund(fund)` | governor | Open repos keep their frozen terms |
 | `pause(caller)` / `unpause()` | guardian or governor / governor | Stops new offers and new repos; never exits |
-| `set_fund_limits` (+ apply, cancel), `approve_lender`, `freeze_fund`, `reset_reference`, `set_sponsor` | the fund's steward, never a lender itself | Tunes its own fund inside the envelope; loosening its limits waits for the delay. An approval records the steward that granted it: after a steward change, new offers and new loans wait for the new steward's approval, while positions opened before stay deliverable |
-| `refresh_reference(fund)` | anyone | Moves the NAV reference along the model path |
+| `set_fund_limits` (+ apply, cancel), `approve_lender`, `freeze_fund`, `reset_reference`, `set_sponsor` | the fund's steward, never a lender itself | Tunes its own fund inside the envelope; loosening its limits waits for the delay. An approval records the steward that granted it: after a steward change, new offers and new loans wait for the new steward's approval, while positions opened before stay deliverable. Since rc5 a revocation stops new loans but not the seizure of open repos, whose shares then wait for an approval |
+| `refresh_reference(fund)` | anyone | Moves the NAV reference along the model path, by at most one NAV age of growth per call since rc5; the monitor's keeper calls it |
 | `quote(fund, shares, stablecoin)`, `fund_price(fund)`, `repo_due(repo)` | anyone | Read-only valuation, raw NAV, interest due now |
 | `create_offer(lender, stablecoin, amount, rate_bps, max_term, funds)` | approved lender | Deposits stablecoins with fixed terms |
 | `withdraw_offer(offer, amount)` | lender | Takes back what is not lent, including repaid principal and interest |
 | `open_repo(borrower, offer, fund, shares, principal, term)` | borrower | Locks shares and receives stablecoins in one transaction |
 | `repurchase(repo)` | borrower | Repays principal and interest, gets the shares back |
-| `seize(repo, to)` | lender, from maturity | Sends the shares to an approved address |
-| `release(repo)`, `redirect_release(repo, to)`, `pending_release(repo)` | anyone / beneficiary | Delivers shares the issuer's token refused at repurchase or seizure, once the issuer allows it |
+| `seize(repo, to)` | lender, from maturity | Sends the shares to the lender or another approved address; since rc5 a lender revoked after the opening still seizes, and its shares wait for an approval or a redirection |
+| `release(repo)`, `redirect_release(repo, to)`, `pending_release(repo)` | anyone / beneficiary | Delivers shares the issuer's token refused at repurchase or seizure, once the issuer allows it, and since rc5 seized shares once their lender is approved again |
 
-How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), agree with the backup feed when one is set, and, when the NAV is not in the loan currency, be crossed through an FX feed that has its own freshness and band, with an extra FX haircut. The decisions behind every check are recorded in [docs/security.md](docs/security.md), section 6.
+How a price is checked before any loan: the NAV must be fresh, inside a corridor predicted from its reference (a slowly growing fund share cannot jump), agree with the backup feed when one is set, and, when the NAV is not in the loan currency, be crossed through an FX feed that has its own freshness and band, with an extra FX haircut. Since rc5 the corridor grows over at most one NAV age and the fund's haircut must cover it, the exchange rate is taken on the lender's side of its band, and the feeds publish with at least 6 decimals. The decisions behind every check are recorded in [docs/security.md](docs/security.md), section 6.
 
 ## Roadmap
 
@@ -130,7 +130,8 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Governed upgrade and migration executed on the testnet instance; sentinel named; nineteen drills rehearsed, thirteen detectors per fund ([demo/](demo/README.md))
 - [x] Several funds and stablecoins as data: a euro money market share, a share held through the Stellar Asset Contract with the issuer's native flags (freeze handled live), two euro stablecoins under one currency cap (18 October 2026)
 - [x] Operator kit: [docs/operations.md](docs/operations.md) and `npm run inventory`, the off-chain instance register
-- [ ] Next audit candidate (rc5): the contract fixes of the security pass of 20 October 2026, decided with the auditor, then a governed upgrade and a new rehearsal
+- [x] rc5 candidate (20 October 2026): the contract fixes of the security pass (the seizure after a revocation, the exchange rate on the lender's side of its band, a corridor bounded by the NAV age and covered by the haircut, one precision per currency, feed precision and inward rounding, the valuation of each loan as an event, the trustee and the sentinel independent both ways, a backup feed that is a real second source), a 64 KiB stack with a CI canary, and the tooling (nineteen detectors, actions confirmed on a second endpoint, a bounded signing path, the journal checked by content, the web's fee check and confirmations); decisions S30 to S34 in [docs/security.md](docs/security.md)
+- [ ] Adversarial review of the rc5 candidate, tag `audit-v4-rc5`, governed upgrade of the testnet instance and a new rehearsal
 - [ ] OpenZeppelin detectors for Soroban (blocked on Windows; to run on Linux)
 - [ ] Legal qualification of the transaction and of the operator, with counsel
 - [ ] Third-party audit before any mainnet deployment, and a bug bounty sized to the value at stake
@@ -144,9 +145,9 @@ The enforced part of the baseline:
 - `rust-toolchain.toml` pins Rust 1.98.1 with the `wasm32v1-none` target, `rustfmt` and `clippy`.
 - Workspace lints deny `unsafe_code`, unchecked arithmetic (`clippy::arithmetic_side_effects`), `unwrap`, `expect`, `panic!` and slice indexing in contract code. Tests opt out explicitly.
 - Overflow checks stay on in release and test profiles.
-- CI runs `cargo fmt --check`, `stellar contract build`, `cargo clippy --all-targets -D warnings`, `cargo test` (the upgrade test uploads the built WASM), the web interface's build and unit tests, and a RustSec advisory check on `Cargo.lock`. Every third-party action is pinned to a commit SHA and kept current by Dependabot. `make lint`, `make audit` and `make scout` in `contracts/night-window/` reproduce the checks locally.
+- CI runs `cargo fmt --check`, `stellar contract build`, `cargo clippy --all-targets -D warnings`, `cargo test` (the upgrade test uploads the built WASM), the contract's whole suite against a WASM linked with an 8 KiB stack (`wasm-canary`), the web interface's build and unit tests, the demo's and the indexer's offline tests, `cargo deny`, and a RustSec advisory check on `Cargo.lock`. npm packages install from the lockfile without install scripts, the web is neither built nor published while a runtime dependency has a high or critical advisory, and no checkout keeps the token in the git config. Every third-party action is pinned to a commit SHA and kept current by Dependabot. `make lint`, `make audit` and `make scout` in `contracts/night-window/` reproduce the checks locally.
 - Maintenance rule: the workspace stays within the two latest major versions of `soroban-sdk`, the ones that receive security fixes, and is rebuilt and retested at every Stellar protocol upgrade. Deadlines are stored as timestamps, never derived from storage TTLs, so changes in ledger timing do not affect them.
-- The web interface treats every value it reads from the chain as untrusted: shapes are checked at the boundary before display, both pages carry a content security policy, and a simulation that asks more than 25 XLM of fees is refused before the wallet is asked to sign.
+- The web interface treats every value it reads from the chain as untrusted: shapes are checked at the boundary before display, both pages carry a content security policy, and the fee of the transaction the wallet will sign is checked (25 XLM at most, equal to the simulation's estimate) before it is asked. Since rc5 a write shows as confirmed only once a second RPC endpoint sees it, the page refuses to run inside another site's frame, and its footer names the RPC providers, which see the visitor's IP address.
 
 ## Repository layout
 
@@ -161,7 +162,7 @@ The enforced part of the baseline:
 ├── web/                     # web interface (Vite, plain JavaScript, Freighter): guided view, terminal view, history page; English, French, Spanish
 ├── docs/
 │   ├── architecture.md      # the map: context, units, components, lifecycle, prices, governance, storage, cost
-│   ├── security.md          # security baseline: threat model, invariants, framing decisions S1-S29
+│   ├── security.md          # security baseline: threat model, invariants, framing decisions S1-S34
 │   ├── threat-model-stride.md # STRIDE threat model and monitoring plan
 │   ├── incident-procedure.md # incident procedure and monitoring rehearsal
 │   ├── operations.md        # running an instance: keys, deployment, admission, daily tasks, upgrades
@@ -172,9 +173,9 @@ The enforced part of the baseline:
 │   ├── stellar-platform.md  # overview of the Stellar platform
 │   └── claude-tooling.md    # AI tooling: plugins, skills, MCP
 ├── .github/
-│   ├── workflows/ci.yml     # format, lint, test, WASM build and size budget, cargo-deny, RustSec audit, link check
-│   ├── workflows/pages.yml  # tests, builds and publishes web/ on GitHub Pages
-│   └── dependabot.yml       # weekly bumps of pinned actions and crates
+│   ├── workflows/ci.yml     # format, lint, test, WASM build and size budget, stack canary, web and tooling tests, cargo-deny, RustSec audit, link check
+│   ├── workflows/pages.yml  # audits, tests, builds and publishes web/ on GitHub Pages
+│   └── dependabot.yml       # weekly bumps of pinned actions, crates and npm packages
 ├── .claude/                 # Stellar plugin shared through the repo; hook refusing to stage private folders
 ├── .mcp.json                # Raven MCP server (Stellar docs and live data)
 ├── AGENTS.md / CLAUDE.md    # instructions for AI agents
@@ -205,6 +206,8 @@ cargo clippy --all-targets -- -D warnings       # security lints
 cargo test                                      # unit tests, run off-chain (the upgrade test needs the WASM)
 ```
 
+CI also runs the contract's suite against a WASM linked with an 8 KiB stack (the WASM test mode, described in [AGENTS.md](AGENTS.md#test)), and `npm test` in `web/`, `demo/` and `indexer/`.
+
 ### 3. Deploy to testnet
 
 ```sh
@@ -219,7 +222,7 @@ stellar contract deploy \
 
 stellar contract invoke --id night_window --source-account alice --network testnet \
   -- version
-# 3
+# 4
 ```
 
 The deployed contract can be inspected on [stellar.expert/explorer/testnet](https://stellar.expert/explorer/testnet) or in [Stellar Lab](https://lab.stellar.org). `stellar contract invoke --id night_window -- -h` prints the generated command line for every function.
@@ -249,6 +252,7 @@ The History page lists every repo and event since the deployment from the export
 cd indexer && npm install
 npm run index                       # read new events behind a persistent cursor
 npm run verify                      # recompute the hash chain
+npm run verify -- --against <url>   # also compare it, both ways and by content, with another RPC endpoint
 npm run export -- --json --web      # feed web/public/history.json
 ```
 
