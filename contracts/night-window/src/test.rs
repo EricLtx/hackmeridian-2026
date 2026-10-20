@@ -1619,6 +1619,79 @@ fn fallback_is_checked_again_when_applied() {
     f.client.apply_fallback(&f.shares);
 }
 
+/// Review finding oracle-5 (20 October 2026): the primary feed was accepted
+/// as its own fallback, a backup that agrees by construction and goes silent
+/// with the primary. It is refused at the proposal, and at the apply of a
+/// proposal made before rc5.
+#[test]
+fn the_primary_feed_cannot_be_its_own_fallback() {
+    let (f, _) = ready();
+    let itself = fallback_feed(&f, &f.nav_oracle);
+    assert_eq!(
+        f.client.try_propose_fallback(&f.shares, &itself),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    assert_eq!(f.client.pending_fallback(&f.shares), None);
+
+    let eta = f.env.ledger().timestamp() + f.client.timelock_delay();
+    f.env.as_contract(&f.contract_id, || {
+        crate::storage::set_pending_fallback(
+            &f.env,
+            &f.shares,
+            &PendingFallback {
+                feed: itself.clone(),
+                eta,
+            },
+        );
+    });
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+}
+
+/// Review finding oracle-5 (20 October 2026): a fallback that agreed with
+/// the primary when proposed was applied, by anyone, at a moment the
+/// primary was stale, and compared with nothing: 0.3 % away for a 0.2 %
+/// tolerance, it then priced the fund alone. A fallback is proposed and
+/// applied only against a fresh primary it agrees with.
+#[test]
+fn a_fallback_is_installed_only_against_a_fresh_primary() {
+    let (f, _) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    advance(&f, 26 * HOUR + 1);
+    publish_on(&f, &feed, NAV_EUR_8);
+    assert_eq!(
+        f.client
+            .try_propose_fallback(&f.shares, &fallback_feed(&f, &oracle)),
+        Err(Ok(Error::StalePrice))
+    );
+    publish_nav(&f, NAV_EUR);
+    f.client
+        .propose_fallback(&f.shares, &fallback_feed(&f, &oracle));
+
+    // The primary went stale during the delay, and the fallback drifted
+    // beyond its tolerance.
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    publish_on(&f, &feed, NAV_EUR_8 * 1_003 / 1_000);
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::StalePrice))
+    );
+    assert_eq!(f.client.get_fallback(&f.shares), None);
+    publish_nav(&f, NAV_EUR);
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::PriceDivergence))
+    );
+    publish_on(&f, &feed, NAV_EUR_8);
+    f.client.apply_fallback(&f.shares);
+    assert!(f.client.get_fallback(&f.shares).is_some());
+}
+
 #[test]
 fn stale_primary_falls_back_to_a_fresh_fallback() {
     let (f, offer_id, feed) = ready_with_fallback();

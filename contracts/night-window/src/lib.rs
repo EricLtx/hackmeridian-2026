@@ -3004,14 +3004,19 @@ fn install_fund(env: &Env, fund: Address, config: FundConfig, state: FundState) 
     .publish(env);
 }
 
-/// Checks a fallback feed for a fund and returns its decimals.
+/// Checks a fallback feed for a fund and returns its decimals, when it is
+/// proposed and again when it is applied.
 ///
-/// The divergence tolerance is capped by the envelope's corridor floor: the
-/// floor is how far below the model the protocol lets a NAV fall before it
-/// calls the price faulty, so two feeds of the same NAV that differ by more
-/// than that cannot both be right. The age limit may not exceed the
-/// envelope's NAV age nor the fund's own limit for its primary feed: a
-/// backup older than the primary would be allowed to be is no backup.
+/// A fallback is a second source: never the primary feed itself, and it must
+/// agree with a fresh primary. A stale or silent primary refuses it, with
+/// the primary's error, instead of letting it be installed compared with
+/// nothing (review finding oracle-5, 20 October 2026). The divergence
+/// tolerance is capped by the envelope's corridor floor: the floor is how
+/// far below the model the protocol lets a NAV fall before it calls the
+/// price faulty, so two feeds of the same NAV that differ by more than that
+/// cannot both be right. The age limit may not exceed the envelope's NAV
+/// age nor the fund's own limit for its primary feed: a backup older than
+/// the primary would be allowed to be is no backup.
 fn check_fallback(
     env: &Env,
     fund: &Address,
@@ -3023,6 +3028,7 @@ fn check_fallback(
         || feed.max_age_secs > envelope.max_nav_age_secs.min(config.nav_max_age_secs)
         || feed.max_divergence_bps == 0
         || feed.max_divergence_bps > envelope.max_corridor_floor_bps
+        || (feed.oracle == config.oracle && feed.asset == config.oracle_asset)
     {
         return Err(Error::OutsideEnvelope);
     }
@@ -3033,9 +3039,19 @@ fn check_fallback(
     let decimals = check_feed_decimals(fallback.decimals())?;
     let state = storage::fund_state(env, fund)?;
     // The feed must track the shares now, and agree with a fresh primary.
-    oracle::read_fallback(env, config, feed, decimals, state.nav_decimals)?;
-    let candidate = (feed.clone(), decimals);
-    if let Err(Error::PriceDivergence) = oracle::read_nav(env, config, &state, Some(&candidate)) {
+    let backup = oracle::read_fallback(env, config, feed, decimals, state.nav_decimals)?;
+    let nav = oracle::read_fresh(
+        env,
+        &config.oracle,
+        &config.oracle_asset,
+        state.nav_decimals,
+        config.nav_max_age_secs,
+    )?;
+    if !math::within_band(
+        backup.price.mantissa(),
+        nav.price.mantissa(),
+        feed.max_divergence_bps,
+    )? {
         return Err(Error::PriceDivergence);
     }
     Ok(decimals)
