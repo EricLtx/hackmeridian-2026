@@ -360,10 +360,17 @@ export const DETECTORS = {
     }
     for (const e of s.events.filter((ev) => PROPOSALS.test(ev.name))) {
       // rc4: a stablecoin registration announced beforehand (`--announce-stablecoin=<address>`) is a warning; unannounced, it is cancelled.
+      // Only while it is pending (TOOL-7): an event re-read after its
+      // cancellation, such as drill 18's after a rehearsal, is history.
       if (e.name === "stablecoin_change_proposed") {
         const token = String(e.topics?.[0] ?? "");
         const known = (monitor.announcedStablecoins ?? []).includes(token);
-        out.push({ level: known ? "warning" : "critical", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"}${known ? " (announced)" : " (NOT announced)"}`, action: known ? "verify before it applies" : "cancel stablecoin", token, tx: e.txHash });
+        const gone = s.pendingStablecoins?.[token] === null;
+        if (known || gone) {
+          out.push({ level: "warning", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"}${known ? " (announced)" : ""}${gone ? ", no longer pending (withdrawn or applied)" : ""}`, action: gone ? "verify" : "verify before it applies", token, tx: e.txHash });
+        } else {
+          out.push({ level: "critical", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"} (NOT announced)`, action: "cancel stablecoin", token, tx: e.txHash });
+        }
         continue;
       }
       const isUpgrade = e.name === "upgrade_proposed";
@@ -400,6 +407,13 @@ export const DETECTORS = {
     }
     if (p.forcedGuardian && !(monitor.announcedGuardians ?? []).includes(p.forcedGuardian.guardian) && !reported("guardian_change_forced")) {
       out.push({ level: "critical", message: `forced guardian change to ${p.forcedGuardian.guardian.slice(0, 8)}… pending (NOT announced), applies at ${at(p.forcedGuardian.eta)} UTC`, action: "veto_forced" });
+    }
+    // Stablecoin proposals are kept per token: the tokens their events named,
+    // in this window or an earlier one, are read on every pass (TOOL-7).
+    const proposedHere = new Set(s.events.filter((e) => e.name === "stablecoin_change_proposed").map((e) => String(e.topics?.[0] ?? "")));
+    for (const [token, pending] of Object.entries(s.pendingStablecoins ?? {})) {
+      if (!pending || proposedHere.has(token) || (monitor.announcedStablecoins ?? []).includes(token)) continue;
+      out.push({ level: "critical", message: `stablecoin registration of ${token.slice(0, 8)}… as ${pending.currency ?? "?"} pending (NOT announced), applicable from ${at(pending.eta)} UTC`, action: "cancel stablecoin", token });
     }
     return out.map((a) => ({ detector: "proposals", threat: "Elev.2", ...a }));
   },
@@ -701,9 +715,10 @@ export function recordAnnouncement(monitor, args, { isAddress = () => true } = {
  * of an unannounced upgrade or stablecoin and the pause first, as the
  * sentinel needs no other key; then the vetoes; then the keeper's
  * extensions, reference refresh and releases. `s.pending` holds the
- * proposals the snapshot read; `ctx.actor` is the key that pauses and
- * cancels, `ctx.keys` the keys this host holds, `ctx.limits` the thresholds.
- * Returns `{ actions, alerts }`: `alerts` stand where a key is missing.
+ * proposals the snapshot read, `s.pendingStablecoins` the stablecoin ones
+ * by token; `ctx.actor` is the key that pauses and cancels, `ctx.keys` the
+ * keys this host holds, `ctx.limits` the thresholds. Returns
+ * `{ actions, alerts }`: `alerts` stand where a key is missing.
  */
 export function decideActions(alerts, s, monitor = {}, { actor = "guardian", keys = {}, limits = LIMITS } = {}) {
   const actions = [];
@@ -713,9 +728,10 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
   if (asked((a) => a.action === "cancel") && pending.upgrade && !(monitor.announced ?? []).includes(pending.upgrade.hash)) {
     actions.push({ kind: "cancel_upgrade", role: actor, hash: pending.upgrade.hash });
   }
-  // rc4: a stablecoin proposed without an announcement is withdrawn the same way.
+  // rc4: a stablecoin proposed without an announcement is withdrawn the same
+  // way, only while the state shows it pending (TOOL-7), like the upgrade.
   for (const token of new Set(alerts.filter((x) => x.action === "cancel stablecoin" && x.token).map((x) => x.token))) {
-    actions.push({ kind: "cancel_stablecoin", role: actor, token });
+    if (s.pendingStablecoins?.[token] && !(monitor.announcedStablecoins ?? []).includes(token)) actions.push({ kind: "cancel_stablecoin", role: actor, token });
   }
   const pauses = alerts.filter((a) => a.level === "critical" && a.action === "pause");
   if (!s.paused && pauses.length) actions.push({ kind: "pause", role: actor, grounds: pauses.map((a) => a.ground).filter(Boolean) });

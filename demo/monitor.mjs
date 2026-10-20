@@ -481,11 +481,21 @@ async function snapshot(monitor) {
     paused = await read(state, C.openWindow, "is_paused");
     pending = await pendingProposals(primaryRead);
   }
+  // Stablecoin proposals are kept per token, with no list to read: the
+  // tokens their events named, in this window or in an earlier one while
+  // still pending, are read from state on every pass (TOOL-7). Null: no
+  // longer pending; undefined: the read failed.
+  const proposedCoins = [...new Set([
+    ...(monitor.stablecoinProposals ?? []),
+    ...events.filter((e) => e.name === "stablecoin_change_proposed").map((e) => String(e.topics?.[0] ?? "")),
+  ].filter((token) => StrKey.isValidContract(token)))];
+  const pendingStablecoins = Object.fromEntries(await Promise.all(proposedCoins.map(async (token) => [token, await read(state, C.openWindow, "pending_stablecoin_change", [sv.address(token)]).catch(() => undefined)])));
+  monitor.stablecoinProposals = proposedCoins.filter((token) => pendingStablecoins[token] !== null);
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
   const trail = await readTrail(journal);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl(), trail };
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, pendingStablecoins, second, primaryUrl: activeRpcUrl(), trail };
 }
 
 /**
@@ -1158,6 +1168,9 @@ async function rehearse() {
     }
   }
 
+  // The event cursor and the memory of every drill: the next watch starts
+  // after the rehearsal's own events, not before drills 14 to 19 (TOOL-7).
+  saveMonitor(monitor);
   const file = path.join(STATE_DIR, `rehearsal-${new Date().toISOString().slice(0, 10)}.json`);
   fs.writeFileSync(file, JSON.stringify(results, null, 2));
   console.log(`\nRehearsal written to ${path.relative(process.cwd(), file)}`);

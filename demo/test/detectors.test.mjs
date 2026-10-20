@@ -288,10 +288,48 @@ test("privileged: an unannounced upgrade is cancelled, an announced one is a war
 
 test("privileged: an unannounced stablecoin registration is cancelled, an announced one is a warning", () => {
   const events = [{ name: "stablecoin_change_proposed", ledger: 9, txHash: "t", topics: ["CTOKEN"], data: { currency: "EUR" } }];
-  let [alert] = run("privileged", snap({ events }));
+  const pendingStablecoins = { CTOKEN: { currency: "EUR", eta: BigInt(NOW + 300) } };
+  let [alert] = run("privileged", snap({ events, pendingStablecoins }));
   assert.deepEqual([alert.level, alert.action, alert.token], ["critical", "cancel stablecoin", "CTOKEN"]);
-  [alert] = run("privileged", snap({ events }), { announcedStablecoins: ["CTOKEN"] });
+  assert.deepEqual(decideActions([alert], snap({ events, pendingStablecoins }), {}, { actor: "sentinel" }).actions, [{ kind: "cancel_stablecoin", role: "sentinel", token: "CTOKEN" }]);
+  [alert] = run("privileged", snap({ events, pendingStablecoins }), { announcedStablecoins: ["CTOKEN"] });
   assert.deepEqual([alert.level, alert.action], ["warning", "verify before it applies"]);
+});
+
+test("a stablecoin proposal no longer pending is history: no critical alert, no cancellation (TOOL-7)", () => {
+  // Drill 18's proposal and its cancellation, re-read by the first watch after a rehearsal.
+  const s = snap({
+    events: [
+      { name: "stablecoin_change_proposed", ledger: 3, txHash: "t1", topics: ["CDRILLTOKEN"], data: { currency: "XXX", eta: BigInt(NOW - 300) } },
+      { name: "stablecoin_change_cancelled", ledger: 4, txHash: "t2", topics: ["CDRILLTOKEN"], data: { by: "GSENTINEL" } },
+    ],
+    pending: { upgrade: null, admin: null, forcedGuardian: null },
+    pendingStablecoins: { CDRILLTOKEN: null },
+  });
+  const alerts = detect(s, {}, ctx());
+  assert.deepEqual(alerts.filter((a) => a.level === "critical").map((a) => a.message), []);
+  assert.ok(alerts.some((a) => a.detector === "privileged" && /CDRILLTO… as XXX, no longer pending \(withdrawn or applied\)$/.test(a.message)));
+  assert.deepEqual(decideActions(alerts, s, {}, { actor: "sentinel", keys: {} }).actions, []);
+  // A state that could not be read keeps the alert critical, and nothing is sent on it.
+  const unread = { ...s, events: s.events.slice(0, 1), pendingStablecoins: { CDRILLTOKEN: undefined } };
+  const blind = detect(unread, {}, ctx());
+  assert.deepEqual(blind.filter((a) => a.level === "critical").map((a) => a.action), ["cancel stablecoin"]);
+  assert.deepEqual(decideActions(blind, unread, {}, { actor: "sentinel" }).actions, []);
+});
+
+test("proposals: a stablecoin proposal still pending stays critical on every pass, read from state, until it is gone (TOOL-7)", () => {
+  const pendingStablecoins = { CTOKEN: { currency: "EUR", eta: BigInt(NOW + 300) }, COLD: null };
+  for (let pass = 0; pass < 2; pass += 1) {
+    const out = run("proposals", snap({ pendingStablecoins }));
+    assert.deepEqual(out.map((a) => [a.level, a.action, a.token]), [["critical", "cancel stablecoin", "CTOKEN"]]);
+    assert.match(out[0].message, /^stablecoin registration of CTOKEN… as EUR pending \(NOT announced\), applicable from /);
+    assert.deepEqual(decideActions(out, snap({ pendingStablecoins }), {}, { actor: "sentinel" }).actions, [{ kind: "cancel_stablecoin", role: "sentinel", token: "CTOKEN" }]);
+  }
+  // Reported by its own event in this pass, announced, or gone: nothing more here.
+  const events = [{ name: "stablecoin_change_proposed", ledger: 9, topics: ["CTOKEN"], data: { currency: "EUR" } }];
+  assert.deepEqual(run("proposals", snap({ pendingStablecoins, events })), []);
+  assert.deepEqual(run("proposals", snap({ pendingStablecoins }), { announcedStablecoins: ["CTOKEN"] }), []);
+  assert.deepEqual(run("proposals", snap({ pendingStablecoins: { CTOKEN: null } })), []);
 });
 
 test("privileged: a code change and a steward without backup are reported", () => {
@@ -449,7 +487,7 @@ test("decideActions: cancellation and extensions follow the alerts, in order", (
     { level: "warning", action: "extend", key: "kc", kind: "code", days: 89 },
     { level: "warning", action: "refresh_reference", fund: "CF1" },
   ];
-  const s = snap({ pending: { upgrade: { hash: "ab".repeat(32), eta: 1 } } });
+  const s = snap({ pending: { upgrade: { hash: "ab".repeat(32), eta: 1 } }, pendingStablecoins: { CTOKEN: { currency: "EUR", eta: 1n } } });
   const { actions } = decideActions(alerts, s, {}, { actor: "sentinel", keys: {} });
   assert.deepEqual(actions.map((a) => a.kind), ["cancel_upgrade", "cancel_stablecoin", "extend", "extend_code", "refresh_reference"]);
   assert.deepEqual([actions[0].role, actions[0].hash], ["sentinel", "ab".repeat(32)]);
