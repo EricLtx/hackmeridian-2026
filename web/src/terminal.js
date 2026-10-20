@@ -186,7 +186,7 @@ export function createTerminal(ctx) {
       }),
     );
     for (const id of [...m.dues.keys()]) if (m.repos.get(id)?.status !== "Open") m.dues.delete(id);
-    // Shares a token held back: checked once when a repo closes, then while they wait.
+    // Shares held back (a token refusal, a lender awaiting approval): checked once when a repo closes, then while they wait.
     const ids = [...new Set([...m.toCheck, ...m.releases.keys()])];
     await Promise.all(
       ids.map(async (id) => {

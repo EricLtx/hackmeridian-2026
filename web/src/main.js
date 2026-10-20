@@ -66,7 +66,7 @@ const S = {
   nextRepo: 1, // first repo id not scanned yet
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
-  releases: new Map(), // closed repo id -> shares the token refused to deliver
+  releases: new Map(), // closed repo id -> shares held back (the token refused them, or the lender awaits approval)
   history: null, // the indexer's export (history.json) when the page can read it: events by repo, for the timelines
   historyDue: false, // fetch the export again on the next pass (REF, the page back in view)
   delay: null, // the contract's time delay, seconds
@@ -849,7 +849,7 @@ async function refreshPositions() {
       }
     }),
   );
-  // A closed repo may still owe shares the issuer's token refused to move.
+  // A closed repo may still owe shares: the token refused to move them, or (a seizure) the lender awaits approval.
   const closedIds = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status !== "Open").map((r) => r.id);
   await Promise.all(
     closedIds.map(async (id) => {
