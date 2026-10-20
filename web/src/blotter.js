@@ -220,7 +220,10 @@ export function tapeLine(e, ctx = {}) {
   const shares = (v) => formatAmount(big(v), fd);
   const sym = (fund) => (ctx.symbolOf ? ctx.symbolOf(fund) : shortAddress(fund));
   const short = (a) => (a ? shortAddress(String(a)) : "—");
-  const at = (secs) => tapeTime(new Date(Number(secs) * 1000).toISOString(), ctx.now ?? 0);
+  const at = (secs) => {
+    const when = new Date(Number(secs) * 1000);
+    return Number.isNaN(when.getTime()) ? "--:--:--" : tapeTime(when.toISOString(), ctx.now ?? 0);
+  };
   const repoCode = (id) => ctx.codeOfRepo?.(Number(id)) ?? ctx.code ?? "";
   const offerCode = (id) => ctx.codeOfOffer?.(Number(id)) ?? ctx.code ?? "";
   const hash = () => String(d.wasm_hash).slice(0, 8);
@@ -239,7 +242,7 @@ export function tapeLine(e, ctx = {}) {
       text: t("#{id} {amount} @ {rate} · {shares} {fund} · offer #{offer} · {borrower}", {
         id: tp[0],
         amount: money(d.principal, offerCode(d.offer_id)),
-        rate: formatRate(d.rate_bps),
+        rate: formatRate(big(d.rate_bps)),
         shares: shares(d.shares),
         fund: sym(d.fund),
         offer: d.offer_id,
@@ -266,7 +269,7 @@ export function tapeLine(e, ctx = {}) {
     offer_created: () => ({
       code: t("OFFER"),
       tone: "id",
-      text: t("#{id} {amount} @ {rate} up to {hours} h by {lender}", { id: tp[0], amount: money(d.amount, offerCode(tp[0])), rate: formatRate(d.rate_bps), hours: Math.floor(Number(d.max_term) / HOUR), lender: short(tp[1]) }),
+      text: t("#{id} {amount} @ {rate} up to {hours} h by {lender}", { id: tp[0], amount: money(d.amount, offerCode(tp[0])), rate: formatRate(big(d.rate_bps)), hours: Math.floor(Number(d.max_term) / HOUR), lender: short(tp[1]) }),
     }),
     offer_withdrawn: () => ({ code: t("WDRAW"), tone: "dim", text: t("#{id} {amount} withdrawn", { id: tp[0], amount: money(d.amount, offerCode(tp[0])) }) }),
     sponsor_set: () => ({ code: t("DSG"), tone: "id", text: d.sponsor ? t("offer #{id} designated by the issuer", { id: tp[0] }) : t("offer #{id} no longer designated", { id: tp[0] }) }),
@@ -274,12 +277,12 @@ export function tapeLine(e, ctx = {}) {
       d.paused
         ? { code: t("PAUSE"), tone: "warn", text: t("new entries paused by {by}; exits still work", { by: short(d.by) }) }
         : { code: t("RESUME"), tone: "ok", text: t("entries reopened by {by}", { by: short(d.by) }) },
-    fund_set: () => ({ code: t("FUND"), tone: "id", text: t("{fund} admitted, haircut {haircut}", { fund: sym(tp[0]), haircut: formatRate(d.haircut_bps) }) }),
+    fund_set: () => ({ code: t("FUND"), tone: "id", text: t("{fund} admitted, haircut {haircut}", { fund: sym(tp[0]), haircut: formatRate(big(d.haircut_bps)) }) }),
     fund_removed: () => ({ code: t("FUND"), tone: "warn", text: t("{name} removed", { name: sym(tp[0]) }) }),
     fund_limits_set: () => ({
       code: t("LIMIT"),
       tone: "id",
-      text: t("{fund} haircut {haircut}, {perRepo} per repo, cap {cap}", { fund: sym(tp[0]), haircut: formatRate(d.haircut_bps), perRepo: money(d.max_principal_per_repo), cap: money(d.max_outstanding) }),
+      text: t("{fund} haircut {haircut}, {perRepo} per repo, cap {cap}", { fund: sym(tp[0]), haircut: formatRate(big(d.haircut_bps)), perRepo: money(d.max_principal_per_repo), cap: money(d.max_outstanding) }),
     }),
     fund_frozen: () =>
       d.frozen
@@ -313,7 +316,13 @@ export function tapeLine(e, ctx = {}) {
   };
   const name = String(e.event ?? "");
   const known = Object.prototype.hasOwnProperty.call(rows, name);
-  let row = known ? rows[name]() : null;
+  let row = null;
+  try {
+    row = known ? rows[name]() : null;
+  } catch {
+    // A malformed event of a known kind (from an RPC or the export) keeps the generic line: the tape goes on.
+    row = null;
+  }
   if (!row) {
     // Events this table does not know: the event name, as the contract spells it.
     const event = human(name);

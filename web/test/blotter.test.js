@@ -190,6 +190,21 @@ test("the valuation behind an opening has its own tape line: price per share and
   assert.equal(tapeLine({ ...valued, data: { price: "oops", haircut_bps: "oops" } }, ctx).text, "#12 tMMF valued at 0.0000 tEUR per share, haircut 0.00 %");
 });
 
+test("a malformed event never stops the tape", () => {
+  const ctx = { sd: 7, fd: 7, code: "tEUR", now: T0, symbolOf: (a) => (a === F1 ? "tMMF" : a.slice(0, 4)) };
+  // An RPC or an export can carry a rate that is not a number: it reads as 0, it does not throw.
+  const opened = tapeLine({ event: "repo_opened", topics: ["1", ME], data: { principal: "10000000", rate_bps: "abc", shares: "10000000", fund: F1, offer_id: "1" } }, ctx);
+  assert.equal(opened.code, "OPEN");
+  assert.match(opened.text, /@ 0\.00 % · 1\.00 tMMF/);
+  assert.match(tapeLine({ event: "fund_limits_set", topics: [F1], data: { haircut_bps: "x" } }, ctx).text, /tMMF haircut 0\.00 %/);
+  // A date that is not one keeps a placeholder time.
+  assert.equal(tapeLine({ event: "upgrade_proposed", topics: [], data: { wasm_hash: "abcdef0123", eta: "abc" } }, ctx).text, "code abcdef01 proposed, applicable --:--:-- UTC");
+  assert.equal(tapeLine({ event: "fallback_proposed", topics: [], data: { eta: 1e300 } }, ctx).text, "fallback proposed, applicable --:--:-- UTC");
+  // A known event whose line cannot be made keeps the generic line of its name.
+  const odd = tapeLine({ event: "fund_set", topics: [5], data: { haircut_bps: 100 } }, ctx);
+  assert.deepEqual([odd.code, odd.text, odd.known], ["GOV", "fund set", true]);
+});
+
 test("an event the tape does not name is marked unknown, whatever its name", () => {
   for (const event of ["something_new", "constructor", "toString", "__proto__", ""]) {
     const line = tapeLine({ event, topics: [], data: {} }, {});

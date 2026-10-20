@@ -90,6 +90,20 @@ export function formatUnits(units, decimals, { digits = decimals, rounding = "ro
 /** A token amount for display: two decimals, grouped. */
 export const formatAmount = (units, decimals = 7, rounding = "round") => formatUnits(units, decimals, { digits: 2, rounding });
 
+/**
+ * An integer from untrusted data (an exported journal, a decoded event)
+ * formatted by `format`, or a dash when it is empty, not an integer, or
+ * cannot be formatted: one bad cell never stops a page.
+ */
+export function formatOrDash(raw, format) {
+  if (raw === "" || raw === null || raw === undefined) return "—";
+  try {
+    return format(BigInt(raw));
+  } catch {
+    return "—";
+  }
+}
+
 /** Units back to a plain input string ("1250.5", "1250,5" in French), no grouping, no trailing zeros. */
 export function unitsToInput(units, decimals) {
   const value = BigInt(units);

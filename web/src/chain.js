@@ -174,7 +174,7 @@ export function checkPrice(settled) {
 }
 
 /** Decimals read on chain stay between 0 and 38: a larger one would freeze the page in a power of ten. */
-const DECIMAL_KEYS = ["nav_decimals", "fx_decimals", "price_decimals", "decimals"];
+const DECIMAL_KEYS = ["nav_decimals", "fx_decimals", "share_decimals", "price_decimals", "decimals"];
 export function checkDecimals(value, what = "value") {
   for (const k of DECIMAL_KEYS) {
     if (value && typeof value === "object" && k in value) {
@@ -184,14 +184,85 @@ export function checkDecimals(value, what = "value") {
   }
   return value;
 }
-const settledDecimals = (what) => (settled) => {
-  if (!settled || settled.error || !settled.value) return settled;
+
+/** A Soroban symbol, as a currency or an asset ticker decodes. */
+const SYMBOL = /^[A-Za-z0-9_]{1,32}$/;
+
+/** Throws unless `value` has every key: a missing field would reach the page as undefined, then BigInt(). */
+function need(value, keys, what) {
+  for (const k of keys) if (!(k in value)) throw new TypeError(`missing ${what}.${k} from the chain`);
+}
+
+/** An integer read on chain (u32, u64 or i128), or a TypeError. */
+export function checkInt(value, what = "value") {
+  if (!isInt(value)) throw new TypeError(`unexpected ${what} from the chain`);
+  return value;
+}
+
+/** A SEP-40 asset as decoded: `["Stellar", address]` or `["Other", symbol]`. */
+function checkAsset(asset, what) {
+  const [kind, id] = Array.isArray(asset) && asset.length === 2 ? asset : [];
+  const ok = typeof id === "string" && ((kind === "Stellar" && STRKEY.test(id)) || (kind === "Other" && SYMBOL.test(id)));
+  if (!ok) throw new TypeError(`unexpected ${what} from the chain`);
+}
+
+const FUND_INTS = ["haircut_bps", "nav_max_age_secs", "corridor_floor_bps", "max_yield_bps", "max_principal_per_repo", "max_outstanding"];
+const LEG_INTS = ["haircut_bps", "max_age_secs", "band_bps"];
+const STATE_INTS = ["share_decimals", "nav_decimals", "fx_decimals", "reference_nav", "reference_time", "reference_fx", "outstanding"];
+
+/**
+ * A fund's settings as `get_fund` returns them (FundConfig), or null for a
+ * fund not admitted. The price source is `["Direct"]` or `["Cross", leg]`;
+ * anything else is refused here, so the exchange-rate read never starts
+ * from a source it cannot use.
+ */
+export function checkFund(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: FUND_INTS, addresses: ["oracle", "steward"], what: "fund" });
+  need(value, [...FUND_INTS, "oracle", "steward", "oracle_asset", "currency", "source"], "fund");
+  checkAsset(value.oracle_asset, "fund.oracle_asset");
+  if (typeof value.currency !== "string" || !SYMBOL.test(value.currency)) throw new TypeError("unexpected fund.currency from the chain");
+  const source = value.source;
+  if (Array.isArray(source) && source.length === 1 && source[0] === "Direct") return value;
+  if (Array.isArray(source) && source.length === 2 && source[0] === "Cross") {
+    checkShape(source[1], { ints: LEG_INTS, addresses: ["oracle"], what: "fund.source" });
+    need(source[1], [...LEG_INTS, "oracle", "asset"], "fund.source");
+    checkAsset(source[1].asset, "fund.source.asset");
+    return value;
+  }
+  throw new TypeError("unexpected fund.source from the chain");
+}
+
+/** A fund's state as `get_fund_state` returns it (FundState), or null for a fund not admitted. */
+export function checkFundState(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: STATE_INTS, what: "fund state" });
+  need(value, [...STATE_INTS, "currency", "frozen"], "fund state");
+  if (typeof value.frozen !== "boolean") throw new TypeError("unexpected fund state.frozen from the chain");
+  if (typeof value.currency !== "string" || !SYMBOL.test(value.currency)) throw new TypeError("unexpected fund state.currency from the chain");
+  return checkDecimals(value, "fund state");
+}
+
+/** Shares owed on a closed repo (`pending_release`): `{ fund, to, shares }`, or null when none are. */
+export function checkPendingRelease(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: ["shares"], addresses: ["fund", "to"], what: "pending release" });
+  need(value, ["fund", "to", "shares"], "pending release");
+  return value;
+}
+
+/** Applies `check` to a settled read: `{ value }` checked, or `{ error }` when the value is not what the contract returns. */
+const settledWith = (check) => (settled) => {
+  if (!settled || settled.error) return settled;
   try {
-    checkDecimals(settled.value, what);
-    return settled;
+    return { value: check(settled.value) };
   } catch (error) {
     return { error };
   }
+};
+const isBool = (value, what) => {
+  if (typeof value !== "boolean") throw new TypeError(`unexpected ${what} from the chain`);
+  return value;
 };
 
 /** The most a transaction may carry in resource fees before anything is signed: legitimate calls cost about 1 XLM on testnet. */
@@ -444,11 +515,12 @@ export class Chain {
 
   /** Interest due on an open repo if repurchased now (principal not included). */
   async repoDue(id) {
-    return BigInt(await this.read(this.contracts.openWindow, "repo_due", [sv.u64(id)]));
+    return BigInt(checkInt(await this.read(this.contracts.openWindow, "repo_due", [sv.u64(id)]), "repo_due"));
   }
 
-  isLenderApproved(address) {
-    return this.read(this.contracts.openWindow, "is_lender_approved", [sv.address(this.fund), sv.address(address)]);
+  /** Whether the fund's steward approves `address` as a lender; anything but true reads as no. */
+  async isLenderApproved(address) {
+    return (await this.read(this.contracts.openWindow, "is_lender_approved", [sv.address(this.fund), sv.address(address)])) === true;
   }
 
   /**
@@ -459,33 +531,44 @@ export class Chain {
     const ow = this.contracts.openWindow;
     const fund = sv.address(this.fund);
     const [config, state, paused, maxTerm, nav, quote, offers, cap, outstanding, now] = await Promise.all([
-      this.settle(ow, "get_fund", [fund]),
-      this.settle(ow, "get_fund_state", [fund]).then(settledDecimals("fund state")),
-      this.settle(ow, "is_paused"),
-      this.settle(ow, "max_term"),
-      this.settle(ow, "fund_price", [fund]),
+      this.settle(ow, "get_fund", [fund]).then(settledWith(checkFund)),
+      this.settle(ow, "get_fund_state", [fund]).then(settledWith(checkFundState)),
+      this.settle(ow, "is_paused").then(settledWith((v) => isBool(v, "is_paused"))),
+      this.settle(ow, "max_term").then(settledWith((v) => checkInt(v, "max_term"))),
+      this.settle(ow, "fund_price", [fund]).then(checkPrice),
       shares > 0n ? this.quote(shares).then((value) => ({ value }), (error) => ({ error })) : { value: null },
       this.offers().then((value) => ({ value }), (error) => ({ error })),
-      this.settle(ow, "currency_cap", [sv.symbol(this.deployment.stablecoin.currency)]),
-      this.settle(ow, "currency_outstanding", [sv.symbol(this.deployment.stablecoin.currency)]),
+      this.settle(ow, "currency_cap", [sv.symbol(this.deployment.stablecoin.currency)]).then(settledWith((v) => checkInt(v, "currency_cap"))),
+      this.settle(ow, "currency_outstanding", [sv.symbol(this.deployment.stablecoin.currency)]).then(settledWith((v) => checkInt(v, "currency_outstanding"))),
       this.ledgerTime().then((value) => ({ value }), (error) => ({ error })),
     ]);
-    let fx = { value: null };
-    const source = config.value?.source;
-    if (Array.isArray(source) && source[0] === "Cross") {
-      fx = checkPrice(await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]));
-    }
+    const fx = await this.exchangeRate(config.value);
     // Every admitted fund the deployment lists (one, or two after `setup -- --second-fund`): settings and state.
     const funds = await Promise.all(
       (this.deployment.funds ?? []).map(async (f) => {
         const [cfg, st] = await Promise.all([
-          this.settle(ow, "get_fund", [sv.address(f.shares)]),
-          this.settle(ow, "get_fund_state", [sv.address(f.shares)]).then(settledDecimals("fund state")),
+          this.settle(ow, "get_fund", [sv.address(f.shares)]).then(settledWith(checkFund)),
+          this.settle(ow, "get_fund_state", [sv.address(f.shares)]).then(settledWith(checkFundState)),
         ]);
         return { ...f, config: cfg, state: st };
       }),
     );
     return { config, state, paused, maxTerm, nav, fx, quote, offers, cap, outstanding, now, funds };
+  }
+
+  /**
+   * The exchange rate of a cross-priced fund, read on its FX oracle: `{ value }`,
+   * `{ error }`, or `{ value: null }` for a fund priced directly. A source the
+   * page cannot read from becomes this field's error, never the whole pass's.
+   */
+  async exchangeRate(config) {
+    const source = config?.source;
+    if (!Array.isArray(source) || source[0] !== "Cross") return { value: null };
+    try {
+      return checkPrice(await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]));
+    } catch (error) {
+      return { error };
+    }
   }
 
   /** Balances of an address: XLM, the stablecoin (null without trustline) and fund shares. */
@@ -501,9 +584,9 @@ export class Chain {
       if (r.error && !missing(r)) throw r.error;
     }
     return {
-      xlm: xlm.error ? null : BigInt(xlm.value),
-      stablecoin: stable.error ? null : BigInt(stable.value),
-      shares: shares.error ? 0n : BigInt(shares.value),
+      xlm: xlm.error ? null : BigInt(checkInt(xlm.value, "balance")),
+      stablecoin: stable.error ? null : BigInt(checkInt(stable.value, "balance")),
+      shares: shares.error ? 0n : BigInt(checkInt(shares.value, "balance")),
     };
   }
 
@@ -546,11 +629,7 @@ export class Chain {
    * cross-priced fund, its exchange rate. Each `{ value }` or `{ error }`.
    */
   async feeds(fund, config) {
-    const source = config?.source;
-    const [nav, fx] = await Promise.all([
-      this.settle(this.contracts.openWindow, "fund_price", [sv.address(fund)]),
-      Array.isArray(source) && source[0] === "Cross" ? this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]).then(checkPrice) : { value: null },
-    ]);
+    const [nav, fx] = await Promise.all([this.settle(this.contracts.openWindow, "fund_price", [sv.address(fund)]).then(checkPrice), this.exchangeRate(config)]);
     return { nav, fx };
   }
 
@@ -856,7 +935,7 @@ export class Chain {
    * issuer freeze or allowlist removal): `{ fund, to, shares }` or null.
    */
   async pendingRelease(repoId) {
-    return this.read(this.contracts.openWindow, "pending_release", [sv.u64(repoId)]);
+    return checkPendingRelease(await this.read(this.contracts.openWindow, "pending_release", [sv.u64(repoId)]));
   }
 
   /** Retries the delivery of held-back shares; anyone may call it. Resolves `value` true when delivered. */

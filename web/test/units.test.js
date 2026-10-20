@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError, describeError } from "../src/errors.js";
-import { formatAge, formatAmount, formatCountdown, formatDuration, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
+import { formatAge, formatAmount, formatCountdown, formatDuration, formatOrDash, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
 import {
   chargedHours,
   defaultPrincipal,
@@ -64,6 +64,14 @@ test("units parse and format without float rounding", () => {
   assert.equal(unitsToInput(10_000_000n, 7), "1");
   assert.equal(formatRate(250), "2.50 %");
   assert.equal(formatRate(1), "0.01 %");
+});
+
+test("a cell of untrusted data is formatted or shown as a dash, never thrown", () => {
+  assert.equal(formatOrDash("12505000000", (v) => formatAmount(v, 7)), "1,250.50");
+  assert.equal(formatOrDash(350n, formatRate), "3.50 %");
+  assert.equal(formatOrDash("0", formatRate), "0.00 %");
+  for (const raw of ["", null, undefined, "abc", "1.5", "1e9", {}, [1, 2]]) assert.equal(formatOrDash(raw, formatRate), "—", JSON.stringify(raw));
+  assert.equal(formatOrDash("1", (v) => formatAmount(v, 99)), "—", "a format that refuses its decimals");
 });
 
 test("decimals from 0 to 38: fewer than the digits shown pad with zeros, more are refused at once", () => {

@@ -7,7 +7,7 @@
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
 import { tapeLine } from "./blotter.js";
-import { formatAmount, formatRate, shortAddress } from "./format.js";
+import { formatAmount, formatOrDash, formatRate, shortAddress } from "./format.js";
 import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
 import { initMotion, setLoading, transition } from "./motion.js";
 
@@ -32,7 +32,9 @@ const when = (iso) => (iso ? esc(iso.replace("T", " ").replace(/(:\d\d)Z$/, "$1 
 const txLink = (explorer, hash) =>
   hash ? `<a href="${esc(explorer)}/tx/${esc(hash)}" target="_blank" rel="noopener noreferrer" title="${esc(hash)}">${esc(hash.slice(0, 8))}…</a>` : "—";
 const addr = (a) => (a ? `<span title="${esc(a)}">${esc(shortAddress(a))}</span>` : "—");
-const units = (raw, d) => (raw === "" || raw === null || raw === undefined ? "—" : formatAmount(BigInt(raw), d));
+// An amount or a rate of the export, or a dash when the cell is empty or not an integer: a malformed export never stops the page.
+const units = (raw, d) => formatOrDash(raw, (value) => formatAmount(value, d));
+const rate = (raw) => formatOrDash(raw, formatRate);
 
 /**
  * The short code the terminal's tape gives an event (OPEN, VALUE, SEIZE...),
@@ -108,7 +110,7 @@ function renderRegistry(h) {
         <td data-label="${col.borrower}">${addr(r.borrower)}</td>
         <td data-label="${col.shares}" class="num">${units(r.shares, decimals.shares)}</td>
         <td data-label="${col.principal}" class="num">${units(r.principal, decimals.stablecoin)} ${esc(cur)}</td>
-        <td data-label="${col.rate}" class="num">${r.rate_bps === "" ? "—" : esc(formatRate(Number(r.rate_bps)))}</td>
+        <td data-label="${col.rate}" class="num">${esc(rate(r.rate_bps))}</td>
         <td data-label="${col.opened}">${when(r.opened_at)}</td>
         <td data-label="${col.maturity}">${when(r.maturity)}</td>
         <td data-label="${col.closed}">${when(r.closed_at)}${r.interest ? `<div class="small muted">${esc(t("interest {amount} {currency}", { amount: units(r.interest, decimals.stablecoin), currency: cur }))}</div>` : ""}</td>
