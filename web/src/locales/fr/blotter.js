@@ -15,6 +15,8 @@ export default {
   "VALUE": "VALO",
   "#{id} {fund} valued, haircut {haircut}": "#{id} {fund} valorisé, décote {haircut}",
   "#{id} {fund} valued at {price} per share, haircut {haircut}": "#{id} {fund} valorisé à {price} par part, décote {haircut}",
+  "#{id} {fund} valued by the backup feed, haircut {haircut}": "#{id} {fund} valorisé par le flux de secours, décote {haircut}",
+  "#{id} {fund} valued by the backup feed at {price} per share, haircut {haircut}": "#{id} {fund} valorisé par le flux de secours à {price} par part, décote {haircut}",
   "REPAY": "RACHAT",
   "#{id} {principal} + {interest} interest": "#{id} {principal} + {interest} d'intérêts",
   "SEIZE": "SAISIE",

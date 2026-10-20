@@ -251,15 +251,25 @@ export function tapeLine(e, ctx = {}) {
     }),
     // rc5: the valuation behind an opening, published right after it. The
     // price is per share in the loan currency, with the fund's NAV decimals.
+    // `fallback` is true when the fund's backup feed supplied the NAV: shown
+    // in amber; an event without the field reads as the primary feed's.
     repo_valued: () => {
       const decimals = navDecimals(tp[1]);
       const haircut = formatRate(big(d.haircut_bps));
+      const backup = d.fallback === true;
+      const tone = backup ? "warn" : "dim";
       if (decimals === null) {
-        return { code: t("VALUE"), tone: "dim", repoId: tp[0], text: t("#{id} {fund} valued, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), haircut }) };
+        const text = backup
+          ? t("#{id} {fund} valued by the backup feed, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), haircut })
+          : t("#{id} {fund} valued, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), haircut });
+        return { code: t("VALUE"), tone, repoId: tp[0], text };
       }
       const unit = repoCode(tp[0]);
       const price = `${formatUnits(big(d.price), decimals, { digits: Math.min(4, decimals) })}${unit ? ` ${unit}` : ""}`;
-      return { code: t("VALUE"), tone: "dim", repoId: tp[0], text: t("#{id} {fund} valued at {price} per share, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), price, haircut }) };
+      const text = backup
+        ? t("#{id} {fund} valued by the backup feed at {price} per share, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), price, haircut })
+        : t("#{id} {fund} valued at {price} per share, haircut {haircut}", { id: tp[0], fund: sym(tp[1]), price, haircut });
+      return { code: t("VALUE"), tone, repoId: tp[0], text };
     },
     repo_repurchased: () => ({ code: t("REPAY"), tone: "ok", repoId: tp[0], text: t("#{id} {principal} + {interest} interest", { id: tp[0], principal: money(d.principal, repoCode(tp[0])), interest: exact(d.interest, "") }) }),
     repo_seized: () => ({ code: t("SEIZE"), tone: "bad", repoId: tp[0], text: t("#{id} {shares} shares to the lender {to}", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),

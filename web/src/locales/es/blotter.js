@@ -15,6 +15,8 @@ export default {
   "VALUE": "VALOR",
   "#{id} {fund} valued, haircut {haircut}": "#{id} {fund} valorado, recorte {haircut}",
   "#{id} {fund} valued at {price} per share, haircut {haircut}": "#{id} {fund} valorado a {price} por participación, recorte {haircut}",
+  "#{id} {fund} valued by the backup feed, haircut {haircut}": "#{id} {fund} valorado por la fuente de respaldo, recorte {haircut}",
+  "#{id} {fund} valued by the backup feed at {price} per share, haircut {haircut}": "#{id} {fund} valorado por la fuente de respaldo a {price} por participación, recorte {haircut}",
   "REPAY": "RECOMP",
   "#{id} {principal} + {interest} interest": "#{id} {principal} + {interest} de intereses",
   "SEIZE": "EJEC",
