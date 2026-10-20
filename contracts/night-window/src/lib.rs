@@ -106,6 +106,13 @@ pub const MAX_FALLBACKS: u32 = 16;
 /// Most currencies with a pending cap increase at the same time; they share
 /// one instance entry.
 pub const MAX_PENDING_CURRENCY_CAPS: u32 = 8;
+/// Fewest decimals a NAV or FX feed may publish with (review finding
+/// arith-4, 20 October 2026). The corridor and the bands are computed in
+/// units of the feed and rounded to whole units: with 2 decimals, a 0.5 %
+/// floor around 1.00 rounded out to a whole percent before rc5 and rounds
+/// in to nothing since. At 6 decimals one unit of a price near 1 is
+/// 0.01 bps.
+pub const MIN_FEED_DECIMALS: u32 = 6;
 
 /// Envelope at deployment. The governor may tighten or widen it.
 pub fn default_envelope() -> RiskEnvelope {
@@ -2683,9 +2690,11 @@ fn prepare_fund(
         return Err(Error::StewardCannotLend);
     }
     let nav_oracle = OracleClient::new(env, &config.oracle);
-    let nav_decimals = nav_oracle.decimals();
+    let nav_decimals = check_feed_decimals(nav_oracle.decimals())?;
     let fx_decimals = match &config.source {
-        PriceSource::Cross(fx) => OracleClient::new(env, &fx.oracle).decimals(),
+        PriceSource::Cross(fx) => {
+            check_feed_decimals(OracleClient::new(env, &fx.oracle).decimals())?
+        }
         PriceSource::Direct => 0,
     };
     let nav = oracle::read_fresh(
@@ -2883,13 +2892,23 @@ fn check_fallback(
     if fallback.base() != OracleClient::new(env, &config.oracle).base() {
         return Err(Error::CurrencyMismatch);
     }
-    let decimals = fallback.decimals();
+    let decimals = check_feed_decimals(fallback.decimals())?;
     let state = storage::fund_state(env, fund)?;
     // The feed must track the shares now, and agree with a fresh primary.
     oracle::read_fallback(env, config, feed, decimals, state.nav_decimals)?;
     let candidate = (feed.clone(), decimals);
     if let Err(Error::PriceDivergence) = oracle::read_nav(env, config, &state, Some(&candidate)) {
         return Err(Error::PriceDivergence);
+    }
+    Ok(decimals)
+}
+
+/// The decimals of a NAV, FX or fallback feed, refused below
+/// `MIN_FEED_DECIMALS`: at admission, at a replacement and when a fallback
+/// is proposed or applied.
+fn check_feed_decimals(decimals: u32) -> Result<u32, Error> {
+    if decimals < MIN_FEED_DECIMALS {
+        return Err(Error::OutsideEnvelope);
     }
     Ok(decimals)
 }

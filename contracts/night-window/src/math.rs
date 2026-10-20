@@ -136,11 +136,14 @@ pub fn model_path(
     )
 }
 
-/// Whether `value` lies within `band_bps` of `reference`, both ways.
+/// Whether `value` lies within `band_bps` of `reference`, both ways. The
+/// bounds round inward (review finding arith-4, 20 October 2026): the
+/// tolerance never exceeds the band, whatever the precision of the feed,
+/// and the reference itself always passes.
 pub fn within_band(value: i128, reference: i128, band_bps: u32) -> Result<bool, Error> {
     let band = i128::from(band_bps);
-    let low = mul_div_floor(reference, BPS.checked_sub(band).ok_or(OVERFLOW)?, BPS)?;
-    let high = mul_div_ceil(reference, BPS.checked_add(band).ok_or(OVERFLOW)?, BPS)?;
+    let low = mul_div_ceil(reference, BPS.checked_sub(band).ok_or(OVERFLOW)?, BPS)?;
+    let high = mul_div_floor(reference, BPS.checked_add(band).ok_or(OVERFLOW)?, BPS)?;
     Ok(value >= low && value <= high)
 }
 
@@ -164,6 +167,33 @@ pub fn rescale_floor(amount: i128, from: u32, to: u32) -> Result<i128, Error> {
     }
 }
 
+/// Value of `shares` at `price`, in the share token's units:
+/// `shares * mantissa / 10^decimals`, rounded down, without forming that
+/// product (review finding arith-5, 20 October 2026). With `d` the price's
+/// decimals, `shares = q * 10^d + r` and `mantissa = p * 10^d + s`, the
+/// value is `q * mantissa + r * p + floor(r * s / 10^d)`: each term is at
+/// most the value, and `r * s` stays below `10^(2d)`. The result is the
+/// direct formula's wherever that one fits in i128, and for a price with up
+/// to 19 decimals the only overflow left is a value that does not fit.
+pub fn share_value(shares: i128, price: Price) -> Result<i128, Error> {
+    let unit = pow10(price.decimals)?;
+    let (whole, rest) = (
+        shares.checked_div(unit).ok_or(OVERFLOW)?,
+        shares.checked_rem(unit).ok_or(OVERFLOW)?,
+    );
+    let (units, fraction) = (
+        price.mantissa.checked_div(unit).ok_or(OVERFLOW)?,
+        price.mantissa.checked_rem(unit).ok_or(OVERFLOW)?,
+    );
+    whole
+        .checked_mul(price.mantissa)
+        .ok_or(OVERFLOW)?
+        .checked_add(rest.checked_mul(units).ok_or(OVERFLOW)?)
+        .ok_or(OVERFLOW)?
+        .checked_add(mul_div_floor(rest, fraction, unit)?)
+        .ok_or(OVERFLOW)
+}
+
 /// Largest principal `shares` can secure (decision S4): value at `price`,
 /// converted from the share token's decimals to the stablecoin's, minus the
 /// haircut. Every step rounds down, in favour of the lender.
@@ -174,7 +204,7 @@ pub fn max_principal(
     stablecoin_decimals: u32,
     haircut: Bps,
 ) -> Result<i128, Error> {
-    let value = mul_div_floor(shares, price.mantissa, pow10(price.decimals)?)?;
+    let value = share_value(shares, price)?;
     let value = rescale_floor(value, share_decimals, stablecoin_decimals)?;
     mul_div_floor(value, haircut.kept()?, BPS)
 }
@@ -203,7 +233,8 @@ pub fn interest(principal: i128, rate_bps: u32, elapsed: u64) -> Result<i128, Er
 /// admission); an honest NAV that outgrew it fails closed until the
 /// reference moves. The floor is a tolerance of the check only: the
 /// reference itself follows [`model_path`], never the oracle, so a faulty
-/// feed cannot ratchet it.
+/// feed cannot ratchet it. Both bounds round inward, as in [`within_band`],
+/// and still bracket the reference.
 pub fn corridor(
     reference: i128,
     reference_time: u64,
@@ -213,7 +244,7 @@ pub fn corridor(
     max_window_secs: u64,
 ) -> Result<(i128, i128), Error> {
     let floor = i128::from(floor_bps);
-    let low = mul_div_floor(reference, BPS.checked_sub(floor).ok_or(OVERFLOW)?, BPS)?;
+    let low = mul_div_ceil(reference, BPS.checked_sub(floor).ok_or(OVERFLOW)?, BPS)?;
     let elapsed = growth_window(reference_time, observed_time, max_window_secs);
     let year_bps = BPS.checked_mul(YEAR_SECS).ok_or(OVERFLOW)?;
     let growth = i128::from(max_yield_bps)
@@ -224,6 +255,6 @@ pub fn corridor(
         .ok_or(OVERFLOW)?
         .checked_add(growth)
         .ok_or(OVERFLOW)?;
-    let high = mul_div_ceil(reference, numerator, year_bps)?;
+    let high = mul_div_floor(reference, numerator, year_bps)?;
     Ok((low, high))
 }

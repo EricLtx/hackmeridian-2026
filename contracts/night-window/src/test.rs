@@ -57,6 +57,11 @@ impl MockOracle {
         env.storage().instance().get(&MockKey::Decimals).unwrap()
     }
 
+    /// Changes the decimals, which a SEP-40 feed should never do.
+    pub fn set_decimals(env: Env, decimals: u32) {
+        env.storage().instance().set(&MockKey::Decimals, &decimals);
+    }
+
     pub fn lastprice(env: Env, asset: Asset) -> Option<PriceData> {
         if env.storage().instance().has(&MockKey::Broken) {
             panic!("feed down");
@@ -519,6 +524,109 @@ fn admission_needs_a_fresh_price() {
     assert_eq!(
         f.client.try_set_fund(&f.shares, &config),
         Err(Ok(Error::NoPrice))
+    );
+}
+
+/// A SEP-40 feed in `base` publishing with `decimals`.
+fn feed_with_decimals(
+    f: &Fixture,
+    base: Symbol,
+    decimals: u32,
+) -> (Address, MockOracleClient<'static>) {
+    let id = f.env.register(MockOracle, (Asset::Other(base), decimals));
+    let feed = MockOracleClient::new(leak(f.env.clone()), leak(id.clone()));
+    (id, feed)
+}
+
+/// Review finding arith-4 (20 October 2026): the corridor and the bands are
+/// computed in units of the feed, and with 2 decimals a 0.5 % floor admitted
+/// a whole percent either way. A NAV, FX or fallback feed publishing with
+/// fewer than `MIN_FEED_DECIMALS` (6) is refused: at admission, at a
+/// replacement, and when a fallback is proposed or applied.
+#[test]
+fn a_feed_with_fewer_than_six_decimals_is_refused() {
+    let f = bare();
+    let shares = Asset::Stellar(f.shares.clone());
+    let (coarse, coarse_feed) = feed_with_decimals(&f, eur(&f.env), MIN_FEED_DECIMALS - 1);
+    coarse_feed.set_price(&shares, &105_000, &T0);
+    let coarse_config = FundConfig {
+        oracle: coarse,
+        ..fund_config(&f)
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &coarse_config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    let (fine, fine_feed) = feed_with_decimals(&f, eur(&f.env), MIN_FEED_DECIMALS);
+    fine_feed.set_price(&shares, &1_050_000, &T0);
+    f.client.set_fund(
+        &f.shares,
+        &FundConfig {
+            oracle: fine,
+            ..fund_config(&f)
+        },
+    );
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().nav_decimals,
+        MIN_FEED_DECIMALS
+    );
+    // A replacement by the coarse feed.
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &coarse_config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+
+    // A fallback, proposed then applied.
+    let (backup, backup_feed) = feed_with_decimals(&f, eur(&f.env), MIN_FEED_DECIMALS - 1);
+    backup_feed.set_price(&shares, &105_000, &T0);
+    let proposal = fallback_feed(&f, &backup);
+    assert_eq!(
+        f.client.try_propose_fallback(&f.shares, &proposal),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    backup_feed.set_decimals(&MIN_FEED_DECIMALS);
+    backup_feed.set_price(&shares, &1_050_000, &T0);
+    f.client.propose_fallback(&f.shares, &proposal);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let now = f.env.ledger().timestamp();
+    fine_feed.set_price(&shares, &1_050_000, &now);
+    backup_feed.set_price(&shares, &1_050_000, &now);
+    backup_feed.set_decimals(&(MIN_FEED_DECIMALS - 1));
+    assert_eq!(
+        f.client.try_apply_fallback(&f.shares),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    backup_feed.set_decimals(&MIN_FEED_DECIMALS);
+    f.client.apply_fallback(&f.shares);
+    assert!(f.client.get_fallback(&f.shares).is_some());
+
+    // The FX feed of a cross fund.
+    let f = bare();
+    let (nav_oracle, nav_feed) = feed_with_decimals(&f, usd(&f.env), NAV_DECIMALS);
+    nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &NAV_USD, &T0);
+    let (fx_oracle, fx_feed) = feed_with_decimals(&f, usd(&f.env), MIN_FEED_DECIMALS - 1);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &111_880, &T0);
+    let config = FundConfig {
+        oracle: nav_oracle,
+        source: PriceSource::Cross(FxLeg {
+            oracle: fx_oracle,
+            asset: Asset::Other(eur(&f.env)),
+            haircut_bps: 200,
+            max_age_secs: 3 * DAY,
+            band_bps: 200,
+        }),
+        ..fund_config(&f)
+    };
+    assert_eq!(
+        f.client.try_set_fund(&f.shares, &config),
+        Err(Ok(Error::OutsideEnvelope))
+    );
+    fx_feed.set_decimals(&MIN_FEED_DECIMALS);
+    fx_feed.set_price(&Asset::Other(eur(&f.env)), &1_118_800, &T0);
+    f.client.set_fund(&f.shares, &config);
+    assert_eq!(
+        f.client.get_fund_state(&f.shares).unwrap().fx_decimals,
+        MIN_FEED_DECIMALS
     );
 }
 
@@ -4956,6 +5064,27 @@ fn corridor_bounds() {
     );
 }
 
+/// Review finding arith-4 (20 October 2026): the bounds rounded outward, by
+/// up to one unit of the feed. With 2 decimals and a 0.5 % floor the
+/// corridor was [0.99, 1.01]; it is now [1.00, 1.00]: inward, the reference
+/// still passing. A 2-decimal rate of 1.12 with a 1.5 % band admitted
+/// [1.10, 1.14], 1.79 % either way; now [1.11, 1.13]. At 6 decimals the
+/// bounds are exact.
+#[test]
+fn bounds_round_inward() {
+    assert_eq!(math::corridor(100, 0, DAY, 50, 0, DAY), Ok((100, 100)));
+    for (value, inside) in [(99, false), (100, true), (101, false)] {
+        assert_eq!(math::within_band(value, 100, 50), Ok(inside));
+    }
+    for (value, inside) in [(110, false), (111, true), (113, true), (114, false)] {
+        assert_eq!(math::within_band(value, 112, 150), Ok(inside));
+    }
+    assert_eq!(
+        math::corridor(1_000_000, 0, DAY, 50, 0, DAY),
+        Ok((995_000, 1_005_000))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Integration with the demo contracts: the allowlisted share token and the
 // operator-fed SEP-40 feed, compiled natively.
@@ -5450,6 +5579,85 @@ mod integration {
             live.f.client.try_release(&42),
             Err(Ok(Error::NothingToRelease))
         );
+    }
+
+    /// Review finding arith-5 (20 October 2026): with 18-decimal shares and
+    /// an 18-decimal NAV feed, `shares x price` overflowed i128 above about
+    /// 162 shares, so quote and open_repo failed for any real position. The
+    /// product is now split: 170 shares and a million shares are priced, and
+    /// a repo of 100,000 shares opens at its ceiling and is repurchased.
+    #[test]
+    fn eighteen_decimal_shares_priced_by_an_eighteen_decimal_feed() {
+        let f = bare();
+        let fund = f.env.register(
+            FundToken,
+            (
+                f.steward.clone(),
+                18u32,
+                String::from_str(&f.env, "Test fund share, 18 decimals"),
+                String::from_str(&f.env, "tFUND18"),
+            ),
+        );
+        let token = FundTokenClient::new(&f.env, &fund);
+        for holder in [&f.borrower, &f.lender, &f.contract_id] {
+            token.set_whitelisted(holder, &true);
+        }
+        let share = 10i128.pow(18);
+        token.mint(&f.borrower, &(1_000_000 * share));
+        let feed = f
+            .env
+            .register(MockOracle, (Asset::Other(eur(&f.env)), 18u32));
+        // 1.05 EUR per share, with 18 decimals.
+        MockOracleClient::new(&f.env, &feed).set_price(
+            &Asset::Stellar(fund.clone()),
+            &(105 * 10i128.pow(16)),
+            &T0,
+        );
+        f.client.set_stablecoin(&f.eurc, &eur(&f.env));
+        f.client.set_currency_cap(&eur(&f.env), &(10_000_000 * ONE));
+        f.client.set_fund(
+            &fund,
+            &FundConfig {
+                oracle: feed,
+                oracle_asset: Asset::Stellar(fund.clone()),
+                ..fund_config(&f)
+            },
+        );
+        let state = f.client.get_fund_state(&fund).unwrap();
+        assert_eq!((state.share_decimals, state.nav_decimals), (18, 18));
+        // 170 x 1.05 x 98 % = 174.93 EURC: an overflow in rc4.
+        assert_eq!(
+            f.client.quote(&fund, &(170 * share), &f.eurc).max_principal,
+            1_749_300_000
+        );
+        assert_eq!(
+            f.client
+                .quote(&fund, &(1_000_000 * share), &f.eurc)
+                .max_principal,
+            1_029_000 * ONE
+        );
+
+        admit_lender(&f.client, &f.env, &fund, &f.lender);
+        mint(&f.env, &f.eurc, &f.lender, 200_000 * ONE);
+        mint(&f.env, &f.eurc, &f.borrower, 1_000 * ONE);
+        let offer_id = f.client.create_offer(
+            &f.lender,
+            &f.eurc,
+            &(200_000 * ONE),
+            &RATE_BPS,
+            &(7 * DAY),
+            &vec![&f.env, fund.clone()],
+        );
+        let pledged = 100_000 * share;
+        let ceiling = f.client.quote(&fund, &pledged, &f.eurc).max_principal;
+        assert_eq!(ceiling, 102_900 * ONE);
+        let repo_id = f
+            .client
+            .open_repo(&f.borrower, &offer_id, &fund, &pledged, &ceiling, &DAY);
+        assert_eq!(token.balance(&f.contract_id), pledged);
+        advance(&f, HOUR);
+        f.client.repurchase(&repo_id);
+        assert_eq!(token.balance(&f.borrower), 1_000_000 * share);
     }
 }
 
