@@ -78,11 +78,11 @@ export class WalletError extends Error {
   }
 }
 
-/** A definitive transaction outcome other than success. */
+/** A definitive transaction outcome other than success, or a success a second endpoint did not confirm. */
 export class TransactionError extends Error {
   constructor(kind, message, hash = null) {
     super(message);
-    this.name = kind; // "TxFailed" | "TxExpired" | "TxRefused"
+    this.name = kind; // "TxFailed" | "TxExpired" | "TxRefused" | "TxUnconfirmed"
     this.hash = hash;
   }
 }
@@ -203,6 +203,12 @@ export function describeError(error, context = {}) {
     if (error.name === "AccountMissing") return { text: t("This account does not exist on testnet yet. Fund it with test XLM first."), name: "AccountMissing" };
     if (error.name === "TxExpired") return { text: t("The transaction expired before it landed. Nothing changed on chain. You can try again."), name: "TxExpired" };
     if (error.name === "TxRefused") return { text: join(t("The network refused the transaction. Nothing changed on chain."), error.message), name: "TxRefused" };
+    if (error.name === "TxUnconfirmed") {
+      return {
+        text: join(t("The transaction was sent and one RPC endpoint reports it confirmed, but a second endpoint did not confirm it. Check it on the explorer before relying on it or trying again."), error.message),
+        name: "TxUnconfirmed",
+      };
+    }
     return { text: join(t("The transaction failed on chain. Nothing changed."), error.message), name: "TxFailed" };
   }
   const message = String(error?.message ?? error ?? "");

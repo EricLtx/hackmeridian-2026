@@ -162,4 +162,6 @@ export default {
   "RPC endpoint in use ({index} of {count}) and the time of its last answer": "Punto de acceso RPC en uso ({index} de {count}) y tiempo de su última respuesta",
   "RPC {from} did not answer in time: switched to {to}.": "El RPC {from} no respondió a tiempo: cambio a {to}.",
   "RPC {from} failed: switched to {to}.": "El RPC {from} falló: cambio a {to}.",
+  "{reason} The ticket is closed: check the transaction before preparing it again.":
+    "{reason} El ticket se cerró: compruebe la transacción antes de prepararlo de nuevo.",
 };

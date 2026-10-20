@@ -18,4 +18,9 @@ export default {
   "The network asked for an unusually high fee ({fee} XLM). Nothing was signed.": "La red pidió una comisión inusualmente alta ({fee} XLM). No se firmó nada.",
   "The fee of the prepared transaction does not match the network's estimate. Nothing was signed.":
     "La comisión de la transacción preparada no coincide con la estimación de la red. No se firmó nada.",
+  "Submitted, confirming: waiting for a second RPC endpoint ({host}) to see it.":
+    "Enviada, confirmando: esperando a que un segundo punto de acceso RPC ({host}) la vea.",
+  "{host} reports it failed.": "{host} la indica como fallida.",
+  "{host} does not know it, and its validity window has passed.": "{host} no la conoce y su ventana de validez ya pasó.",
+  "{host} did not confirm it in time.": "{host} no la confirmó a tiempo.",
 };

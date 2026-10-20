@@ -704,7 +704,7 @@ export function createTerminal(ctx) {
         outcome = { ok: true, text: message(result) };
         return result;
       } catch (error) {
-        outcome = { ok: false, text: describeError(error, context).text };
+        outcome = { ok: false, text: describeError(error, context).text, unconfirmed: error?.name === "TxUnconfirmed" };
         throw error;
       }
     };
@@ -727,6 +727,10 @@ export function createTerminal(ctx) {
     const outcome = await ticket.run();
     if (outcome?.ok) {
       say("ok", outcome.text);
+      T.ticket = null;
+    } else if (outcome?.unconfirmed) {
+      // Sent, and perhaps applied: signing the ticket again could apply it twice.
+      say("warn", t("{reason} The ticket is closed: check the transaction before preparing it again.", { reason: outcome.text }));
       T.ticket = null;
     } else {
       say("err", t("{reason} The ticket stays: GO to retry, CANCEL to drop it.", { reason: outcome?.text ?? t("Not sent.") }));

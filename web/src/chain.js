@@ -46,6 +46,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const RPC_TIMEOUT_MS = 7000;
 const EVENTS_TIMEOUT_MS = 12000;
 const SEND_TIMEOUT_MS = 10000;
+/** Seconds past a write's validity window that a second endpoint gets to see it before its silence counts. */
+const CONFIRM_GRACE_SECS = 30;
 
 /** An RPC call that did not answer within its bound. */
 export class RpcTimeout extends Error {
@@ -288,6 +290,8 @@ export class Chain {
     const urls = [deployment.rpcUrl, ...(Array.isArray(deployment.rpcFallbacks) ? deployment.rpcFallbacks : [])].filter(Boolean);
     this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: rpcServer(url), lastMs: null, failures: 0 }));
     this.active = 0;
+    /** Pause between two looks at a submitted transaction, in milliseconds. */
+    this.pollMs = 1000;
     /** Called with `{ from, to, reason }` (reason "timeout" or "error") when calls move to another endpoint. */
     this.onRpcChange = null;
     this.kinds = contractKinds(deployment.contracts);
@@ -670,27 +674,75 @@ export class Chain {
     return this.submit(signed, onStatus);
   }
 
+  /** `getTransaction` on the endpoint in use: its answer with `via`, the index of the endpoint that gave it, or null when none answered. */
   async lookup(hash) {
+    let via = this.active;
     try {
-      return await this.net(() => this.server.getTransaction(hash), { attempts: 2 });
+      const answer = await this.net(
+        () => {
+          via = this.active;
+          return this.server.getTransaction(hash);
+        },
+        { attempts: 2 },
+      );
+      return answer ? { ...answer, via } : null;
     } catch {
       return null; // RPC unreachable: unknown, not failed
     }
   }
 
   /**
+   * Asks the endpoints other than `via` whether `hash` succeeded, so that one
+   * endpoint's word never shows a write as confirmed: an RPC can report
+   * SUCCESS for a transaction it never forwarded. Returns another endpoint's
+   * SUCCESS answer, or null when there is no other endpoint. Throws
+   * TxUnconfirmed when another endpoint reports a failure, does not know the
+   * transaction once its ledgers are past the validity window, or stays
+   * silent until shortly after it.
+   */
+  async confirmElsewhere(hash, via, maxTime, onStatus = () => {}) {
+    const others = this.endpoints.filter((_, i) => i !== via);
+    if (!others.length) return null;
+    const hosts = others.map((e) => e.host).join(", ");
+    onStatus({ stage: "confirming", text: t("Submitted, confirming: waiting for a second RPC endpoint ({host}) to see it.", { host: hosts }), hash });
+    const deadline = (maxTime || Math.floor(Date.now() / 1000) + TX_VALIDITY_SECS) + CONFIRM_GRACE_SECS;
+    for (;;) {
+      const answers = await Promise.all(
+        others.map((endpoint) =>
+          withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS).then(
+            (answer) => ({ endpoint, answer }),
+            () => ({ endpoint, answer: null }),
+          ),
+        ),
+      );
+      const success = answers.find(({ answer }) => answer?.status === "SUCCESS");
+      if (success) return success.answer;
+      const failure = answers.find(({ answer }) => answer?.status === "FAILED");
+      if (failure) throw new TransactionError("TxUnconfirmed", t("{host} reports it failed.", { host: failure.endpoint.host }), hash);
+      // Past the window, an endpoint that has closed later ledgers would know a transaction that landed.
+      const unknown = answers.find(({ answer }) => answer?.status === "NOT_FOUND" && maxTime && Number(answer.latestLedgerCloseTime) > maxTime + 5);
+      if (unknown) throw new TransactionError("TxUnconfirmed", t("{host} does not know it, and its validity window has passed.", { host: unknown.endpoint.host }), hash);
+      if (Date.now() / 1000 > deadline) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
+      await sleep(this.pollMs);
+    }
+  }
+
+  /**
    * Sends a signed transaction and returns once it has landed. Throws only
    * on a definitive outcome: failed on chain, refused by the network, or
-   * expired (the ledger closed past the validity window without it).
+   * expired (the ledger closed past the validity window without it); or
+   * TxUnconfirmed when a second endpoint does not confirm the success the
+   * first one reports (`confirmElsewhere`).
    */
   async submit(tx, onStatus = () => {}) {
     const started = Date.now();
     const hash = toHex(tx.hash());
     const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
-    const done = (result) => {
+    const done = async (answer) => {
+      const confirmed = (await this.confirmElsewhere(hash, answer.via, maxTime, onStatus)) ?? answer;
       const seconds = (Date.now() - started) / 1000;
       onStatus({ stage: "confirmed", text: t("Confirmed in {seconds} s.", { seconds: formatUnits(BigInt(Math.round(seconds * 10)), 1) }), hash });
-      return { result, hash, seconds, fee: feeCharged(result) };
+      return { result: confirmed, hash, seconds, fee: feeCharged(confirmed) };
     };
     const failed = (result) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
     const until = maxTime ? new Date(maxTime * 1000).toLocaleTimeString(locale()) : null;
@@ -742,7 +794,7 @@ export class Chain {
       if (polls === 10) {
         onStatus({ stage: "pending", text: t("Still waiting. It can land until {until}; it is not failed before then.", { until }), hash });
       }
-      await sleep(1000);
+      await sleep(this.pollMs);
     }
   }
 
