@@ -199,7 +199,8 @@ impl OpenWindow {
     /// Proposes a handover, delayed after the first admission. Governor.
     pub fn set_admin(env: Env, new_admin: Address) {
         let current = storage::require_governor(&env);
-        ensure_not_trustee(&env, &new_admin).unwrap_or_else(|error| panic_with_error!(&env, error));
+        ensure_not_trustee_or_sentinel(&env, &new_admin)
+            .unwrap_or_else(|error| panic_with_error!(&env, error));
         let eta = if storage::past_bootstrap(&env) {
             eta(&env).unwrap_or_else(|error| panic_with_error!(&env, error))
         } else {
@@ -409,7 +410,8 @@ impl OpenWindow {
     /// Appoints the guardian, delayed after admission. Governor.
     pub fn set_guardian(env: Env, guardian: Address) {
         storage::require_governor(&env);
-        ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
+        ensure_not_trustee_or_sentinel(&env, &guardian)
+            .unwrap_or_else(|error| panic_with_error!(&env, error));
         if !storage::past_bootstrap(&env) {
             install_guardian(&env, guardian);
             return;
@@ -432,6 +434,10 @@ impl OpenWindow {
         let pending: PendingGuardianChange =
             storage::instance_value(&env, &DataKey::PendingGuardian).ok_or(Error::NotProposed)?;
         ensure_due(&env, pending.eta)?;
+        // Checked again at the apply: before rc5 a proposed guardian could
+        // still be named trustee or sentinel during the delay (review
+        // finding auth-5, 20 October 2026).
+        ensure_not_trustee_or_sentinel(&env, &pending.guardian)?;
         storage::remove_instance(&env, &DataKey::PendingGuardian);
         drop_pending_forced_guardian(&env, &env.current_contract_address());
         install_guardian(&env, pending.guardian);
@@ -461,7 +467,8 @@ impl OpenWindow {
     pub fn hand_over_guardian(env: Env, guardian: Address) {
         let current = storage::guardian(&env);
         current.require_auth();
-        ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
+        ensure_not_trustee_or_sentinel(&env, &guardian)
+            .unwrap_or_else(|error| panic_with_error!(&env, error));
         let allowed = match storage::guardian_backup(&env) {
             Some(backup) => backup == guardian,
             None => current == storage::governor(&env),
@@ -475,7 +482,8 @@ impl OpenWindow {
     /// Registers the backup. Governor and guardian.
     pub fn set_guardian_backup(env: Env, backup: Address) {
         let governor = storage::require_governor(&env);
-        ensure_not_trustee(&env, &backup).unwrap_or_else(|error| panic_with_error!(&env, error));
+        ensure_not_trustee_or_sentinel(&env, &backup)
+            .unwrap_or_else(|error| panic_with_error!(&env, error));
         let guardian = storage::guardian(&env);
         if guardian != governor {
             guardian.require_auth();
@@ -493,7 +501,8 @@ impl OpenWindow {
     /// Imposes a guardian after the longest delay. Governor, trustee if named.
     pub fn force_guardian_change(env: Env, guardian: Address) {
         let governor = storage::require_governor(&env);
-        ensure_not_trustee(&env, &guardian).unwrap_or_else(|error| panic_with_error!(&env, error));
+        ensure_not_trustee_or_sentinel(&env, &guardian)
+            .unwrap_or_else(|error| panic_with_error!(&env, error));
         require_trustee(&env, &governor);
         let eta = env
             .ledger()
@@ -841,9 +850,7 @@ impl OpenWindow {
         if storage::past_bootstrap(&env) || storage::sole_lender(&env).is_some() {
             return Err(Error::SoleLenderFixed);
         }
-        if storage::trustee(&env).is_some_and(|trustee| trustee == lender) {
-            return Err(Error::TrusteeNotIndependent);
-        }
+        ensure_not_trustee_or_sentinel(&env, &lender)?;
         storage::set_sole_lender(&env, &lender);
         storage::bump_instance(&env);
         SoleLenderSet { lender }.publish(&env);
@@ -1470,11 +1477,15 @@ impl OpenWindow {
         let guardian = storage::guardian(&env);
         guardian.require_auth();
         // The sentinel is a hot key on a monitoring host: it must hold no
-        // role whose loss or theft would matter more than a pause.
+        // role whose loss or theft would matter more than a pause, nor be
+        // about to take one (review finding auth-5, 20 October 2026).
         if is_governor_or_guardian(&env, &sentinel)
             || is_trustee(&env, &sentinel)
             || storage::guardian_backup(&env).is_some_and(|backup| backup == sentinel)
             || storage::sole_lender(&env).is_some_and(|lender| lender == sentinel)
+            || pending_admin_change(&env).is_some_and(|pending| pending.admin == sentinel)
+            || is_pending_guardian(&env, &DataKey::PendingGuardian, &sentinel)
+            || is_pending_guardian(&env, &DataKey::PendingForcedGuardian, &sentinel)
         {
             return Err(Error::SentinelNotIndependent);
         }
@@ -2379,25 +2390,43 @@ fn require_trustee(env: &Env, governor: &Address) {
 }
 
 /// A trustee consents independently: it holds no governance role and is not
-/// the sole lender.
+/// about to take one, it is not the sole lender, and it is not the sentinel,
+/// a hot key (review finding auth-5, 20 October 2026). A guardian forced in
+/// by the governor may become trustee: naming or handing over the trustee
+/// drops that pending change.
 fn ensure_independent_trustee(env: &Env, trustee: &Address) -> Result<(), Error> {
     if is_governor_or_guardian(env, trustee)
         || storage::sole_lender(env).is_some_and(|lender| lender == *trustee)
         || storage::guardian_backup(env).is_some_and(|backup| backup == *trustee)
         || pending_admin_change(env).is_some_and(|pending| pending.admin == *trustee)
+        || is_pending_guardian(env, &DataKey::PendingGuardian, trustee)
+        || is_sentinel(env, trustee)
     {
         return Err(Error::TrusteeNotIndependent);
     }
     Ok(())
 }
 
-/// Second review of rc2, L1: the independence of the trustee holds in both
-/// directions. No role, backup or governor handover may name the trustee.
-fn ensure_not_trustee(env: &Env, who: &Address) -> Result<(), Error> {
+/// The trustee and the sentinel hold no other role, checked in both
+/// directions: no role, backup or proposal may name either (second review
+/// of rc2, L1, for the trustee; review finding auth-5, 20 October 2026, for
+/// the sentinel). `ensure_independent_trustee` and `set_sentinel` check the
+/// other direction.
+fn ensure_not_trustee_or_sentinel(env: &Env, who: &Address) -> Result<(), Error> {
     if is_trustee(env, who) {
         return Err(Error::TrusteeNotIndependent);
     }
+    if is_sentinel(env, who) {
+        return Err(Error::SentinelNotIndependent);
+    }
     Ok(())
+}
+
+/// Whether `who` is the guardian a pending appointment would install; `key`
+/// is `PendingGuardian` or `PendingForcedGuardian`.
+fn is_pending_guardian(env: &Env, key: &DataKey, who: &Address) -> bool {
+    storage::instance_value::<PendingGuardianChange>(env, key)
+        .is_some_and(|pending| pending.guardian == *who)
 }
 
 /// Records that value can be at stake. The first admission ends the

@@ -8046,6 +8046,109 @@ fn trustee_cannot_be_given_another_role() {
     assert_eq!(f.client.trustee(), Some(trustee));
 }
 
+/// Review finding auth-5 (20 October 2026): the trustee's independence was
+/// checked against the roles in office only. A proposed guardian could take
+/// the trustee role during the delay and then hold both, so that the
+/// governor and that one key proposed upgrades; the sentinel, a hot key,
+/// could take it too. Both are refused, and a guardian change is checked
+/// again when it applies, for a proposal made before rc5.
+#[test]
+fn trustee_cannot_be_a_proposed_guardian_or_the_sentinel() {
+    let f = bare();
+    let sentinel = Address::generate(&f.env);
+    f.client.set_sentinel(&sentinel);
+    assert_eq!(
+        f.client.try_set_trustee(&sentinel),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    f.client.clear_sentinel(&f.governor);
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+
+    let (f, _) = ready_from(f);
+    let proposed = Address::generate(&f.env);
+    f.client.set_guardian(&proposed);
+    assert_eq!(
+        f.client.try_hand_over_trustee(&proposed),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    let sentinel = Address::generate(&f.env);
+    f.client.set_sentinel(&sentinel);
+    assert_eq!(
+        f.client.try_hand_over_trustee(&sentinel),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    assert_eq!(f.client.trustee(), Some(trustee.clone()));
+
+    // Under rc4 the proposed guardian could become trustee, or sentinel,
+    // during the delay: the apply refuses either.
+    let instance_set = |key: DataKey, who: &Address| {
+        f.env.as_contract(&f.contract_id, || {
+            f.env.storage().instance().set(&key, who);
+        });
+    };
+    instance_set(DataKey::Trustee, &proposed);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::TrusteeNotIndependent))
+    );
+    instance_set(DataKey::Trustee, &trustee);
+    instance_set(DataKey::Sentinel, &proposed);
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::SentinelNotIndependent))
+    );
+    f.client.clear_sentinel(&f.governor);
+    f.client.apply_guardian_change();
+    assert_eq!(f.client.guardian(), proposed);
+    assert_eq!(f.client.trustee(), Some(trustee));
+}
+
+/// Review finding auth-5 (20 October 2026): the sentinel, the monitoring
+/// host's hot key, holds no other role, now checked both ways. No role,
+/// backup, sole lender or proposal may name it, during bootstrap or after;
+/// and no key about to take a role, as proposed governor or guardian,
+/// forced or not, may be named sentinel.
+#[test]
+fn sentinel_cannot_be_given_another_role() {
+    let f = bare();
+    let sentinel = Address::generate(&f.env);
+    f.client.set_sentinel(&sentinel);
+    let refused = Err(Ok(raised(Error::SentinelNotIndependent)));
+    assert_eq!(f.client.try_set_guardian(&sentinel), refused);
+    assert_eq!(f.client.try_hand_over_guardian(&sentinel), refused);
+    assert_eq!(f.client.try_set_guardian_backup(&sentinel), refused);
+    assert_eq!(f.client.try_force_guardian_change(&sentinel), refused);
+    assert_eq!(f.client.try_set_admin(&sentinel), refused);
+    assert_eq!(
+        f.client.try_set_sole_lender(&sentinel),
+        Err(Ok(Error::SentinelNotIndependent))
+    );
+    assert_eq!(f.client.guardian(), f.governor);
+    assert_eq!(f.client.guardian_backup(), None);
+    assert_eq!(f.client.pending_admin(), None);
+    assert_eq!(f.client.sole_lender(), None);
+
+    let (f, _) = ready_from(f);
+    assert_eq!(f.client.try_set_guardian(&sentinel), refused);
+    assert_eq!(f.client.pending_guardian_change(), None);
+
+    let proposed_governor = Address::generate(&f.env);
+    f.client.set_admin(&proposed_governor);
+    let proposed_guardian = Address::generate(&f.env);
+    f.client.set_guardian(&proposed_guardian);
+    let forced_guardian = Address::generate(&f.env);
+    f.client.force_guardian_change(&forced_guardian);
+    for candidate in [&proposed_governor, &proposed_guardian, &forced_guardian] {
+        assert_eq!(
+            f.client.try_set_sentinel(candidate),
+            Err(Ok(Error::SentinelNotIndependent))
+        );
+    }
+    assert_eq!(f.client.sentinel(), Some(sentinel));
+}
+
 /// Test 7 of the second review: the positive control of the signature
 /// requirement, with exactly the governor and the trustee signing.
 #[test]
