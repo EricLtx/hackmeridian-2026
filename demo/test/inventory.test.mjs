@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { NEAR_TOP_DAYS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues } from "../inventory-rules.mjs";
+import { NEAR_TOP_DAYS, PROPOSAL_GRACE_SECS, codeTtlIssues, corridor, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues, reanchorHaircutBps, reanchorIssues } from "../inventory-rules.mjs";
 
 const DAY = 86_400;
 /** Fund 1 (tMMF): 10 bps floor, 5 % yield cap, 26 h NAV age bound; its reference and its NAV on 20 October 2026. */
@@ -22,6 +22,25 @@ test("the corridor is math::corridor's, its growth capped at the NAV age bound",
   // The haircut the corridor needs: 22 bps for tMMF, 13 for the euro funds (5 bps, 4 %, 64 h).
   assert.equal(corridorHaircutBps(TMMF), 22n);
   assert.equal(corridorHaircutBps({ corridor_floor_bps: 5, max_yield_bps: 400, nav_max_age_secs: 64 * 3600 }), 13n);
+});
+
+test("the haircut a two-key re-anchor needs under the delay in force: tMMF 33 bps at 300 s, 36 at 48 h; the testnet settings pass, a narrower haircut is a finding (rc5 round 2)", () => {
+  assert.equal(PROPOSAL_GRACE_SECS, 604_800n);
+  const tmmf = { ...TMMF, haircut_bps: 200 };
+  // 2 x 10 + ceil(500 x (300 + 604,800 + 2 x 93,600) / 31,536,000) = 20 + ceil(12.56) = 33; at 48 h, 20 + ceil(15.30) = 36.
+  assert.equal(reanchorHaircutBps(tmmf, 300), 33n);
+  assert.equal(reanchorHaircutBps(tmmf, 48 * 3600), 36n);
+  // The euro funds (5 bps, 4 %, 64 h): 10 + ceil(400 x (300 + 604,800 + 460,800) / 31,536,000) = 10 + ceil(13.52) = 24 at 300 s; 10 + ceil(15.71) = 26 at 48 h.
+  const euro = { corridor_floor_bps: 5, max_yield_bps: 400, nav_max_age_secs: 64 * 3600, haircut_bps: 150 };
+  assert.equal(reanchorHaircutBps(euro, 300), 24n);
+  assert.equal(reanchorHaircutBps(euro, 48 * 3600), 26n);
+  // The cover grows with the delay and never falls below the corridor's.
+  for (const cfg of [tmmf, euro]) for (const delay of [0, 300, 48 * 3600, 30 * 86_400]) assert.ok(reanchorHaircutBps(cfg, delay) > corridorHaircutBps(cfg));
+  assert.deepEqual(reanchorIssues(tmmf, 300), []);
+  assert.deepEqual(reanchorIssues(euro, 48 * 3600), []);
+  const [issue] = reanchorIssues({ ...tmmf, haircut_bps: 35 }, 48 * 3600);
+  assert.match(issue, /^rc5: haircut 0\.35 % below the 0\.36 % a two-key re-anchor needs under the 172800 s delay .*: propose_reanchor and apply_reanchor are refused with OutsideEnvelope until set_fund_limits widens the haircut through the delay$/);
+  assert.deepEqual(reanchorIssues({ ...tmmf, haircut_bps: 36 }, 48 * 3600), []);
 });
 
 test("fund 1 on 20 October: inside, 9.82 bps under the top, about 7 days at the 5 % cap, its reference past the bound (TOOL-8)", () => {

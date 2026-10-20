@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { asset, codeKey, fmt, ledgerEntries, ledgerTime, loadState, read, storageKey, STATE_DIR, sv } from "./lib.mjs";
-import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues } from "./inventory-rules.mjs";
+import { RC5, codeTtlIssues, corridorHaircutBps, corridorHeadroom, corridorIssues, daysToLive, fallbackIssues, feedDecimalsIssues, reanchorHaircutBps, reanchorIssues } from "./inventory-rules.mjs";
 
 const JSON_OUT = process.argv.includes("--json");
 const state = loadState();
@@ -125,6 +125,9 @@ async function main() {
     const approved = soleLender ? await read(state, ow, "is_lender_approved", [sv.address(f.shares), sv.address(soleLender)]) : null;
     const fallbackDecimals = fallback ? await read(state, String(fallback.oracle), "decimals").then(Number, () => null) : null;
     const corridorBps = corridorHaircutBps(cfg);
+    // The re-anchor cover under the delay in force (rc5 round 2): the
+    // contract refuses a re-anchor of this fund below it.
+    const reanchorBps = reanchorHaircutBps(cfg, delay);
     const issues = [];
     // Envelope: what `set_fund` and `set_fund_limits` check today.
     if (Number(cfg.haircut_bps) < Number(envelope.min_haircut_bps)) issues.push(`haircut ${pct(cfg.haircut_bps)} below the envelope minimum ${pct(envelope.min_haircut_bps)}`);
@@ -144,6 +147,7 @@ async function main() {
     // stablecoin's when it is registered. A fund admitted before keeps
     // running until then.
     if (BigInt(cfg.haircut_bps) < corridorBps) issues.push(`rc5: haircut ${pct(cfg.haircut_bps)} below the ${pct(corridorBps)} its NAV corridor needs (two floors plus one NAV age bound of yield); the next set_fund_limits or replacement is refused until a compliant configuration is applied through the delay`);
+    issues.push(...reanchorIssues(cfg, delay));
     const feeds = [["NAV feed", Number(st.nav_decimals)]];
     if (fx) feeds.push(["FX feed", Number(st.fx_decimals)]);
     if (fallback) feeds.push(["fallback feed", fallbackDecimals]);
@@ -166,7 +170,7 @@ async function main() {
     findings += issues.length;
     console.log(`  ${f.label} ${f.symbol} ${f.shares} (${f.tokenCode})`);
     console.log(`    steward ${cfg.steward}, backup ${backup ?? "none"}; currency ${cfg.currency}; source ${sourceName}; haircut ${pct(cfg.haircut_bps)}${fx ? `, FX haircut ${pct(fx.haircut_bps)}, FX band ${pct(fx.band_bps)}, FX age ≤ ${hours(fx.max_age_secs)}` : ""}`);
-    console.log(`    corridor floor ${pct(cfg.corridor_floor_bps)}, yield ≤ ${pct(cfg.max_yield_bps)}, NAV age ≤ ${hours(cfg.nav_max_age_secs)}${navAge !== null ? ` (now ${hours(navAge)} old)` : " (no NAV read)"}; the corridor needs a haircut ≥ ${pct(corridorBps)}`);
+    console.log(`    corridor floor ${pct(cfg.corridor_floor_bps)}, yield ≤ ${pct(cfg.max_yield_bps)}, NAV age ≤ ${hours(cfg.nav_max_age_secs)}${navAge !== null ? ` (now ${hours(navAge)} old)` : " (no NAV read)"}; the corridor needs a haircut ≥ ${pct(corridorBps)}, a re-anchor under the ${Number(delay)} s delay ≥ ${pct(reanchorBps)}`);
     console.log(`    feed decimals: NAV ${st.nav_decimals}${fx ? `, FX ${st.fx_decimals}` : ""}${fallback ? `, fallback ${fallbackDecimals ?? "?"}` : ""}`);
     if (headroom) {
       const days = Number.isFinite(headroom.daysAtMaxYield) ? `about ${headroom.daysAtMaxYield.toFixed(1)} days` : "no limit";
@@ -193,6 +197,7 @@ async function main() {
       maxYieldBps: Number(cfg.max_yield_bps),
       navMaxAgeSecs: Number(cfg.nav_max_age_secs),
       corridorHaircutBps: Number(corridorBps),
+      reanchorHaircutBps: Number(reanchorBps),
       referenceNav: String(st.reference_nav),
       referenceTime: Number(st.reference_time),
       corridor: headroom

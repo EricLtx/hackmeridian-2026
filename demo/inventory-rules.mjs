@@ -41,6 +41,30 @@ const ceilDiv = (a, b) => (a + b - 1n) / b;
 export const corridorHaircutBps = (cfg) =>
   2n * BigInt(cfg.corridor_floor_bps) + ceilDiv(BigInt(cfg.max_yield_bps) * BigInt(cfg.nav_max_age_secs), RC5.yearSecs);
 
+/** How long a proposal stays applicable past its delay (PROPOSAL_GRACE_SECS in lib.rs): seven days. */
+export const PROPOSAL_GRACE_SECS = 604_800n;
+
+/**
+ * Smallest haircut, in basis points, that covers a two-key re-anchor of a
+ * fund's price reference under the time delay `timelockDelaySecs` (the
+ * rc5 round-2 extension of S30, `reanchor_haircut_bps` in lib.rs): one
+ * wrong reading at the apply may lift the reference by the model path
+ * over the delay, the proposal's grace and two NAV age bounds, so the
+ * haircut must cover two floors plus that growth, rounded up. The
+ * contract refuses propose_reanchor and apply_reanchor with
+ * OutsideEnvelope below it; set_fund_limits widens the haircut through
+ * the delay. tMMF (10 bps, 5 %, 26 h): 33 bps at a 300 s delay, 36 at 48 h.
+ */
+export const reanchorHaircutBps = (cfg, timelockDelaySecs) =>
+  2n * BigInt(cfg.corridor_floor_bps) + ceilDiv(BigInt(cfg.max_yield_bps) * (BigInt(timelockDelaySecs) + PROPOSAL_GRACE_SECS + 2n * BigInt(cfg.nav_max_age_secs)), RC5.yearSecs);
+
+/** The inventory's finding on a fund whose haircut is below what a re-anchor needs under the current delay. */
+export function reanchorIssues(cfg, timelockDelaySecs) {
+  const needed = reanchorHaircutBps(cfg, timelockDelaySecs);
+  if (BigInt(cfg.haircut_bps) >= needed) return [];
+  return [`rc5: haircut ${(Number(cfg.haircut_bps) / 100).toFixed(2)} % below the ${(Number(needed) / 100).toFixed(2)} % a two-key re-anchor needs under the ${Number(timelockDelaySecs)} s delay (two floors plus the yield over the delay, the 7-day grace and two NAV age bounds): propose_reanchor and apply_reanchor are refused with OutsideEnvelope until set_fund_limits widens the haircut through the delay`];
+}
+
 /**
  * The NAV corridor as math::corridor computes it since rc5: from
  * `ceil(reference x (1 - floor))` to
