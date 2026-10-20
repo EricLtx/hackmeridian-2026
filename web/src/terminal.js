@@ -6,7 +6,7 @@
 // and signs through the same chain functions as the guided view: nothing
 // here writes to the chain on its own.
 
-import { sv } from "./chain.js";
+import { rpcChangeText, sv } from "./chain.js";
 import { COMMANDS, NOTATION, completions, parseCommand } from "./command.js";
 import {
   bandItems,
@@ -1134,12 +1134,9 @@ export function createTerminal(ctx) {
   }
 
   /** The chain client moved to another RPC endpoint: say so in the console. */
-  function rpcChanged({ from, to, reason }) {
+  function rpcChanged(change) {
     if (!T.active) return;
-    say(
-      "warn",
-      reason === "timeout" ? t("RPC {from} did not answer in time: switched to {to}.", { from, to }) : t("RPC {from} failed: switched to {to}.", { from, to }),
-    );
+    say(change.reason === "level" ? "out" : "warn", rpcChangeText(change));
     renderStatus();
   }
 

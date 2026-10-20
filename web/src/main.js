@@ -4,7 +4,7 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
-import { Chain } from "./chain.js";
+import { Chain, rpcChangeText } from "./chain.js";
 import { describeError } from "./errors.js";
 import {
   UNSHOWABLE,
@@ -1229,6 +1229,8 @@ async function refreshAll() {
   S.refreshing = true;
   const updated = $("board-updated");
   try {
+    // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger.
+    await S.chain.checkHeights();
     await refreshBoard();
     await loadHistory();
     await refreshWallet();
@@ -1481,8 +1483,7 @@ async function start() {
     terminal.rpcChanged(change);
     if (S.face === "terminal" || Date.now() - rpcToastAt < REFRESH_MS) return;
     rpcToastAt = Date.now();
-    const { from, to, reason } = change;
-    toast(reason === "timeout" ? t("RPC {from} did not answer in time: switched to {to}.", { from, to }) : t("RPC {from} failed: switched to {to}.", { from, to }), { tone: "warn" });
+    toast(rpcChangeText(change), { tone: change.reason === "level" ? "info" : "warn" });
   };
   // The terminal shows at once and fills as its own reads land; the guided
   // page waits for the instance settings below.

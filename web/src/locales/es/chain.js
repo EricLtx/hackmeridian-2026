@@ -23,4 +23,8 @@ export default {
   "{host} reports it failed.": "{host} la indica como fallida.",
   "{host} does not know it, and its validity window has passed.": "{host} no la conoce y su ventana de validez ya pasó.",
   "{host} did not confirm it in time.": "{host} no la confirmó a tiempo.",
+  "RPC {from} did not answer in time: switched to {to}.": "El RPC {from} no respondió a tiempo: cambio a {to}.",
+  "RPC {from} is {n} ledgers behind: switched to {to}.": "El RPC {from} lleva {n} ledgers de retraso: cambio a {to}.",
+  "RPC {to} has caught up: switched back to it.": "El RPC {to} vuelve a estar al día: se vuelve a él.",
+  "RPC {from} failed: switched to {to}.": "El RPC {from} falló: cambio a {to}.",
 };

@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Chain, RpcTimeout, rpcServer, withTimeout } from "../src/chain.js";
+import { Chain, RpcTimeout, pickEndpoint, rpcChangeText, rpcServer, withTimeout } from "../src/chain.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 const never = () => new Promise(() => {});
@@ -139,4 +139,66 @@ test("RPC clients send only Content-Type, so a strict CORS preflight passes", as
     globalThis.fetch = realFetch;
   }
   assert.deepEqual(sent, [["content-type"]]);
+});
+
+test("staleness: calls leave an endpoint more than 10 ledgers behind, and return to the first once it is level", () => {
+  const move = (heights, active) => {
+    const { index, reason, behind } = pickEndpoint(heights, active);
+    return [index, reason, behind];
+  };
+  assert.deepEqual(move([100, 100], 0), [0, null, 0], "level: stay");
+  assert.deepEqual(move([90, 100], 0), [0, null, 0], "10 behind is still tolerated");
+  assert.deepEqual(move([89, 100], 0), [1, "behind", 11]);
+  assert.deepEqual(move([100, 100], 1), [0, "level", 0], "back to the first once level");
+  assert.deepEqual(move([99, 100], 1), [0, "level", 0], "one ledger apart counts as level");
+  assert.deepEqual(move([98, 100], 1), [1, null, 0], "the first is still catching up: stay on the fallback");
+  assert.deepEqual(move([100, 80], 1), [0, "level", 0]);
+  assert.deepEqual(move([null, 100], 1), [1, null, 0], "an endpoint that did not answer is not a target");
+  assert.deepEqual(move([100, null], 0), [0, null, 0], "nor a reason to move");
+  assert.deepEqual(move([null, null], 0), [0, null, 0]);
+  assert.deepEqual(move([80, 95, 100], 0), [2, "behind", 20], "to the first endpoint that is level, not merely closer");
+  assert.deepEqual(move([80, 100, 100], 0), [1, "behind", 20]);
+});
+
+test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's height, and ignores a silent one", async () => {
+  const health = (latestLedger) => async () => ({ status: "healthy", latestLedger });
+  const changes = [];
+  const lagging = chainWith(fake("lagging.example", { getHealth: health(5_293_700) }), fake("current.example", { getHealth: health(5_293_787) }));
+  lagging.onRpcChange = (change) => changes.push(change);
+  assert.deepEqual(await lagging.checkHeights(), [5_293_700, 5_293_787]);
+  assert.equal(lagging.rpcInfo().host, "current.example");
+  assert.deepEqual(changes, [{ from: "lagging.example", to: "current.example", reason: "behind", behind: 87 }]);
+
+  // getHealth refuses on an endpoint whose last ledger is old: its height comes from getLatestLedger.
+  const unhealthy = async () => {
+    throw { code: -32603, message: "latency (95s) since last known ledger closed is too high (>30s)" };
+  };
+  const stale = chainWith(fake("stale.example", { getHealth: unhealthy, getLatestLedger: async () => ({ sequence: 5_293_770 }) }), fake("current.example", { getHealth: health(5_293_787) }));
+  assert.deepEqual(await stale.checkHeights(), [5_293_770, 5_293_787]);
+  assert.equal(stale.rpcInfo().host, "current.example");
+
+  // Back to the first endpoint once it is level again.
+  const back = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
+  back.active = 1;
+  const returned = [];
+  back.onRpcChange = (change) => returned.push(change.reason);
+  await back.checkHeights();
+  assert.equal(back.rpcInfo().host, "first.example");
+  assert.deepEqual(returned, ["level"]);
+
+  // A silent endpoint has no height: nothing moves on its account.
+  const down = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const silent = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("silent.example", { getHealth: down, getLatestLedger: down }));
+  assert.deepEqual(await silent.checkHeights(), [5_293_787, null]);
+  assert.equal(silent.rpcInfo().host, "first.example");
+  assert.deepEqual(await chainWith(fake("only.example", { getHealth: health(1) })).checkHeights(), [], "one endpoint: nothing to compare");
+});
+
+test("every move between endpoints is told in a sentence", () => {
+  assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "timeout" }), "RPC a.example did not answer in time: switched to b.example.");
+  assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "error" }), "RPC a.example failed: switched to b.example.");
+  assert.equal(rpcChangeText({ from: "a.example", to: "b.example", reason: "behind", behind: 87 }), "RPC a.example is 87 ledgers behind: switched to b.example.");
+  assert.equal(rpcChangeText({ from: "b.example", to: "a.example", reason: "level" }), "RPC a.example has caught up: switched back to it.");
 });

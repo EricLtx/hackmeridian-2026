@@ -101,6 +101,42 @@ function isTransient(error) {
   return /fetch|load failed|network|connection was lost|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|\b(429|50[0-4])\b/i.test(text);
 }
 
+/** Ledgers the endpoint in use may trail the highest one before calls move to another endpoint. */
+export const STALE_LEDGERS = 10;
+/** Ledgers within which an endpoint counts as level with the highest: each one is read at a slightly different moment. */
+export const LEVEL_LEDGERS = 1;
+const HEIGHT_TIMEOUT_MS = 4000;
+
+/**
+ * Which endpoint calls should use, from the latest ledger each one reports
+ * (null for one that did not answer): the first endpoint whenever it is
+ * level with the highest; else the one in use, unless it trails the highest
+ * by more than STALE_LEDGERS, in which case the first endpoint that is
+ * level. An endpoint that did not answer is no reason to move: a failing
+ * call moves on its own (`failover`). Returns `{ index, reason, behind }`,
+ * reason "behind" or "level" when calls should move, else null.
+ */
+export function pickEndpoint(heights, active) {
+  const known = heights.filter((h) => Number.isSafeInteger(h));
+  const stay = { index: active, reason: null, behind: 0 };
+  if (!known.length) return stay;
+  const highest = Math.max(...known);
+  const level = (i) => Number.isSafeInteger(heights[i]) && highest - heights[i] <= LEVEL_LEDGERS;
+  if (active !== 0 && level(0)) return { index: 0, reason: "level", behind: 0 };
+  const mine = heights[active];
+  if (!Number.isSafeInteger(mine) || highest - mine <= STALE_LEDGERS) return stay;
+  const best = heights.findIndex((_, i) => level(i));
+  return best >= 0 && best !== active ? { index: best, reason: "behind", behind: highest - mine } : stay;
+}
+
+/** The sentence that says calls moved to another endpoint, from an `onRpcChange` notice. */
+export function rpcChangeText({ from, to, reason, behind = 0 }) {
+  if (reason === "timeout") return t("RPC {from} did not answer in time: switched to {to}.", { from, to });
+  if (reason === "behind") return t("RPC {from} is {n} ledgers behind: switched to {to}.", { from, to, n: behind });
+  if (reason === "level") return t("RPC {to} has caught up: switched back to it.", { to });
+  return t("RPC {from} failed: switched to {to}.", { from, to });
+}
+
 /**
  * An RPC client that sends no header but `Content-Type`. The SDK adds
  * `X-Client-Name` and `X-Client-Version`, and a browser's CORS preflight
@@ -363,7 +399,10 @@ export class Chain {
     this.active = 0;
     /** Pause between two looks at a submitted transaction, in milliseconds. */
     this.pollMs = 1000;
-    /** Called with `{ from, to, reason }` (reason "timeout" or "error") when calls move to another endpoint. */
+    /**
+     * Called with `{ from, to, reason, behind }` when calls move to another endpoint: reason
+     * "timeout" or "error" (a failing call), "behind" (it lagged by `behind` ledgers) or "level" (back to the first).
+     */
     this.onRpcChange = null;
     this.kinds = contractKinds(deployment.contracts);
     // Every admitted fund's share token and NAV feed, and every registered stablecoin, so a refusal names its contract.
@@ -416,6 +455,56 @@ export class Chain {
       // A failing listener never stops a call.
     }
     return true;
+  }
+
+  /**
+   * The latest ledger of every endpoint, read at once within a short bound:
+   * a sequence per endpoint, null for one that did not answer. `getHealth`
+   * carries it in about 200 bytes, where `getLatestLedger` now ships the
+   * whole ledger's metadata (about 330 KB on testnet); an endpoint that calls
+   * itself unhealthy (its last ledger is old) is asked `getLatestLedger`,
+   * since a lagging endpoint is what the comparison looks for.
+   */
+  async heights() {
+    return Promise.all(
+      this.endpoints.map(async (endpoint) => {
+        try {
+          const health = await withTimeout(endpoint.server.getHealth(), HEIGHT_TIMEOUT_MS);
+          if (Number.isSafeInteger(health?.latestLedger)) return health.latestLedger;
+        } catch (error) {
+          if (error instanceof RpcTimeout || isTransient(error)) return null;
+        }
+        try {
+          const latest = await withTimeout(endpoint.server.getLatestLedger(), HEIGHT_TIMEOUT_MS);
+          return Number.isSafeInteger(latest?.sequence) ? latest.sequence : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+  }
+
+  /**
+   * Moves calls away from an endpoint that answers but lags: compares every
+   * endpoint's latest ledger and applies `pickEndpoint`, so a fallback is
+   * left for the first endpoint once that one is level again. The page runs
+   * it before each refresh: the pass, its clock included, then reads an
+   * endpoint that is current. Never throws; returns the heights read.
+   */
+  async checkHeights() {
+    if (this.endpoints.length < 2) return [];
+    const heights = await this.heights();
+    const { index, reason, behind } = pickEndpoint(heights, this.active);
+    if (reason && index !== this.active) {
+      const previous = this.endpoints[this.active];
+      this.active = index;
+      try {
+        this.onRpcChange?.({ from: previous.host, to: this.endpoints[index].host, reason, behind });
+      } catch {
+        // A failing listener never stops a refresh.
+      }
+    }
+    return heights;
   }
 
   /**
