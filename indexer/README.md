@@ -27,7 +27,8 @@ npm run export -- --json --web       # also copies it to ../web/public/history.j
 npm run anchor                       # write the last hash on the ledger (INDEXER_ANCHOR_SECRET)
 npm run anchor -- --rehearse         # same with a throwaway testnet account
 npm run verify -- --anchors          # also check every anchor, in the journal and on the ledger
-npm test                             # hash chain, views and anchor building, offline
+npm run verify -- --against <url>    # also compare the journal, both ways and by content, with another RPC endpoint
+npm test                             # hash chain, decoding, views, anchor building and the cross-check, offline
 ```
 
 `--state <dir>` points every command at another folder, for a second contract or a second copy.
@@ -63,13 +64,23 @@ If the ledger right after the last journaled event is no longer served, the pass
 
 Decoding: addresses and symbols as strings, `i128` and `u64` as decimal strings (amounts in token units, 7 decimals for the demo tokens), `u32` as numbers, bytes (`BytesN<32>`, a code hash) as hex, enum variants as `[name, value]`. Canonical JSON means object keys sorted at every depth and no whitespace, so the hash does not depend on how the line was written.
 
-Event names are the contract's `#[contractevent]` struct names in snake case: `repo_opened`, `repo_repurchased`, `repo_seized`, `release_deferred`, `release_redirected`, `shares_released`, `offer_created`, `offer_withdrawn`, `fund_set`, `fund_limits_set`, `stablecoin_set`, `pause_changed`, `upgrade_proposed`, and so on. The list is `events.rs`.
+Event names are the contract's `#[contractevent]` struct names in snake case: `repo_opened`, `repo_valued` (rc5), `repo_repurchased`, `repo_seized`, `release_deferred`, `release_redirected`, `shares_released`, `offer_created`, `offer_withdrawn`, `fund_set`, `fund_limits_set`, `stablecoin_set`, `pause_changed`, `upgrade_proposed`, and so on. The list is `events.rs`.
 
 ## The hash chain
 
 Each line commits to the previous one. Changing a field changes that line's hash and breaks the next line's `prevHash`; removing a line breaks the `seq` sequence; recomputing a tampered line's hash moves the break to the next line; inserting a line out of ledger order is refused. `npm run verify` re-reads every file, recomputes the chain and prints the line count and the last hash, or the first line that does not fit.
 
-The last hash is the integrity proof: publish it (a timestamped mail, a ticket, a second machine, or the ledger itself, see Anchoring) and anyone with a copy of the files can check that nothing was altered since. The chain proves that the journal was not changed after the fact; it does not prove that it is complete, which is what the declared gaps and a second indexer are for.
+The last hash is the integrity proof: publish it (a timestamped mail, a ticket, a second machine, or the ledger itself, see Anchoring) and anyone with a copy of the files can check that nothing was altered since. The chain proves that the journal was not changed after the fact: it attests persistence, not content. It does not prove that the journal is complete, which is what the declared gaps and a second indexer are for, nor that its events are true, which is what the check against an independent endpoint is for.
+
+## Checking the content against an independent endpoint
+
+The indexer trusts its RPC for the content of the events: a hostile endpoint could serve a made-up event, which the chain and the anchor would then faithfully attest. Since rc5, `npm run verify -- --against <url>` compares the journal with what another endpoint serves for the same contract, over the ledgers both cover: from the oldest ledger that endpoint keeps to the journal's last line, or to the endpoint's latest ledger if it is behind. It reports, line by line:
+
+- `MISSING`: an event the endpoint serves that the journal lacks, a stalled, trimmed or tampered journal;
+- `UNKNOWN`: a journal line the endpoint does not know, an event the indexer's endpoint made up or a line written by hand;
+- `ALTERED`: a line whose ledger, transaction, topics or data differ from the endpoint's copy, with the fields that differ.
+
+The exit code is 2 when anything does not hold. Use an endpoint other than the indexer's own: the command notes when the URL is the one `cursor.json` records. Lines older than the endpoint's retention, about a week, cannot be checked this way. The demo's monitor runs the same comparison on every pass (`lib/crosscheck.mjs`, detector `journal` in [demo/README.md](../demo/README.md#monitoring)).
 
 ## Anchoring
 
@@ -110,7 +121,7 @@ Every column comes from an event. Nothing is read from contract storage, and a f
 - `status`: `open`, `repurchased` (`repo_repurchased`), `seized` (`repo_seized`), `release_pending` (`release_deferred` not yet followed by `shares_released`; `closure` keeps how the repo closed). `release_redirected` updates `release_to`.
 - A repo whose `repo_opened` is before the first journaled ledger still appears, with the fields its later events carry and `repo_opened not in chain` in `source`.
 
-**SFTR** (`sftr.csv`), the fields of Regulation (EU) 2015/2365 reporting that the chain can fill: `uti` (the repo id), `sft_type` (`REPO`), `action_type` (`NEWT` while open, `ETRM` once repurchased or seized), `execution_timestamp` and `value_date` (the opening; both legs settle in one transaction), `maturity_date`, `termination_date`, `principal_amount_value_date`, `principal_amount_maturity_date` (principal plus interest, repurchases only), `principal_currency`, `fixed_rate_pct` and `rate_bps`, `collateral_type` (`FUND_SHARES`), `collateral_component` (the share token), `collateral_quantity`, `collateral_haircut_bps` (the fund's haircut from the latest `fund_set` or `fund_limits_set` before the opening), `settlement_venue`, `source`. `reporting_counterparty_side` is `COLLATERAL_TAKER` from the lender's point of view.
+**SFTR** (`sftr.csv`), the fields of Regulation (EU) 2015/2365 reporting that the chain can fill: `uti` (the repo id), `sft_type` (`REPO`), `action_type` (`NEWT` while open, `ETRM` once repurchased or seized), `execution_timestamp` and `value_date` (the opening; both legs settle in one transaction), `maturity_date`, `termination_date`, `principal_amount_value_date`, `principal_amount_maturity_date` (principal plus interest, repurchases only), `principal_currency`, `fixed_rate_pct` and `rate_bps`, `collateral_type` (`FUND_SHARES`), `collateral_component` (the share token), `collateral_quantity`, `collateral_haircut_bps` (the haircut the opening applied, fund plus exchange rate, from the repo's `repo_valued` event when the journal has it, since rc5; otherwise the fund's haircut from the latest `fund_set` or `fund_limits_set` before the opening, which leaves out the exchange-rate haircut of a cross-priced fund; `source` says which), `settlement_venue`, `source`. `reporting_counterparty_side` is `COLLATERAL_TAKER` from the lender's point of view.
 
 ### What the chain does not carry
 
@@ -119,18 +130,18 @@ These SFTR fields stay empty; they belong to the parties' own records:
 - LEI of the reporting counterparty and of the other counterparty: the chain holds Stellar addresses, not legal entities.
 - Master agreement type and version, and the reference of the agreement between lender and borrower.
 - Branch, sector and country of the counterparties, beneficiary, broker, CSD participant, tri-party agent.
-- Collateral ISIN, issuer LEI, quality and market value: the chain identifies the fund by its token address and counts shares; the NAV used at opening is not in `repo_opened`.
+- Collateral ISIN, issuer LEI, quality and market value: the chain identifies the fund by its token address and counts shares. Since rc5 the NAV and the price used at opening are in `repo_valued`, but the view takes only the haircut from it.
 - Floating-rate fields (every repo has a fixed rate), rate reset, spread, margin lending and reuse fields.
 - The exact amount repaid when a repurchase is settled while the token refuses the delivery: `repo_repurchased` carries principal and interest, the deferred shares are in `release_deferred`.
 
 **Flat table** (`events.csv`): one row per line, with the event name, the topics (without the name) and the data as JSON, plus `prevHash` and `hash`.
 
-**Web export** (`export.json`): journal summary (lines, first and last ledgers, last hash, gaps), the registry, and the 200 most recent events, newest first. `--web` copies it to `web/public/history.json`, which `web/history.html` reads at runtime like `deployment.testnet.json`; the file is git-ignored.
+**Web export** (`export.json`): journal summary (lines, first and last ledgers, last hash, gaps), the registry, and the 200 most recent events, newest first. `--web` copies it to `web/public/history.json`, which `web/history.html` reads at runtime like `deployment.testnet.json`; that copy is committed, so that GitHub Pages serves it, while `.state/` stays git-ignored.
 
 ## Limits
 
 - A copy of the journal is only as complete as the RPC windows it saw: if the indexer is down longer than the RPC's event retention (about a week on the public testnet endpoint, sometimes less), a gap is declared, not filled. Run `--watch` continuously, or from two places.
-- The RPC is trusted for the content of the events; the chain protects the journal after it is written. A second copy from another RPC with the same last hash is the cross-check. An anchor on the ledger dates it.
+- The RPC is trusted for the content of the events; the chain protects the journal after it is written. `verify --against <url>` and the monitor's `journal` detector check the content against an endpoint other than the indexer's, within that endpoint's retention; a second copy from another RPC with the same last hash covers older lines. An anchor on the ledger dates the journal.
 - Order follows the RPC's event ids (ledger, transaction, operation, event index). Two events of one transaction keep that order.
 - The journal is one contract's. Another contract needs `--state <dir>`.
 - Amounts are raw token units; the decimals of each token are not in the events (the web page reads them from `deployment.testnet.json`).
