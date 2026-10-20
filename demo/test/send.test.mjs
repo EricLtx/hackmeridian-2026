@@ -10,7 +10,7 @@ import { beforeEach, test } from "node:test";
 process.env.STELLAR_RPC_URLS = "https://rpc.stub.invalid";
 process.env.OPEN_WINDOW_STATE = "offline-test";
 
-const { Account, Address, Keypair, Networks, Operation, SorobanDataBuilder, StrKey, TransactionBuilder, nativeToScVal, rpc, xdr } = await import("@stellar/stellar-sdk");
+const { Account, Address, Asset, Keypair, Networks, Operation, SorobanDataBuilder, StrKey, TransactionBuilder, nativeToScVal, rpc, xdr } = await import("@stellar/stellar-sdk");
 const lib = await import("../lib.mjs");
 const { server } = lib;
 
@@ -32,11 +32,11 @@ function callOf(contract, fn, args) {
   return tx.operations[0].func.invokeContract;
 }
 
-/** An address-credential entry for `address` over `call`, unsigned, as a simulation records it. */
-function entryFor(address, call) {
+/** An address-credential entry for `address` over `call` (and the calls under it), unsigned, as a simulation records it. */
+function entryFor(address, call, subInvocations = []) {
   return new xdr.SorobanAuthorizationEntry({
     credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(new xdr.SorobanAddressCredentials({ address: new Address(address).toScAddress(), nonce: xdr.Int64.fromString("7"), signatureExpirationLedger: 0, signature: xdr.ScVal.scvVoid() })),
-    rootInvocation: new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(call), subInvocations: [] }),
+    rootInvocation: new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(call), subInvocations }),
   });
 }
 
@@ -47,16 +47,21 @@ let sent;
 beforeEach(() => {
   simulations = 0;
   sent = [];
-  answer = { auth: [], readOnly: [instanceKey(OW)], readWrite: [], fee: 1n * XLM };
+  // `error(n)` is the text the n-th simulation fails with, or null: the endpoint writes it.
+  answer = { auth: [], readOnly: [instanceKey(OW)], readWrite: [], fee: 1n * XLM, error: () => null };
   server.getAccount = async (publicKey) => new Account(publicKey, "100");
   server.getLatestLedger = async () => ({ sequence: 1_000, closeTime: "1800000000" });
-  server.simulateTransaction = async () => {
+  server.simulateTransaction = async (tx) => {
     simulations += 1;
-    const data = new SorobanDataBuilder().setReadOnly(answer.readOnly).setReadWrite(answer.readWrite).setResourceFee(answer.fee).build();
+    const error = answer.error(simulations);
+    if (error) return rpc.parseRawSimulation({ id: String(simulations), latestLedger: 1_000, error, events: [] });
+    // The fee may depend on the transaction: an extension's rent on the days it adds.
+    const fee = typeof answer.fee === "function" ? answer.fee(tx) : answer.fee;
+    const data = new SorobanDataBuilder().setReadOnly(answer.readOnly).setReadWrite(answer.readWrite).setResourceFee(fee).build();
     return rpc.parseRawSimulation({
       id: String(simulations),
       latestLedger: 1_000,
-      minResourceFee: String(answer.fee),
+      minResourceFee: String(fee),
       transactionData: data.toXDR("base64"),
       results: [{ auth: answer.auth.map((a) => a.toXDR("base64")), xdr: xdr.ScVal.scvVoid().toXDR("base64") }],
       events: [],
@@ -179,10 +184,336 @@ test("an extension whose footprint is swapped for other entries is refused", asy
 test("the code extension pays one slice at most: refused at 25 XLM, sent under its own cap", async () => {
   const code = lib.codeKey(Buffer.alloc(32, 1));
   answer.readOnly = [code];
-  answer.fee = 215n * XLM;
+  // rc5's code at 8.40 XLM a day (20 October 2026, afternoon): about 257 XLM a slice.
+  answer.fee = 257n * XLM;
   await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400), /above the 25\.00 XLM/);
   await lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE });
   assert.equal(sent.length, 1);
   answer.fee = lib.CODE_SLICE_MAX_FEE + 1n;
-  await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE }), /above the 300\.00 XLM/);
+  await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE }), /above the 400\.00 XLM/);
+});
+
+test("the slice cap is 400 XLM, and a slice the rent has made dearer falls back once to a shorter one that fits (TOOL-6)", async () => {
+  // Under the 429.49 XLM a transaction fee can carry, with the inclusion bid on top.
+  assert.equal(lib.CODE_SLICE_MAX_FEE, 4_000_000_000n);
+  assert.ok(lib.CODE_SLICE_MAX_FEE + 2_000_000n <= 4_294_967_295n);
+  const code = lib.codeKey(Buffer.alloc(32, 1));
+  answer.readOnly = [code];
+  // The code has 89 days to live and the rent has risen to 15 XLM a day:
+  // the 30-day slice asks 450 XLM, more than a transaction can even carry.
+  // Nine tenths of the cap buy 24 days, 360 XLM.
+  const now = 89 * lib.LEDGERS_PER_DAY;
+  answer.fee = (tx) => (BigInt(tx.operations[0].extendTo - now) * 15n * XLM) / BigInt(lib.LEDGERS_PER_DAY);
+  const r = await lib.extendCode(state, "keeper", code, { fromDays: 89, toDays: 119 });
+  assert.equal(simulations, 2);
+  assert.equal(sent.length, 1);
+  assert.equal(r.days, 113);
+  assert.equal(sent[0].operations[0].extendTo, 113 * lib.LEDGERS_PER_DAY);
+  assert.equal(BigInt(sent[0].fee), 2_000_000n + 360n * XLM);
+  // At the measured rate the slice asked is the slice sent.
+  answer.fee = (tx) => (BigInt(tx.operations[0].extendTo - now) * 84n * XLM) / (10n * BigInt(lib.LEDGERS_PER_DAY));
+  assert.equal((await lib.extendCode(state, "keeper", code, { fromDays: 89, toDays: 119 })).days, 119);
+  assert.equal(sent[1].operations[0].extendTo, 119 * lib.LEDGERS_PER_DAY);
+  // No fallback without the life the code has now, nor when not a day fits.
+  answer.fee = 450n * XLM;
+  await assert.rejects(lib.extendCode(state, "keeper", code, { fromDays: null, toDays: 119 }), /above the 400\.00 XLM/);
+  answer.fee = 20_000n * XLM;
+  await assert.rejects(lib.extendCode(state, "keeper", code, { fromDays: 89, toDays: 90 }), /above the 400\.00 XLM/);
+  assert.equal(sent.length, 2);
+});
+
+test("the source's own authority asked as a standalone signature is refused before anything is signed (TOOL-1)", async () => {
+  // An honest endpoint records the source's authority as source-account
+  // credentials. A hostile one asks for an address credential of the
+  // governor over its own unpause, and claims a ledger far ahead so that the
+  // signature would live long: another transaction could replay it.
+  server.getLatestLedger = async () => ({ sequence: 4_000_000_000, closeTime: "1800000000" });
+  answer.auth = [entryFor(roles.governor.publicKey(), callOf(OW, "unpause", []))];
+  await assert.rejects(
+    lib.invoke(state, "governor", OW, "unpause", []),
+    /asks the transaction's source, governor \(G.{5}…\), to sign this call apart from the transaction.*; nothing signed \(rpc-1\)$/,
+  );
+  assert.equal(simulations, 1, "no second simulation: no signed entry reached the endpoint");
+  assert.equal(sent.length, 0);
+});
+
+test("a refusal after the co-signers' entries went out with the simulation says so, never 'nothing signed' (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  // The second simulation, made with the signed entry, writes a stranger's account.
+  answer.readWrite = [xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.random().xdrAccountId() }))];
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error, "the footprint is refused");
+  assert.match(error.message, /writes the account of G/);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.equal(simulations, 2);
+  assert.equal(sent.length, 0);
+});
+
+test("an endpoint that holds the transaction back cannot have it called expired while it is still valid (TOOL-1)", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  // The endpoint claims a ledger closed 1,000 s from now, keeps the signed
+  // transaction and never forwards it: the verdict waits for this machine's
+  // clock to pass the transaction's own limit, plus the margin.
+  server.getLatestLedger = async () => ({ sequence: 1_000, closeTime: String(Math.floor(Date.now() / 1000) + 1_000) });
+  server.getTransaction = async () => ({ status: "NOT_FOUND" });
+  let verdict;
+  lib.invoke(state, "steward", OW, "mint_test", []).then(() => { verdict = "landed"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 300 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(sent.length, 1);
+  const maxTime = Number(sent[0].timeBounds.maxTime);
+  assert.match(verdict ?? "", /expired before landing; nothing changed on chain, rerun the step$/);
+  assert.ok(Date.now() / 1000 > maxTime + lib.EXPIRY_MARGIN_SECS, `called expired ${(maxTime - Date.now() / 1000).toFixed(0)} s before the transaction's own limit`);
+});
+
+// Below the root of an authorization tree (review finding TOOL-5): only a
+// transfer by the signer of a deployment token into Open Window is signed.
+const SHARES = "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB";
+const EURO = "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX";
+const deployment = { ...state, contracts: { openWindow: OW, shares: SHARES, euro: EURO } };
+const node = (call, subInvocations = []) => new xdr.SorobanAuthorizedInvocation({ function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(call), subInvocations });
+const sourceEntry = (root) => new xdr.SorobanAuthorizationEntry({ credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(), rootInvocation: root });
+const transfer = (token, from, to, amount = 5n) => callOf(token, "transfer", [lib.sv.address(from), lib.sv.address(to), lib.sv.i128(amount)]);
+
+test("a call some contract on the path could make in the signer's name is refused under the operation's own call (TOOL-5)", async () => {
+  // set_stablecoin calls the candidate token's decimals(): a compromised
+  // token makes the governor's XLM move inside that call.
+  const xlm = Asset.native().contractId(Networks.TESTNET);
+  const attacker = Keypair.random().publicKey();
+  const args = [lib.sv.address(FOREIGN), lib.sv.symbol("EUR")];
+  answer.auth = [sourceEntry(node(callOf(OW, "set_stablecoin", args), [node(transfer(xlm, roles.governor.publicKey(), attacker, 10_000n * XLM))]))];
+  await assert.rejects(lib.invoke(deployment, "governor", OW, "set_stablecoin", args), /asks governor \(G.{5}…\) to authorize C.{7}….transfer inside this call, which is not a transfer of its own tokens into Open Window; nothing signed \(rpc-1\)$/);
+  // A compromised feed under a re-anchor takes the share token's admin role with the steward's signature.
+  const reanchor = [lib.sv.address(SHARES), lib.sv.i128(1n), lib.sv.i128(1n)];
+  const takeover = node(callOf(SHARES, "set_admin", [lib.sv.address(attacker)]));
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "propose_reanchor", reanchor), [takeover])];
+  await assert.rejects(lib.invoke(deployment, "governor", OW, "propose_reanchor", reanchor, { cosigners: ["steward"] }), /asks steward \(G.{5}…\) to authorize CAEXP2UG….set_admin inside this call/);
+  assert.equal(simulations, 2, "refused at the first simulation each time: nothing signed went out");
+  assert.equal(sent.length, 0);
+});
+
+test("a deployment token's transfer into Open Window by its signer is signed; elsewhere, by another, or deeper, it is refused (TOOL-5)", async () => {
+  // open_repo pulls the borrower's shares (token_io::pull): the tree the host records.
+  const borrower = roles.lender.publicKey();
+  const args = [lib.sv.address(borrower), lib.sv.u64(1), lib.sv.address(SHARES), lib.sv.i128(10n), lib.sv.i128(9n), lib.sv.u64(3600)];
+  const open = callOf(OW, "open_repo", args);
+  answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n))]))];
+  await lib.invoke(deployment, "lender", OW, "open_repo", args);
+  assert.equal(sent.length, 1);
+  // A co-signer's own pull is signed with its entry too: the lender of create_offer funds the offer in the stablecoin it names.
+  const offer = [lib.sv.address(roles.steward.publicKey()), lib.sv.address(EURO), lib.sv.i128(5n), lib.sv.u32(300), lib.sv.u64(3600), lib.sv.vec([lib.sv.address(SHARES)])];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "create_offer", offer), [node(transfer(EURO, roles.steward.publicKey(), OW))])];
+  await lib.invoke(deployment, "governor", OW, "create_offer", offer, { cosigners: ["steward"] });
+  assert.equal(sent.length, 2);
+  const refusedWith = async (subs, why = /inside this call, which is not a transfer of its own tokens into Open Window/) => {
+    answer.auth = [sourceEntry(node(open, subs))];
+    await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), why);
+  };
+  await refusedWith([node(transfer(SHARES, borrower, FOREIGN, 10n))]); // to another address
+  await refusedWith([node(transfer(SHARES, roles.keeper.publicKey(), OW, 10n))]); // from another holder
+  await refusedWith([node(transfer(FOREIGN, borrower, OW, 10n))], /which pulls CAEXP2UG…, not that token/); // a token the call does not pull
+  await refusedWith([node(transfer(SHARES, borrower, OW, 10n), [node(callOf(SHARES, "set_admin", [lib.sv.address(FOREIGN)]))])]); // deeper
+  assert.equal(sent.length, 2);
+});
+
+test("a pull is signed only under a call that pulls, on the token it names, at the amount it names, and once: never under set_stablecoin, never twice under open_repo (TOOL-5 residual)", async () => {
+  // A hostile endpoint adds the node; a compromised candidate token's
+  // decimals() would then make the call: the governor's tEUR would end up
+  // held by Open Window with no record. set_stablecoin pulls nothing.
+  const register = [lib.sv.address(FOREIGN), lib.sv.symbol("EUR")];
+  answer.auth = [sourceEntry(node(callOf(OW, "set_stablecoin", register), [node(transfer(EURO, roles.governor.publicKey(), OW, 1_000_000n * XLM))]))];
+  await assert.rejects(lib.invoke(deployment, "governor", OW, "set_stablecoin", register), /asks governor \(G.{5}…\) to authorize CC7Z4END….transfer inside this call, which pulls no token from its signer; nothing signed \(rpc-1\)$/);
+  // Under open_repo, a second pull of the borrower's whole share balance beside the real one.
+  const borrower = roles.lender.publicKey();
+  const args = [lib.sv.address(borrower), lib.sv.u64(1), lib.sv.address(SHARES), lib.sv.i128(10n), lib.sv.i128(9n), lib.sv.u64(3600)];
+  const open = callOf(OW, "open_repo", args);
+  answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n)), node(transfer(SHARES, borrower, OW, 10n ** 15n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /which pulls that token once, not twice; nothing signed/);
+  // One pull, of another amount than the shares the call names.
+  answer.auth = [sourceEntry(node(open, [node(transfer(SHARES, borrower, OW, 10n ** 15n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /which moves 1000000000000000 units of it where the call names 10; nothing signed/);
+  // The other token of the deployment, which open_repo does not pull.
+  answer.auth = [sourceEntry(node(open, [node(transfer(EURO, borrower, OW, 10n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args), /which pulls CAEXP2UG…, not that token/);
+  assert.equal(sent.length, 0);
+  // Under create_offer, the offer's stablecoin at the offer's amount is the pull; another amount is refused.
+  const offer = [lib.sv.address(borrower), lib.sv.address(EURO), lib.sv.i128(1_000n * XLM), lib.sv.u32(300), lib.sv.u64(3600), lib.sv.vec([lib.sv.address(SHARES)])];
+  answer.auth = [sourceEntry(node(callOf(OW, "create_offer", offer), [node(transfer(EURO, borrower, OW, 1_000n * XLM))]))];
+  await lib.invoke(deployment, "lender", OW, "create_offer", offer);
+  answer.auth = [sourceEntry(node(callOf(OW, "create_offer", offer), [node(transfer(EURO, borrower, OW, 1_001n * XLM))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "create_offer", offer), /moves 10010000000 units of it where the call names 10000000000/);
+  assert.equal(sent.length, 1);
+});
+
+test("under repurchase, which reads the repo's stablecoin from storage, the pull is signed only on the token the caller declares (TOOL-5)", async () => {
+  const borrower = roles.lender.publicKey();
+  const repay = [lib.sv.u64(1)];
+  // The repayment the contract computes is not in the arguments: any amount of the declared token, once.
+  answer.auth = [sourceEntry(node(callOf(OW, "repurchase", repay), [node(transfer(EURO, borrower, OW, 1_234n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "repurchase", repay), /which pulls no token from its signer; nothing signed/);
+  await lib.invoke(deployment, "lender", OW, "repurchase", repay, { tokens: [EURO] });
+  assert.equal(sent.length, 1);
+  // Declared for repurchase: still only that token, and a declaration never widens a call that names its token.
+  answer.auth = [sourceEntry(node(callOf(OW, "repurchase", repay), [node(transfer(SHARES, borrower, OW, 1_234n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "repurchase", repay, { tokens: [EURO] }), /which pulls CC7Z4END…, not that token/);
+  const args = [lib.sv.address(borrower), lib.sv.u64(1), lib.sv.address(SHARES), lib.sv.i128(10n), lib.sv.i128(9n), lib.sv.u64(3600)];
+  answer.auth = [sourceEntry(node(callOf(OW, "open_repo", args), [node(transfer(EURO, borrower, OW, 10n))]))];
+  await assert.rejects(lib.invoke(deployment, "lender", OW, "open_repo", args, { tokens: [EURO] }), /which pulls CAEXP2UG…, not that token/);
+  assert.equal(sent.length, 1);
+});
+
+test("a release writes the trustline of a holder it does not name only once the caller declares that holder, who still signs nothing (TOOL-9)", async () => {
+  // Shares of a Stellar Asset Contract delivered to an outside G-address: the simulation writes its trustline.
+  const holder = Keypair.random();
+  const trustline = xdr.LedgerKey.trustline(new xdr.LedgerKeyTrustLine({ accountId: holder.xdrAccountId(), asset: new Asset("tSHARE", roles.steward.publicKey()).toTrustLineXDRObject() }));
+  answer.readWrite = [dataKey(OW, 4), trustline];
+  const release = [lib.sv.u64(4)];
+  await assert.rejects(lib.invoke(deployment, "keeper", OW, "release", release), new RegExp(`writes the trustline of ${holder.publicKey()}, which this call does not touch; nothing signed`));
+  assert.equal(sent.length, 0);
+  await lib.invoke(deployment, "keeper", OW, "release", release, { extraAddresses: [holder.publicKey()] });
+  assert.equal(sent.length, 1);
+  // Declared for the footprint only: an entry asking that holder to sign is still refused.
+  answer.auth = [entryFor(holder.publicKey(), callOf(OW, "release", release))];
+  await assert.rejects(lib.invoke(deployment, "keeper", OW, "release", release, { extraAddresses: [holder.publicKey()] }), /to authorize this call, which does not expect it; nothing signed/);
+  assert.equal(sent.length, 1);
+});
+
+test("a restore of the instance's own code restores exactly that entry, under its own cap (TOOL-4)", async () => {
+  const code = lib.codeKey(Buffer.alloc(32, 3));
+  answer.readOnly = [];
+  answer.readWrite = [code];
+  // About what an upload costs: the entry rented again for the network's minimum time to live.
+  answer.fee = 60n * XLM;
+  await assert.rejects(lib.restoreEntries(state, "keeper", [code]), /above the 25\.00 XLM/);
+  await lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].operations[0].type, "restoreFootprint");
+  // Another code, a second entry, or anything read-only: refused before a signature.
+  for (const [readOnly, readWrite] of [[[], [lib.codeKey(Buffer.alloc(32, 4))]], [[], [code, dataKey(OW, 1)]], [[instanceKey(OW)], [code]]]) {
+    answer.readOnly = readOnly;
+    answer.readWrite = readWrite;
+    await assert.rejects(lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE }), /restores other entries than the 1 asked; nothing signed \(rpc-1\)$/);
+  }
+  answer.readOnly = [];
+  answer.readWrite = [code];
+  answer.fee = lib.CODE_RESTORE_MAX_FEE + 1n;
+  await assert.rejects(lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE }), /above the 100\.00 XLM/);
+  assert.equal(sent.length, 1);
+});
+
+test("naming a sentinel carries the sentinel's own signature with the guardian's transaction (STATE-1 in the contract)", async () => {
+  // rc5: set_sentinel takes the guardian's and the named key's authority.
+  // The guardian is the source; the sentinel signs its entry, as setup.mjs
+  // declares it; a host without the sentinel's key signs nothing.
+  const guardian = Keypair.random();
+  const sentinel = Keypair.random();
+  const host = { keys: { guardian: guardian.secret(), sentinel: sentinel.secret() }, contracts: { openWindow: OW } };
+  const args = [lib.sv.address(sentinel.publicKey())];
+  const call = callOf(OW, "set_sentinel", args);
+  answer.auth = [new xdr.SorobanAuthorizationEntry({ credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(), rootInvocation: node(call) }), entryFor(sentinel.publicKey(), call)];
+  await lib.invoke(host, "guardian", OW, "set_sentinel", args, { cosigners: ["sentinel"] });
+  assert.equal(sent.length, 1);
+  const [own, named] = sent[0].operations[0].auth;
+  assert.equal(own.credentials.type, "sorobanCredentialsSourceAccount");
+  assert.equal(Address.fromScAddress(named.credentials.address.address).toString(), sentinel.publicKey());
+  assert.equal(named.credentials.address.signature.type, "scvVec", "the sentinel's entry carries its signature");
+  const withoutKey = { keys: { guardian: guardian.secret() }, contracts: { openWindow: OW } };
+  await assert.rejects(lib.invoke(withoutKey, "guardian", OW, "set_sentinel", args), new RegExp(`no local key can authorize ${sentinel.publicKey()}`));
+  assert.equal(sent.length, 1);
+});
+
+test("once the co-signers' entries went out, the endpoint's own text of a failed simulation is never the verdict, which says what went out (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  // The hostile endpoint takes the steward's signed entry, then fails the
+  // second simulation with a text of its choosing, which claims nothing was signed.
+  answer.error = (n) => (n === 2 ? "the call was refused; nothing signed (rpc-1)" : null);
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error);
+  assert.equal(simulations, 2, "the signed entry reached the endpoint in the second simulation");
+  assert.equal(sent.length, 0);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /^governor co_signed_test: the simulation made with the signed entries was refused, https:\/\/rpc\.stub\.invalid refused it, in its own words/);
+  assert.match(error.message, /1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.equal(error.detail, "the call was refused; nothing signed (rpc-1)", "the endpoint's words are kept apart, in the detail");
+});
+
+test("a contract error in the simulation made with the signed entries keeps its name and code, and the verdict still says what went out (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  answer.error = (n) => (n === 2 ? "HostError: Error(Contract, #3); nothing signed (rpc-1)" : null);
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error instanceof lib.ContractError, "a caller still tells a contract refusal apart");
+  assert.deepEqual([error.name, error.code], ["unknown:Error", 3]);
+  assert.match(error.message, /the simulation made with the signed entries was refused, the contract refused it with unknown:Error \(#3\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.equal(sent.length, 0);
+  // Before any signature, a failed simulation is the plain refusal it always was (the offline state registers no contract: "unknown").
+  answer.error = () => "HostError: Error(Contract, #8)";
+  const first = await lib.invoke(state, "governor", OW, "pause", pauseArgs()).then(() => null, (e) => e);
+  assert.deepEqual([first.name, first.message, simulations], ["unknown:Error", "unknown:Error (#8)", 3]);
+});
+
+test("a transport failure of the second simulation, once its retries are spent, still ends with what went out signed (TOOL-1)", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  const good = server.simulateTransaction;
+  server.simulateTransaction = async (tx) => {
+    if (simulations >= 1) {
+      simulations += 1;
+      throw new Error("fetch failed");
+    }
+    return good(tx);
+  };
+  let verdict;
+  lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => { verdict = "sent"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 60 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(sent.length, 0);
+  assert.equal(simulations, 5, "the first simulation, then the second one tried four times");
+  assert.match(verdict ?? "", /^governor co_signed_test: the simulation made with the signed entries was refused, https:\/\/rpc\.stub\.invalid did not answer it \(fetch failed\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+});
+
+test("a single endpoint that takes the submission and never answers a lookup: the window closes on this clock, the explorer is asked for, the step never hangs", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  server.getTransaction = () => new Promise(() => {});
+  let verdict;
+  lib.invoke(state, "steward", OW, "mint_test", []).then(() => { verdict = "landed"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 400 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(sent.length, 1);
+  assert.match(verdict ?? "", /^steward mint_test: expired on this machine's clock, but https:\/\/rpc\.stub\.invalid could not answer whether transaction [0-9a-f]{64} landed, and it is the only endpoint configured; check it in the explorer before rerunning the step https:\/\/stellar\.expert/);
+  assert.doesNotMatch(verdict, /nothing changed/);
+});
+
+test("a JSON-RPC error the SDK throws as a bare object from the second simulation is never the verdict either (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  const good = server.simulateTransaction;
+  server.simulateTransaction = async (tx) => {
+    if (simulations >= 1) {
+      simulations += 1;
+      throw { code: -32602, message: "the call was refused; nothing signed (rpc-1)" }; // eslint-disable-line no-throw-literal
+    }
+    return good(tx);
+  };
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error instanceof Error, "an Error, whatever the SDK threw");
+  assert.equal(sent.length, 0);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /refused it, in its own words \(printed above, kept in the error's detail\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.equal(error.detail, "the call was refused; nothing signed (rpc-1)");
+  assert.deepEqual(error.cause, { code: -32602, message: "the call was refused; nothing signed (rpc-1)" });
 });

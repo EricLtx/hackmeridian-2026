@@ -134,6 +134,17 @@ test("the SFTR haircut is the one the opening applied, from repo_valued, when th
   assert.deepEqual(registry([...FIXTURE, valued]), registry(FIXTURE));
 });
 
+test("the SFTR source says when the fund's backup feed supplied the NAV the opening was valued at (VAL-5)", () => {
+  const valuedAt = (fallback) => chainLine(FIXTURE[FIXTURE.length - 1], at(109, "2026-10-15T22:11:00Z", "repo_valued", ["3", FUND], {
+    fallback, fx: "0", fx_applied: "0", fx_time: "0", haircut_bps: 300, nav: "108500000000000", nav_time: "1792198000", price: "108500000000000",
+  }));
+  const sourceOf = (lines) => sftr(lines).find((r) => r.uti === "3").source;
+  assert.match(sourceOf([...FIXTURE, valuedAt(true)]), /haircut:repo_valued nav:fallback$/);
+  assert.doesNotMatch(sourceOf([...FIXTURE, valuedAt(false)]), /nav:fallback/);
+  // A valuation journaled before the field existed says nothing of the source.
+  assert.doesNotMatch(sourceOf(FIXTURE), /nav:fallback/);
+});
+
 test("CSV quotes fields with commas or quotes and keeps a header", () => {
   const text = toCsv(["a", "b"], [{ a: "x,y", b: 'say "hi"' }, { a: null, b: 1 }]);
   assert.equal(text, 'a,b\n"x,y","say ""hi"""\n,1\n');

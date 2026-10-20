@@ -4,7 +4,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DETECTORS, LIMITS, businessSeconds, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement } from "../detectors.mjs";
+import { DETECTORS, LIMITS, businessSeconds, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement, restoredLabel, restoredOutcome } from "../detectors.mjs";
+
+test("rehearsal: a proposal the drill's governor had to withdraw is its own outcome, never 'restored yes' for the monitor", () => {
+  // Drills 8, 10, 13 and 18 withdraw their own proposal when the monitor's
+  // action did not take: the monitor is judged before that cleanup.
+  assert.equal(restoredOutcome(true, false), true);
+  assert.equal(restoredOutcome(false, false), false);
+  const withdrawn = restoredOutcome(false, true);
+  assert.notEqual(withdrawn, true);
+  assert.equal(withdrawn, "no: withdrawn by the governor, the drill's own cleanup");
+  assert.deepEqual([true, false, withdrawn].map(restoredLabel), ["yes", "no", "no: withdrawn by the governor, the drill's own cleanup"]);
+  // The summary's cell is never "yes" for an outcome the monitor did not produce.
+  assert.ok(![false, withdrawn].some((o) => restoredLabel(o) === "yes"));
+});
 
 const H = 3600;
 const DAY = 86_400;
@@ -107,6 +120,19 @@ test("price: a feed failing inside the valuation pauses like a refusal; another 
   assert.notEqual(other.action, "pause");
 });
 
+test("price: an opening the backup feed valued says the primary was stale or silent, without pausing (VAL-5 in the contract)", () => {
+  const events = [
+    { name: "repo_valued", ledger: 20, txHash: "t1", topics: [12n, "CF2"], data: { fallback: true, nav: 1n } },
+    { name: "repo_valued", ledger: 21, txHash: "t2", topics: [13n, "CF2"], data: { fallback: false, nav: 1n } },
+    // Journaled before rc5 added the field: nothing to say.
+    { name: "repo_valued", ledger: 22, txHash: "t3", topics: [14n, "CF2"], data: { nav: 1n } },
+  ];
+  const out = run("price", snap({ events, funds: [fund("fund 1", "CF1"), fund("fund 2", "CF2")] }));
+  assert.deepEqual(out.map((a) => [a.level, a.threat]), [["warning", "Tamper.1"]]);
+  assert.match(out[0].message, /^repo #12 was valued on the backup NAV feed at ledger 20: the primary feed was stale or silent \[fund 2\]$/);
+  assert.deepEqual(decideActions(out, snap(), {}, { actor: "sentinel" }).actions, []);
+});
+
 test("reference-age: quiet at the bound, a refresh beyond it when the NAV is newer", () => {
   const f = (label, shares, refAge, navAge) => fund(label, shares, {
     fundState: { reference_time: BigInt(NOW - refAge), outstanding: 0n, currency: "EUR" },
@@ -180,8 +206,9 @@ test("reconciliation: a waiting delivery warns once per reason, then stays silen
     out = at({ status: "Defaulted", deliverable: true, approved: true, to: "GLENDER" });
     assert.deepEqual([out[0].action, out[0].repoId], ["release", 4]);
   }
+  // The keeper's release names the holder it delivers to: that holder's entries may be written (TOOL-9).
   const { actions } = decideActions(out, snap(), {}, {});
-  assert.deepEqual(actions, [{ kind: "release", repoId: 4 }]);
+  assert.deepEqual(actions, [{ kind: "release", repoId: 4, to: "GLENDER" }]);
   // Delivered: forgotten, so a new deferral of the same id warns again.
   run("reconciliation", snap({ releases: [] }), monitor);
   assert.deepEqual(monitor.releaseSeen, {});
@@ -287,15 +314,67 @@ test("privileged: an unannounced upgrade is cancelled, an announced one is a war
 
 test("privileged: an unannounced stablecoin registration is cancelled, an announced one is a warning", () => {
   const events = [{ name: "stablecoin_change_proposed", ledger: 9, txHash: "t", topics: ["CTOKEN"], data: { currency: "EUR" } }];
-  let [alert] = run("privileged", snap({ events }));
+  const pendingStablecoins = { CTOKEN: { currency: "EUR", eta: BigInt(NOW + 300) } };
+  let [alert] = run("privileged", snap({ events, pendingStablecoins }));
   assert.deepEqual([alert.level, alert.action, alert.token], ["critical", "cancel stablecoin", "CTOKEN"]);
-  [alert] = run("privileged", snap({ events }), { announcedStablecoins: ["CTOKEN"] });
+  assert.deepEqual(decideActions([alert], snap({ events, pendingStablecoins }), {}, { actor: "sentinel" }).actions, [{ kind: "cancel_stablecoin", role: "sentinel", token: "CTOKEN" }]);
+  [alert] = run("privileged", snap({ events, pendingStablecoins }), { announcedStablecoins: ["CTOKEN"] });
   assert.deepEqual([alert.level, alert.action], ["warning", "verify before it applies"]);
+});
+
+test("a stablecoin proposal no longer pending is history: no critical alert, no cancellation (TOOL-7)", () => {
+  // Drill 18's proposal and its cancellation, re-read by the first watch after a rehearsal.
+  const s = snap({
+    events: [
+      { name: "stablecoin_change_proposed", ledger: 3, txHash: "t1", topics: ["CDRILLTOKEN"], data: { currency: "XXX", eta: BigInt(NOW - 300) } },
+      { name: "stablecoin_change_cancelled", ledger: 4, txHash: "t2", topics: ["CDRILLTOKEN"], data: { by: "GSENTINEL" } },
+    ],
+    pending: { upgrade: null, admin: null, forcedGuardian: null },
+    pendingStablecoins: { CDRILLTOKEN: null },
+  });
+  const alerts = detect(s, {}, ctx());
+  assert.deepEqual(alerts.filter((a) => a.level === "critical").map((a) => a.message), []);
+  assert.ok(alerts.some((a) => a.detector === "privileged" && /CDRILLTO… as XXX, no longer pending \(withdrawn or applied\)$/.test(a.message)));
+  assert.deepEqual(decideActions(alerts, s, {}, { actor: "sentinel", keys: {} }).actions, []);
+  // A state that could not be read keeps the alert critical, and nothing is sent on it.
+  const unread = { ...s, events: s.events.slice(0, 1), pendingStablecoins: { CDRILLTOKEN: undefined } };
+  const blind = detect(unread, {}, ctx());
+  assert.deepEqual(blind.filter((a) => a.level === "critical").map((a) => a.action), ["cancel stablecoin"]);
+  assert.deepEqual(decideActions(blind, unread, {}, { actor: "sentinel" }).actions, []);
+});
+
+test("proposals: a stablecoin proposal still pending stays critical on every pass, read from state, until it is gone (TOOL-7)", () => {
+  const pendingStablecoins = { CTOKEN: { currency: "EUR", eta: BigInt(NOW + 300) }, COLD: null };
+  for (let pass = 0; pass < 2; pass += 1) {
+    const out = run("proposals", snap({ pendingStablecoins }));
+    assert.deepEqual(out.map((a) => [a.level, a.action, a.token]), [["critical", "cancel stablecoin", "CTOKEN"]]);
+    assert.match(out[0].message, /^stablecoin registration of CTOKEN… as EUR pending \(NOT announced\), applicable from /);
+    assert.deepEqual(decideActions(out, snap({ pendingStablecoins }), {}, { actor: "sentinel" }).actions, [{ kind: "cancel_stablecoin", role: "sentinel", token: "CTOKEN" }]);
+  }
+  // Reported by its own event in this pass, announced, or gone: nothing more here.
+  const events = [{ name: "stablecoin_change_proposed", ledger: 9, topics: ["CTOKEN"], data: { currency: "EUR" } }];
+  assert.deepEqual(run("proposals", snap({ pendingStablecoins, events })), []);
+  assert.deepEqual(run("proposals", snap({ pendingStablecoins }), { announcedStablecoins: ["CTOKEN"] }), []);
+  assert.deepEqual(run("proposals", snap({ pendingStablecoins: { CTOKEN: null } })), []);
 });
 
 test("privileged: a code change and a steward without backup are reported", () => {
   const out = run("privileged", snap({ wasmHash: "bb".repeat(32), funds: [fund("fund 1", "CF1", { stewardBackup: null })] }), { wasmHash: "aa".repeat(32) });
   assert.deepEqual(out.map((a) => a.level).sort(), ["critical", "warning"]);
+});
+
+test("privileged: a fallback the contract dropped because a replacement made it the primary is said so, not taken for an attack (VAL-4 in the contract)", () => {
+  const events = [
+    { name: "fallback_removed", ledger: 7, txHash: "t1", topics: ["CF2"], data: { by: "COW" } },
+    { name: "fallback_removed", ledger: 8, txHash: "t2", topics: ["CF2"], data: { by: "GGOVERNOR" } },
+  ];
+  const out = run("privileged", snap({ contract: "COW", events, funds: [fund("fund 1", "CF1"), fund("fund 2", "CF2")] }));
+  assert.deepEqual(out.map((a) => a.level), ["warning", "warning"]);
+  assert.match(out[0].message, /^fallback_removed at ledger 7 by the contract itself: a replacement made the fund's backup feed its primary, and the fund has no backup feed now \[fund 2\]$/);
+  assert.match(out[0].action, /propose_fallback/);
+  // Removed by a role: a privileged change to verify, as before.
+  assert.deepEqual([out[1].message, out[1].action], ["privileged change fallback_removed at ledger 8", "verify"]);
+  assert.deepEqual(decideActions(out, snap(), {}, { actor: "sentinel" }).actions, []);
 });
 
 test("pause: a pause event and a paused instance are reported", () => {
@@ -316,6 +395,14 @@ test("ttl: 14 days for the entries, 90 for the code; a missing entry is critical
   // Drill 6 forces the entries' threshold; the code keeps its own.
   out = run("ttl", snap({ ttl: [t("repo #1", 100), t("contract code", 100, "code")] }), {}, ctx({ ttlDays: 130 }));
   assert.deepEqual(out.map((a) => a.kind), [undefined]);
+});
+
+test("ttl: an archived code entry is restored on purpose, never handed to the keeper to extend (TOOL-4)", () => {
+  const out = run("ttl", snap({ ttl: [{ label: "contract code", key: "kc", kind: "code", days: null }, { label: "repo #1", key: "k1", days: null }] }));
+  assert.deepEqual(out.map((a) => a.level), ["critical", "critical"]);
+  assert.match(out[0].action, /^restore it: npm run upgrade -- --restore-code/);
+  assert.equal(out[1].action, "extend");
+  assert.deepEqual(decideActions(out, snap(), {}, {}).actions.map((a) => a.kind), ["extend"]);
 });
 
 test("exposure: a fund or a currency past 80 % of its cap warns", () => {
@@ -383,11 +470,18 @@ test("feed-flat: an FX rate flat over 24 business hours warns; a second FX sourc
   assert.deepEqual(compare(null), []);
 });
 
-test("keeper: the float must cover one 30-day slice of the code, about 215 XLM on testnet", () => {
-  assert.equal(LIMITS.keeperMinXlm, 250);
-  assert.deepEqual(run("keeper", snap({ keeperXlm: 250 })), []);
-  const [low] = run("keeper", snap({ keeperXlm: 249.9 }));
-  assert.match(low.message, /float 249\.9 XLM is below 250 XLM: one 30-day extension of the contract code costs about 215 XLM on testnet/);
+test("keeper: the float must cover one upgrade run, about 84 days of the code's rent at 8.40 XLM a day, and so two 30-day slices (TOOL-6)", () => {
+  assert.equal(LIMITS.keeperMinXlm, 800);
+  // An upgrade run: the first 30-day slice from the upload's 7 days, then 61 days more to 91.
+  const runDays = (30 - 7) + (91 - 30);
+  assert.equal(runDays, 84);
+  assert.ok(LIMITS.keeperMinXlm >= runDays * 8.4, "the run at the measured rate");
+  assert.ok(LIMITS.keeperMinXlm >= runDays * 9.5, "the run with the rate up to 9.5 XLM a day");
+  assert.ok(LIMITS.keeperMinXlm >= 2 * 30 * 8.4, "two routine slices");
+  assert.deepEqual(run("keeper", snap({ keeperXlm: 800 })), []);
+  // 600 XLM, the previous threshold, paid two slices but not a whole upgrade run (950 XLM before the slices were counted from the target, 706 now).
+  const [low] = run("keeper", snap({ keeperXlm: 600 }));
+  assert.match(low.message, /float 600\.0 XLM is below 800 XLM, the rent of one upgrade run \(about 84 days of the contract code, 706 XLM on testnet at 8\.40 XLM a day on 20 October 2026\) or of two 30-day extensions \(about 250 XLM each\), and the rate moves$/);
 });
 
 test("exposure: one opening per pass never warns; more than 20 within the last hour does", () => {
@@ -447,11 +541,13 @@ test("decideActions: cancellation and extensions follow the alerts, in order", (
     { level: "warning", action: "extend", key: "kc", kind: "code", days: 89 },
     { level: "warning", action: "refresh_reference", fund: "CF1" },
   ];
-  const s = snap({ pending: { upgrade: { hash: "ab".repeat(32), eta: 1 } } });
+  const s = snap({ pending: { upgrade: { hash: "ab".repeat(32), eta: 1 } }, pendingStablecoins: { CTOKEN: { currency: "EUR", eta: 1n } } });
   const { actions } = decideActions(alerts, s, {}, { actor: "sentinel", keys: {} });
   assert.deepEqual(actions.map((a) => a.kind), ["cancel_upgrade", "cancel_stablecoin", "extend", "extend_code", "refresh_reference"]);
   assert.deepEqual([actions[0].role, actions[0].hash], ["sentinel", "ab".repeat(32)]);
   assert.deepEqual([actions[3].targetDays, actions[3].belowDays, actions[2].belowDays], [119, 90, 14]);
+  // The code's life now goes with the action: it sizes a shorter slice when the rent has risen (TOOL-6).
+  assert.equal(actions[3].days, 89);
   // An announced code is never cancelled, whatever an event alert asked.
   assert.deepEqual(decideActions(alerts.slice(0, 1), s, { announced: ["ab".repeat(32)] }, {}).actions, []);
 });

@@ -85,3 +85,29 @@ test("rc5's repo_valued event is journaled field by field, and leaves the regist
   assert.equal(table[1].topics, JSON.stringify(["12", FUND]));
   assert.equal(JSON.parse(table[1].data).price, "96892302196820");
 });
+
+// rc5 adds `fallback` to repo_valued (review finding VAL-5): true when the
+// fund's backup feed supplied the NAV, the primary being stale or silent.
+test("repo_valued's fallback field is journaled as a boolean, both ways", () => {
+  const valued = (fallback) =>
+    decodeEvent(
+      raw(
+        5_300_100,
+        3,
+        [xdr.ScVal.scvSymbol("repo_valued"), u64(13), new Address(FUND).toScVal()],
+        xdr.ScVal.scvMap([
+          field("fallback", xdr.ScVal.scvBool(fallback)),
+          field("fx", i128(0)),
+          field("fx_applied", i128(0)),
+          field("fx_time", u64(0)),
+          field("haircut_bps", nativeToScVal(150, { type: "u32" })),
+          field("nav", i128("100200000000000")),
+          field("nav_time", u64(1_800_000_000)),
+          field("price", i128("100200000000000")),
+        ]),
+      ),
+    );
+  assert.equal(valued(true).data.fallback, true);
+  assert.equal(valued(false).data.fallback, false);
+  assert.equal(JSON.parse(eventsTable([chainLine(null, valued(true))])[0].data).fallback, true);
+});
