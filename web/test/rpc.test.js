@@ -479,15 +479,15 @@ test("calls that come back to an endpoint start its count of 429 polls again: on
   const chain = chainWith(a, b);
   const changes = [];
   chain.onRpcChange = (change) => changes.push(`${change.reason}:${change.to}`);
-  // Two 429 polls on a, then a call that times out: calls move to b.
+  // Two 429 polls on a, then a call that times out twice (the first timeout is retried there): calls move to b.
   await chain.checkHeights();
   await chain.checkHeights();
   assert.equal(polls, 2);
   assert.equal(chain.rpcInfo().host, "a.example");
-  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 2 }), RpcTimeout);
+  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
   assert.equal(chain.rpcInfo().host, "b.example");
   // b fails too while a rests: the calls come back to a by net()'s own return.
-  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 2 }), RpcTimeout);
+  await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
   assert.equal(chain.rpcInfo().host, "a.example");
   assert.deepEqual(changes, ["timeout:b.example", "timeout:a.example"]);
   // b's rest is over by now; a answers its poll with a 429 once: no move.
@@ -655,6 +655,35 @@ test("a call started before a round trip away and back, timing out after the ret
   assert.deepEqual(changes, ["sdf.example->gfm.example:timeout"], "the long call's timeout is a failure of the past");
   assert.equal(chain.rpcInfo().host, "sdf.example");
   assert.equal(chain.moveCount, 2);
+});
+
+test("a read moves away on the second timeout within 30 s of the endpoint in use, not on the first; a send still moves at once", async () => {
+  // One stall, then a normal answer: the read goes to the same endpoint once more and nothing moves.
+  const stalling = (pattern) => {
+    let n = 0;
+    return () => (pattern[n++ % pattern.length] ? never() : healthy());
+  };
+  const once = chainWith(fake("a.example", { getHealth: stalling([true, false]) }), fake("b.example", { getHealth: healthy }));
+  const changes = [];
+  once.onRpcChange = (change) => changes.push(change.reason);
+  assert.equal((await once.net(() => once.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
+  assert.equal(once.rpcInfo().host, "a.example");
+  assert.deepEqual(changes, []);
+  // A second stall within 30 s, on the next read: the reads move.
+  assert.equal((await once.net(() => once.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
+  assert.equal(once.rpcInfo().host, "b.example");
+  assert.deepEqual(changes, ["timeout"]);
+
+  // Two stalls 40 s apart: each is a first one.
+  const apart = chainWith(fake("a.example", { getHealth: stalling([true, false]) }), fake("b.example", { getHealth: healthy }));
+  apart.endpoints[0].timedOutAt = Date.now() - 40_000;
+  assert.equal((await apart.net(() => apart.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
+  assert.equal(apart.rpcInfo().host, "a.example");
+
+  // A send that times out moves at once, as before (the send calls failover itself).
+  const send = chainWith(fake("a.example", {}), fake("b.example", {}));
+  assert.ok(send.failover(new RpcTimeout(10_000), 0, { since: send.moveCount }));
+  assert.equal(send.rpcInfo().host, "b.example");
 });
 
 test("every move between endpoints is told in a sentence", () => {

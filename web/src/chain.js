@@ -177,6 +177,14 @@ export const MAX_IN_FLIGHT = 6;
  */
 export const RATE_PER_SECOND = 20;
 const RATE_WINDOW_MS = 1000;
+/**
+ * Within how long a second timeout on the endpoint in use moves the reads
+ * away from it. The public endpoint stalls 7 to 15 s on 1.5 to 2 % of its
+ * calls, server side: one stall moved the whole page, and the rests then
+ * brought it back and forth. A read that times out once goes to the same
+ * endpoint once more; the send of a transaction still moves at once.
+ */
+export const TIMEOUT_PAIR_MS = 30_000;
 
 /**
  * The rest of an endpoint that just failed a call, in milliseconds, from
@@ -746,6 +754,21 @@ export class Chain {
     this.moveCount += 1;
     this.endpoints[index].returnedAt = now;
     this.endpoints[index].limitedPolls = 0;
+    this.endpoints[index].timedOutAt = null;
+  }
+
+  /**
+   * Whether a timeout of a current read (`since` is the move count it
+   * started at) on endpoint `index`, the one in use, is its first within
+   * TIMEOUT_PAIR_MS: it is recorded, and the read goes there once more
+   * instead of moving. A second one within that time is left to `failover`.
+   */
+  firstTimeout(index, since, now = Date.now()) {
+    if (index !== this.active || since !== this.moveCount) return false;
+    const endpoint = this.endpoints[index];
+    if (now - (endpoint.timedOutAt ?? -Infinity) <= TIMEOUT_PAIR_MS) return false;
+    endpoint.timedOutAt = now;
+    return true;
   }
 
   /**
@@ -834,9 +857,11 @@ export class Chain {
   /**
    * Runs `call` on the endpoint in use, within `timeoutMs`, holding one of
    * its MAX_IN_FLIGHT slots and its turn under RATE_PER_SECOND; a call that
-   * waited while calls moved goes to the endpoint now in use. A timeout or a transient network
-   * failure moves at once to the next endpoint when there is one, else waits
-   * and retries. An HTTP 429 is back-pressure: the call waits as asked
+   * waited while calls moved goes to the endpoint now in use. A transient
+   * network failure moves at once to the next endpoint when there is one,
+   * else waits and retries; a timeout does so on the second one within
+   * TIMEOUT_PAIR_MS on the endpoint in use, the first going there once more
+   * (`firstTimeout`). An HTTP 429 is back-pressure: the call waits as asked
    * (`retryAfterMs`) and goes to the same endpoint again; the
    * RATE_LIMIT_STRIKES-th in a row, or one asking to wait longer than a
    * timeout, is a failure that moves to another endpoint when one is not
@@ -881,6 +906,8 @@ export class Chain {
           strikes = 0;
         } else await sleep(retryAfterMs(error));
       }
+      // A single stall of the endpoint in use: the read goes there once more; the second timeout within TIMEOUT_PAIR_MS moves.
+      else if (error instanceof RpcTimeout && this.firstTimeout(index, since)) continue;
       // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
       else if (moves < this.endpoints.length - 1 && this.failover(error, index, { since })) moves += 1;
       else {
