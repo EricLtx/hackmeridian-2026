@@ -35,7 +35,6 @@ export default {
   "S <repo>": "S <repo>",
   "ticket to take the shares of an unpaid repo after its term": "ticket pour prendre les parts d'un repo impayé après son échéance",
   "REL <repo>": "REL <repo>",
-  "ticket to retry the delivery of shares the issuer held back": "ticket pour relancer la livraison de parts retenues par l'émetteur",
   "GO, or Enter on an empty line": "GO, ou Entrée sur une ligne vide",
   "sign the ticket with the wallet": "signe le ticket avec le portefeuille",
   "CANCEL, or Esc": "CANCEL, ou Échap",
@@ -64,4 +63,6 @@ export default {
   "Terms: 64 or 64H (hours), 2D (days), 1W (weeks); one hour at least.": "Durées : 64 ou 64H (heures), 2J ou 2D (jours), 1S ou 1W (semaines) ; une heure au minimum.",
   "Rates: 3.25 or 3.25% (a year), or 325BP.": "Taux : 3,25 ou 3,25% (par an), ou 325PB (points de base).",
   "Ids: 7 or #7. Fund tickers as on the FND panel, any case.": "Numéros : 7 ou #7. Codes des fonds comme dans le panneau FND, en majuscules ou en minuscules.",
+  "ticket to retry a delivery that waits for the share token or a lender's approval":
+    "ticket pour relancer une livraison qui attend le jeton de part ou l'agrément d'un prêteur",
 };

@@ -55,10 +55,12 @@ export function contractKinds(contracts) {
 /**
  * A typed error raised by a contract. `name` is the bare name for Open
  * Window and `kind:Name` for any other contract, so a share-token refusal is
- * never mistaken for an Open Window one.
+ * never mistaken for an Open Window one. `contractId` is the address that
+ * raised it when the diagnostic events name one; `coin`, set by the chain
+ * module, the ticker of that token when it is known.
  */
 export class ContractError extends Error {
-  constructor(code, contract, detail = "") {
+  constructor(code, contract, detail = "", contractId = null) {
     const bare = ERROR_TABLES[contract]?.[code] ?? "Error";
     const name = contract === "open-window" ? bare : `${contract}:${bare}`;
     super(`${name} (#${code})`);
@@ -67,6 +69,8 @@ export class ContractError extends Error {
     this.name = name;
     this.bare = bare;
     this.detail = detail;
+    this.contractId = contractId;
+    this.coin = null;
   }
 }
 
@@ -78,11 +82,11 @@ export class WalletError extends Error {
   }
 }
 
-/** A definitive transaction outcome other than success. */
+/** A definitive transaction outcome other than success, or a success a second endpoint did not confirm. */
 export class TransactionError extends Error {
   constructor(kind, message, hash = null) {
     super(message);
-    this.name = kind; // "TxFailed" | "TxExpired" | "TxRefused"
+    this.name = kind; // "TxFailed" | "TxExpired" | "TxRefused" | "TxUnconfirmed"
     this.hash = hash;
   }
 }
@@ -97,11 +101,16 @@ export function decodeSimulationError(text, kinds = new Map()) {
   // first, so the oldest one with that code names the contract it came from.
   // An error a contract caught carries another code and is ignored.
   const surfaced = /^HostError: Error\(Contract, #(\d+)\)/.exec(String(text))?.[1];
-  const events = [...String(text).matchAll(/contract:(C[A-Z0-9]{55}), topics:\[error, Error\(Contract, #(\d+)\)\]/g)];
+  const events = [...String(text).matchAll(/contract:(C[A-Z0-9]{55}), topics:\[error, Error\(Contract, #(\d+)\)\](?:, data:([^\n]*))?/g)];
   const same = surfaced ? events.filter(([, , code]) => code === surfaced) : events;
   if (same.length) {
     const [, contractId, code] = same[same.length - 1];
-    return new ContractError(Number(code), kinds.get(contractId) ?? "unknown", text);
+    const kind = kinds.get(contractId) ?? "unknown";
+    // Open Window passing on the refusal of a contract it called, whose own
+    // event is missing, has not raised it: its code is the callee's (a Stellar
+    // Asset Contract's #11 is not StalePrice), and the callee is unknown.
+    const relayed = kind === "open-window" && same.some(([, id, , data]) => id === contractId && /contract call failed|failed host function call/.test(data ?? ""));
+    return relayed ? new ContractError(Number(code), "unknown", text) : new ContractError(Number(code), kind, text, contractId);
   }
   const match = /Error\(Contract, #(\d+)\)/.exec(String(text));
   if (match) return new ContractError(Number(match[1]), "unknown", text);
@@ -188,8 +197,9 @@ const SENTENCES = {
  */
 export function describeError(error, context = {}) {
   if (error instanceof ContractError) {
+    // A token's refusal names that token, not the coin the screen happens to show.
     const sentence = SENTENCES[error.contract]?.[error.bare];
-    if (sentence) return { text: sentence(context), name: error.name };
+    if (sentence) return { text: sentence(error.coin ? { ...context, code: error.coin } : context), name: error.name };
     const text =
       error.contract === "nav-oracle"
         ? t("The price feed refused the operation.")
@@ -203,6 +213,12 @@ export function describeError(error, context = {}) {
     if (error.name === "AccountMissing") return { text: t("This account does not exist on testnet yet. Fund it with test XLM first."), name: "AccountMissing" };
     if (error.name === "TxExpired") return { text: t("The transaction expired before it landed. Nothing changed on chain. You can try again."), name: "TxExpired" };
     if (error.name === "TxRefused") return { text: join(t("The network refused the transaction. Nothing changed on chain."), error.message), name: "TxRefused" };
+    if (error.name === "TxUnconfirmed") {
+      return {
+        text: join(t("The transaction was sent and one RPC endpoint reports it confirmed, but a second endpoint did not confirm it. Check it on the explorer before relying on it or trying again."), error.message),
+        name: "TxUnconfirmed",
+      };
+    }
     return { text: join(t("The transaction failed on chain. Nothing changed."), error.message), name: "TxFailed" };
   }
   const message = String(error?.message ?? error ?? "");

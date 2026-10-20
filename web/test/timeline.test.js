@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { eventsOfRepo, timelineOf } from "../src/timeline.js";
+import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "../src/timeline.js";
 
 const T0 = 1_792_000_000;
 const repo = (status, extra = {}) => ({ id: 7, status, opened_at: T0, maturity: T0 + 64 * 3600, principal: "1000000000", rate_bps: 300, shares: "10000000000", ...extra });
@@ -41,6 +41,36 @@ test("a seized repo with shares held back, then delivered", () => {
   assert.equal(delivered.at(-1).state, "done");
   assert.equal(delivered.at(-1).tx, "shares_released-tx");
   assert.match(delivered.at(-1).detail, /held back .* delivered/);
+});
+
+test("held shares wait for the share token, or for a seizure also for the lender's approval (rc5)", () => {
+  const pendingRelease = { shares: "10000000000", to: "G..." };
+  const seized = timelineOf(repo("Defaulted"), { now: T0 + 100 * 3600, events: [ev("repo_seized", T0 + 65 * 3600), ev("release_deferred", T0 + 65 * 3600)], pendingRelease });
+  assert.equal(
+    seized.at(-1).detail,
+    "the delivery waits for the share token or for the lender's approval for the fund; the shares are recorded for the lender and can be released once both allow it",
+  );
+  // A repurchase's shares go back to the borrower, whom no approval gates: only the token can hold them.
+  const repaid = timelineOf(repo("Repurchased"), { now: T0 + 10 * 3600, events: [ev("repo_repurchased", T0 + 3600), ev("release_deferred", T0 + 3600)], pendingRelease });
+  assert.match(repaid.at(-1).detail, /^the share token refused the transfer/);
+  const delivered = (status) =>
+    timelineOf(repo(status), { now: T0 + 100 * 3600, events: [ev("repo_seized", T0 + 65 * 3600), ev("release_deferred", T0 + 65 * 3600), ev("shares_released", T0 + 66 * 3600)] }).at(-1).detail;
+  assert.equal(delivered("Defaulted"), "held back at closing until the share token and the lender's approval allowed it, then delivered");
+  assert.equal(delivered("Repurchased"), "held back by the share token at closing, delivered after the issuer allowed it");
+});
+
+test("the lines about held shares say what they wait for, and where the shares of a closing went", () => {
+  assert.equal(heldNote("Defaulted", "1,000.00 tMMF"), "1,000.00 tMMF held: waiting for the share token or the lender's approval");
+  assert.equal(heldNote("Repurchased", "1,000.00 tMMF"), "1,000.00 tMMF held: the issuer blocks the transfer");
+  const shares = "1,000.00 tMMF";
+  assert.equal(closingLine("seize", { id: 5, shares, deferred: false }), "Repo #5 closed: 1,000.00 tMMF sent to your wallet.");
+  assert.equal(closingLine("seize", { id: 5, shares, deferred: true }), "Repo #5 closed: 1,000.00 tMMF are recorded for you and wait for the share token or for your approval as lender.");
+  assert.equal(closingLine("seize", { id: 5, shares, deferred: null }), "Repo #5 closed.");
+  assert.equal(closingLine("repurchase", { id: 6, shares, deferred: false }), "Repo #6 repurchased: 1,000.00 tMMF back in your wallet.");
+  assert.match(closingLine("repurchase", { id: 6, shares, deferred: true }), /^Repo #6 repurchased: 1,000\.00 tMMF are recorded for you, since the share token refused the transfer/);
+  assert.equal(closingLine("repurchase", { id: 6, shares, deferred: null }), "Repo #6 repurchased.");
+  assert.match(stillHeldLine("Defaulted", 5), /^Repo #5: the delivery still waits for the share token or for your approval as lender\./);
+  assert.match(stillHeldLine("Repurchased", 6), /^Repo #6: the issuer still blocks the transfer\./);
 });
 
 test("events are matched to a repo by topic or by data", () => {

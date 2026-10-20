@@ -3,7 +3,7 @@
 // DOM and no network; the arithmetic is the contract's (terms.js mirrors
 // math.rs), so a ticket shows what the contract will take.
 
-import { formatAmount, formatDateTime, formatRate, formatUnits, shortAddress } from "./format.js";
+import { UNSHOWABLE, formatAmount, formatDateTime, formatRate, formatUnits, shortAddress } from "./format.js";
 import { t, tk } from "./i18n.js";
 import { HOUR, WEEKEND_SECS, chargedHours, defaultPrincipal, interest, maxTermFor, nextInterestStep, seizeState } from "./terms.js";
 
@@ -220,7 +220,10 @@ export function tapeLine(e, ctx = {}) {
   const shares = (v) => formatAmount(big(v), fd);
   const sym = (fund) => (ctx.symbolOf ? ctx.symbolOf(fund) : shortAddress(fund));
   const short = (a) => (a ? shortAddress(String(a)) : "—");
-  const at = (secs) => tapeTime(new Date(Number(secs) * 1000).toISOString(), ctx.now ?? 0);
+  const at = (secs) => {
+    const when = new Date(Number(secs) * 1000);
+    return Number.isNaN(when.getTime()) ? "--:--:--" : tapeTime(when.toISOString(), ctx.now ?? 0);
+  };
   const repoCode = (id) => ctx.codeOfRepo?.(Number(id)) ?? ctx.code ?? "";
   const offerCode = (id) => ctx.codeOfOffer?.(Number(id)) ?? ctx.code ?? "";
   const hash = () => String(d.wasm_hash).slice(0, 8);
@@ -239,7 +242,7 @@ export function tapeLine(e, ctx = {}) {
       text: t("#{id} {amount} @ {rate} · {shares} {fund} · offer #{offer} · {borrower}", {
         id: tp[0],
         amount: money(d.principal, offerCode(d.offer_id)),
-        rate: formatRate(d.rate_bps),
+        rate: formatRate(big(d.rate_bps)),
         shares: shares(d.shares),
         fund: sym(d.fund),
         offer: d.offer_id,
@@ -260,13 +263,13 @@ export function tapeLine(e, ctx = {}) {
     },
     repo_repurchased: () => ({ code: t("REPAY"), tone: "ok", repoId: tp[0], text: t("#{id} {principal} + {interest} interest", { id: tp[0], principal: money(d.principal, repoCode(tp[0])), interest: exact(d.interest, "") }) }),
     repo_seized: () => ({ code: t("SEIZE"), tone: "bad", repoId: tp[0], text: t("#{id} {shares} shares to the lender {to}", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
-    release_deferred: () => ({ code: t("HELD"), tone: "warn", repoId: tp[0], text: t("#{id} {shares} shares owed to {to}: the share token refused the transfer", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
+    release_deferred: () => ({ code: t("HELD"), tone: "warn", repoId: tp[0], text: t("#{id} {shares} shares owed to {to}: the delivery waits for the share token or for the lender's approval", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
     release_redirected: () => ({ code: t("REDIR"), tone: "warn", repoId: tp[0], text: t("#{id} delivery redirected to {to}", { id: tp[0], to: short(d.to) }) }),
     shares_released: () => ({ code: t("DLVR"), tone: "ok", repoId: tp[0], text: t("#{id} {shares} shares delivered to {to}", { id: tp[0], shares: shares(d.shares), to: short(d.to) }) }),
     offer_created: () => ({
       code: t("OFFER"),
       tone: "id",
-      text: t("#{id} {amount} @ {rate} up to {hours} h by {lender}", { id: tp[0], amount: money(d.amount, offerCode(tp[0])), rate: formatRate(d.rate_bps), hours: Math.floor(Number(d.max_term) / HOUR), lender: short(tp[1]) }),
+      text: t("#{id} {amount} @ {rate} up to {hours} h by {lender}", { id: tp[0], amount: money(d.amount, offerCode(tp[0])), rate: formatRate(big(d.rate_bps)), hours: Math.floor(Number(d.max_term) / HOUR), lender: short(tp[1]) }),
     }),
     offer_withdrawn: () => ({ code: t("WDRAW"), tone: "dim", text: t("#{id} {amount} withdrawn", { id: tp[0], amount: money(d.amount, offerCode(tp[0])) }) }),
     sponsor_set: () => ({ code: t("DSG"), tone: "id", text: d.sponsor ? t("offer #{id} designated by the issuer", { id: tp[0] }) : t("offer #{id} no longer designated", { id: tp[0] }) }),
@@ -274,12 +277,12 @@ export function tapeLine(e, ctx = {}) {
       d.paused
         ? { code: t("PAUSE"), tone: "warn", text: t("new entries paused by {by}; exits still work", { by: short(d.by) }) }
         : { code: t("RESUME"), tone: "ok", text: t("entries reopened by {by}", { by: short(d.by) }) },
-    fund_set: () => ({ code: t("FUND"), tone: "id", text: t("{fund} admitted, haircut {haircut}", { fund: sym(tp[0]), haircut: formatRate(d.haircut_bps) }) }),
+    fund_set: () => ({ code: t("FUND"), tone: "id", text: t("{fund} admitted, haircut {haircut}", { fund: sym(tp[0]), haircut: formatRate(big(d.haircut_bps)) }) }),
     fund_removed: () => ({ code: t("FUND"), tone: "warn", text: t("{name} removed", { name: sym(tp[0]) }) }),
     fund_limits_set: () => ({
       code: t("LIMIT"),
       tone: "id",
-      text: t("{fund} haircut {haircut}, {perRepo} per repo, cap {cap}", { fund: sym(tp[0]), haircut: formatRate(d.haircut_bps), perRepo: money(d.max_principal_per_repo), cap: money(d.max_outstanding) }),
+      text: t("{fund} haircut {haircut}, {perRepo} per repo, cap {cap}", { fund: sym(tp[0]), haircut: formatRate(big(d.haircut_bps)), perRepo: money(d.max_principal_per_repo), cap: money(d.max_outstanding) }),
     }),
     fund_frozen: () =>
       d.frozen
@@ -313,7 +316,13 @@ export function tapeLine(e, ctx = {}) {
   };
   const name = String(e.event ?? "");
   const known = Object.prototype.hasOwnProperty.call(rows, name);
-  let row = known ? rows[name]() : null;
+  let row = null;
+  try {
+    row = known ? rows[name]() : null;
+  } catch {
+    // A malformed event of a known kind (from an RPC or the export) keeps the generic line: the tape goes on.
+    row = null;
+  }
   if (!row) {
     // Events this table does not know: the event name, as the contract spells it.
     const event = human(name);
@@ -530,7 +539,7 @@ export function seizeTicket({ repo, wallet = null, now = 0, sd = 7, fd = 7, code
   return ticket("seize", t("TAKE SHARES · repo #{id}", { id: repo.id }), rows, checks, note);
 }
 
-/** Ticket to retry the delivery of shares a token held back. */
+/** Ticket to retry the delivery of shares held back: by the share token, or for a lender not approved for the fund. */
 export function releaseTicket({ repoId, pending = null, wallet = null, fd = 7, sym = "" }) {
   const rows = pending
     ? [
@@ -541,7 +550,7 @@ export function releaseTicket({ repoId, pending = null, wallet = null, fd = 7, s
     : [[t("Repo"), `#${repoId}`]];
   const checks = [check(Boolean(pending), pending ? t("Shares are waiting for delivery") : t("No shares are waiting on repo #{id}", { id: repoId }))];
   const note = wallet
-    ? t("Anyone may retry; the shares only go to the recorded beneficiary. If the issuer still blocks the token, nothing moves and the record stays.")
+    ? t("Anyone may retry; the shares only go to the recorded beneficiary. While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves and the record stays.")
     : noWallet();
   return ticket("release", t("DELIVER · repo #{id}", { id: repoId }), rows, checks, note);
 }
@@ -578,22 +587,30 @@ export function bandItems({ network = "", paused = null, version = null, schema 
   );
   if (version !== null) items.push({ label: t("CODE"), value: `v${version}${schema !== null ? `·s${schema}` : ""}`, tone: "id", title: t("Contract version and stored layout version") });
   for (const f of funds) {
-    const bound = f.navMaxAge === null ? "?" : compactDuration(f.navMaxAge);
-    const navTitle =
-      f.navAge === null ? t("{name}: NAV unread, bound {bound}", { name: f.name, bound }) : t("{name}: NAV {age} old, bound {bound}", { name: f.name, age: compactDuration(f.navAge), bound });
-    items.push({
-      label: f.symbol,
-      value: f.nav === null ? "—" : `${formatUnits(f.nav, f.navDecimals, { digits: 4 })} ${f.navCurrency}${f.navAge === null ? "" : ` ${compactDuration(f.navAge)}`}`,
-      tone: f.frozen ? "warn" : f.navTone,
-      title: f.frozen ? t("{text}; frozen by its issuer", { text: navTitle }) : navTitle,
-    });
-    if (f.fx !== null) {
-      items.push({
-        label: t("FX {symbol}", { symbol: f.symbol }),
-        value: `${formatUnits(f.fx, f.fxDecimals, { digits: 4 })}${f.fxAge === null ? "" : ` ${compactDuration(f.fxAge)}`}`,
-        tone: f.fxTone,
-        title: t("Exchange rate of the {symbol} leg, bound {bound}", { symbol: f.symbol, bound: f.fxMaxAge === null ? "?" : compactDuration(f.fxMaxAge) }),
-      });
+    // Each fund's items are made on their own: a value that cannot be formatted marks that fund only.
+    try {
+      const bound = f.navMaxAge === null ? "?" : compactDuration(f.navMaxAge);
+      const navTitle =
+        f.navAge === null ? t("{name}: NAV unread, bound {bound}", { name: f.name, bound }) : t("{name}: NAV {age} old, bound {bound}", { name: f.name, age: compactDuration(f.navAge), bound });
+      const fund = [
+        {
+          label: f.symbol,
+          value: f.nav === null ? "—" : `${formatUnits(f.nav, f.navDecimals, { digits: 4 })} ${f.navCurrency}${f.navAge === null ? "" : ` ${compactDuration(f.navAge)}`}`,
+          tone: f.frozen ? "warn" : f.navTone,
+          title: f.frozen ? t("{text}; frozen by its issuer", { text: navTitle }) : navTitle,
+        },
+      ];
+      if (f.fx !== null) {
+        fund.push({
+          label: t("FX {symbol}", { symbol: f.symbol }),
+          value: `${formatUnits(f.fx, f.fxDecimals, { digits: 4 })}${f.fxAge === null ? "" : ` ${compactDuration(f.fxAge)}`}`,
+          tone: f.fxTone,
+          title: t("Exchange rate of the {symbol} leg, bound {bound}", { symbol: f.symbol, bound: f.fxMaxAge === null ? "?" : compactDuration(f.fxMaxAge) }),
+        });
+      }
+      items.push(...fund);
+    } catch {
+      items.push({ label: String(f.symbol ?? "?"), value: "—", tone: "bad", title: t(UNSHOWABLE) });
     }
   }
   if (openInterest) {

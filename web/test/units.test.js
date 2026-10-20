@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
+import { Asset, Networks } from "@stellar/stellar-sdk";
+import { Chain } from "../src/chain.js";
 import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError, describeError } from "../src/errors.js";
-import { formatAge, formatAmount, formatCountdown, formatDuration, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
+import { formatAge, formatAmount, formatCountdown, formatDuration, formatOrDash, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
 import {
   chargedHours,
   defaultPrincipal,
@@ -64,6 +67,34 @@ test("units parse and format without float rounding", () => {
   assert.equal(unitsToInput(10_000_000n, 7), "1");
   assert.equal(formatRate(250), "2.50 %");
   assert.equal(formatRate(1), "0.01 %");
+});
+
+test("a cell of untrusted data is formatted or shown as a dash, never thrown", () => {
+  assert.equal(formatOrDash("12505000000", (v) => formatAmount(v, 7)), "1,250.50");
+  assert.equal(formatOrDash(350n, formatRate), "3.50 %");
+  assert.equal(formatOrDash("0", formatRate), "0.00 %");
+  for (const raw of ["", null, undefined, "abc", "1.5", "1e9", {}, [1, 2]]) assert.equal(formatOrDash(raw, formatRate), "—", JSON.stringify(raw));
+  assert.equal(formatOrDash("1", (v) => formatAmount(v, 99)), "—", "a format that refuses its decimals");
+});
+
+test("decimals from 0 to 38: fewer than the digits shown pad with zeros, more are refused at once", () => {
+  // A coarse feed (rc4 admitted 0 to 3 decimals) asked for 4 digits: scaled up, never a negative power of ten.
+  assert.equal(formatUnits(97n, 2, { digits: 4 }), "0.9700");
+  assert.equal(formatUnits(1085n, 3, { digits: 4 }), "1.0850");
+  assert.equal(formatUnits(108_500_000_000_000n, 0, { digits: 4 }), "108,500,000,000,000.0000");
+  assert.equal(formatUnits(-97n, 2, { digits: 4 }), "-0.9700");
+  assert.equal(formatAmount(5n, 0), "5.00");
+  for (let decimals = 0; decimals <= 3; decimals += 1) assert.doesNotThrow(() => formatUnits(108_500_000_000_000n, decimals, { digits: 4 }), `decimals ${decimals}`);
+  assert.equal(formatUnits(1n, 38), `0.${"0".repeat(37)}1`);
+  assert.equal(formatUnits(1n, 7n, { digits: 2n }), "0.00", "a decimals count read as a big integer");
+  // Out of range, or not an integer: a RangeError at once, not a 300-million-digit power of ten.
+  const started = Date.now();
+  for (const decimals of [39, -1, 1.5, 300_000_000, 4_294_967_295, "x", "", null, undefined, Number.NaN]) {
+    assert.throws(() => formatUnits(1n, decimals), RangeError, String(decimals));
+  }
+  assert.throws(() => formatUnits(1n, 7, { digits: 39 }), RangeError);
+  assert.throws(() => formatUnits(1n, 7, { digits: -1 }), RangeError);
+  assert.ok(Date.now() - started < 1000);
 });
 
 test("durations read naturally", () => {
@@ -137,6 +168,62 @@ test("a simulation error is named after the contract that raised it", () => {
 
   const bare = decodeSimulationError("HostError: Error(Contract, #8)", kinds);
   assert.equal(bare.contract, "unknown");
+});
+
+test("a refusal by any registered stablecoin's contract is named after that contract and its ticker", async () => {
+  const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
+  const ow = dep.contracts.openWindow;
+  const eurb = dep.stablecoins.find((c) => c.code === "tEURB").contract;
+  // A repurchase whose tEURB trustline the issuer deauthorized: the Stellar Asset Contract's #11.
+  const frozen = (coin) =>
+    [
+      "HostError: Error(Contract, #11)",
+      "",
+      "Event log (newest first):",
+      `   0: [Diagnostic Event] contract:${ow}, topics:[error, Error(Contract, #11)], data:"escalating error to VM trap from failed host function call: call"`,
+      `   1: [Diagnostic Event] contract:${ow}, topics:[error, Error(Contract, #11)], data:["contract call failed", transfer, [GBORROWER, ${ow}, 1000]]`,
+      ...(coin ? [`   2: [Failed Diagnostic Event (not emitted)] contract:${coin}, topics:[error, Error(Contract, #11)], data:["trustline entry is not authorized"]`] : []),
+    ].join("\n");
+  const chain = new Chain(dep);
+  const error = chain.simulationError(frozen(eurb));
+  assert.equal(error.name, "stellar-asset:BalanceDeauthorized");
+  assert.equal(error.contractId, eurb);
+  assert.equal(describeError(error, { code: "tEUR" }).text, "Your tEURB trustline is not authorized by the issuer.", "the coin that refused, not the screen's");
+  // The callee's own event missing: Open Window only passed the refusal on, so #11 is not its StalePrice.
+  const relayed = chain.simulationError(frozen(null));
+  assert.equal(relayed.contract, "unknown");
+  assert.notEqual(relayed.name, "StalePrice");
+  assert.equal(describeError(relayed).text, "A contract refused the operation.");
+  // XLM itself, through its Stellar Asset Contract.
+  const xlm = chain.simulationError(`HostError: Error(Contract, #10)\n0: [Diagnostic Event] contract:${chain.nativeContract}, topics:[error, Error(Contract, #10)], data:["resulting balance is not within the allowed range"]`);
+  assert.equal(describeError(xlm, { code: "tEUR" }).text, "Your XLM balance is too low for this.");
+});
+
+test("a stablecoin the deployment file does not list is learned from the chain", async () => {
+  const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
+  const issuer = dep.stablecoin.issuer;
+  const usdc = new Asset("tUSDC", issuer).contractId(Networks.TESTNET);
+  const other = "CBVSCT2WPGYBP23BQKI5LCQQT4AWVT3WB36GUYJBS7OENEJCS3A6IKA7";
+  const silent = new Asset("tGBP", issuer).contractId(Networks.TESTNET);
+  const chain = new Chain(dep);
+  const asked = [];
+  chain.read = async (contract, fn) => {
+    asked.push(contract);
+    if (fn !== "name") throw new Error(`unexpected read ${fn}`);
+    if (contract === usdc) return `tUSDC:${issuer}`;
+    if (contract === other) return `tUSDC:${issuer}`; // a name that does not derive this address
+    throw new TypeError("Failed to fetch");
+  };
+  await chain.learnCoins([usdc, other, silent, usdc, dep.contracts.stablecoin]);
+  assert.equal(chain.kinds.get(usdc), "stellar-asset");
+  assert.equal(chain.codes.get(usdc), "tUSDC");
+  assert.equal(chain.kinds.get(other), "token", "a contract whose name is not its own asset is a token of its own");
+  assert.equal(chain.kinds.has(silent), false, "unanswered: asked again later");
+  assert.deepEqual(asked.sort(), [usdc, other, silent].sort(), "one read per unknown address, none for a listed coin");
+  const error = chain.simulationError(`HostError: Error(Contract, #11)\n0: [Diagnostic Event] contract:${usdc}, topics:[error, Error(Contract, #11)]`);
+  assert.equal(describeError(error, { code: "tEUR" }).text, "Your tUSDC trustline is not authorized by the issuer.");
+  await chain.learnCoins([usdc, other]);
+  assert.equal(asked.length, 3, "learned addresses are not read again");
 });
 
 test("errors read as sentences with their name", () => {

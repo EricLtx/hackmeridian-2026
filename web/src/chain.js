@@ -26,7 +26,7 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { TransactionError, WalletError, contractKinds, decodeSimulationError } from "./errors.js";
+import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError } from "./errors.js";
 import { formatUnits } from "./format.js";
 import { locale, t } from "./i18n.js";
 
@@ -46,6 +46,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const RPC_TIMEOUT_MS = 7000;
 const EVENTS_TIMEOUT_MS = 12000;
 const SEND_TIMEOUT_MS = 10000;
+/** Seconds past a write's validity window that a second endpoint gets to see it before its silence counts. */
+const CONFIRM_GRACE_SECS = 30;
 
 /** An RPC call that did not answer within its bound. */
 export class RpcTimeout extends Error {
@@ -97,6 +99,49 @@ function isTransient(error) {
   const text = `${error?.message ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
   // Chrome says "Failed to fetch", Firefox "NetworkError", Safari "Load failed" (a CORS refusal included).
   return /fetch|load failed|network|connection was lost|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|\b(429|50[0-4])\b/i.test(text);
+}
+
+/** Ledgers the endpoint in use may trail the highest one before calls move to another endpoint. */
+export const STALE_LEDGERS = 10;
+/** Ledgers within which an endpoint counts as level with the highest: each one is read at a slightly different moment. */
+export const LEVEL_LEDGERS = 1;
+/**
+ * How long an endpoint whose call failed or timed out rests before calls may
+ * return to it, even level: a public RPC that answers its height but is slow
+ * to simulate (8.5 s on 20 October) would otherwise be left and rejoined at
+ * every pass.
+ */
+export const RETURN_QUIET_MS = 60_000;
+const HEIGHT_TIMEOUT_MS = 4000;
+
+/**
+ * Which endpoint calls should use, from the latest ledger each one reports
+ * (null for one that did not answer): the first endpoint whenever it is
+ * level with the highest; else the one in use, unless it trails the highest
+ * by more than STALE_LEDGERS, in which case the first endpoint that is
+ * level. An endpoint that did not answer is no reason to move: a failing
+ * call moves on its own (`failover`). Returns `{ index, reason, behind }`,
+ * reason "behind" or "level" when calls should move, else null.
+ */
+export function pickEndpoint(heights, active) {
+  const known = heights.filter((h) => Number.isSafeInteger(h));
+  const stay = { index: active, reason: null, behind: 0 };
+  if (!known.length) return stay;
+  const highest = Math.max(...known);
+  const level = (i) => Number.isSafeInteger(heights[i]) && highest - heights[i] <= LEVEL_LEDGERS;
+  if (active !== 0 && level(0)) return { index: 0, reason: "level", behind: 0 };
+  const mine = heights[active];
+  if (!Number.isSafeInteger(mine) || highest - mine <= STALE_LEDGERS) return stay;
+  const best = heights.findIndex((_, i) => level(i));
+  return best >= 0 && best !== active ? { index: best, reason: "behind", behind: highest - mine } : stay;
+}
+
+/** The sentence that says calls moved to another endpoint, from an `onRpcChange` notice. */
+export function rpcChangeText({ from, to, reason, behind = 0 }) {
+  if (reason === "timeout") return t("RPC {from} did not answer in time: switched to {to}.", { from, to });
+  if (reason === "behind") return t("RPC {from} is {n} ledgers behind: switched to {to}.", { from, to, n: behind });
+  if (reason === "level") return t("RPC {to} has caught up: switched back to it.", { to });
+  return t("RPC {from} failed: switched to {to}.", { from, to });
 }
 
 /**
@@ -172,7 +217,7 @@ export function checkPrice(settled) {
 }
 
 /** Decimals read on chain stay between 0 and 38: a larger one would freeze the page in a power of ten. */
-const DECIMAL_KEYS = ["nav_decimals", "fx_decimals", "price_decimals", "decimals"];
+const DECIMAL_KEYS = ["nav_decimals", "fx_decimals", "share_decimals", "price_decimals", "decimals"];
 export function checkDecimals(value, what = "value") {
   for (const k of DECIMAL_KEYS) {
     if (value && typeof value === "object" && k in value) {
@@ -182,18 +227,127 @@ export function checkDecimals(value, what = "value") {
   }
   return value;
 }
-const settledDecimals = (what) => (settled) => {
-  if (!settled || settled.error || !settled.value) return settled;
+
+/** A Soroban symbol, as a currency or an asset ticker decodes. */
+const SYMBOL = /^[A-Za-z0-9_]{1,32}$/;
+
+/** Throws unless `value` has every key: a missing field would reach the page as undefined, then BigInt(). */
+function need(value, keys, what) {
+  for (const k of keys) if (!(k in value)) throw new TypeError(`missing ${what}.${k} from the chain`);
+}
+
+/** An integer read on chain (u32, u64 or i128), or a TypeError. */
+export function checkInt(value, what = "value") {
+  if (!isInt(value)) throw new TypeError(`unexpected ${what} from the chain`);
+  return value;
+}
+
+/** A SEP-40 asset as decoded: `["Stellar", address]` or `["Other", symbol]`. */
+function checkAsset(asset, what) {
+  const [kind, id] = Array.isArray(asset) && asset.length === 2 ? asset : [];
+  const ok = typeof id === "string" && ((kind === "Stellar" && STRKEY.test(id)) || (kind === "Other" && SYMBOL.test(id)));
+  if (!ok) throw new TypeError(`unexpected ${what} from the chain`);
+}
+
+const FUND_INTS = ["haircut_bps", "nav_max_age_secs", "corridor_floor_bps", "max_yield_bps", "max_principal_per_repo", "max_outstanding"];
+const LEG_INTS = ["haircut_bps", "max_age_secs", "band_bps"];
+const STATE_INTS = ["share_decimals", "nav_decimals", "fx_decimals", "reference_nav", "reference_time", "reference_fx", "outstanding"];
+
+/**
+ * A fund's settings as `get_fund` returns them (FundConfig), or null for a
+ * fund not admitted. The price source is `["Direct"]` or `["Cross", leg]`;
+ * anything else is refused here, so the exchange-rate read never starts
+ * from a source it cannot use.
+ */
+export function checkFund(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: FUND_INTS, addresses: ["oracle", "steward"], what: "fund" });
+  need(value, [...FUND_INTS, "oracle", "steward", "oracle_asset", "currency", "source"], "fund");
+  checkAsset(value.oracle_asset, "fund.oracle_asset");
+  if (typeof value.currency !== "string" || !SYMBOL.test(value.currency)) throw new TypeError("unexpected fund.currency from the chain");
+  const source = value.source;
+  if (Array.isArray(source) && source.length === 1 && source[0] === "Direct") return value;
+  if (Array.isArray(source) && source.length === 2 && source[0] === "Cross") {
+    checkShape(source[1], { ints: LEG_INTS, addresses: ["oracle"], what: "fund.source" });
+    need(source[1], [...LEG_INTS, "oracle", "asset"], "fund.source");
+    checkAsset(source[1].asset, "fund.source.asset");
+    return value;
+  }
+  throw new TypeError("unexpected fund.source from the chain");
+}
+
+/** A fund's state as `get_fund_state` returns it (FundState), or null for a fund not admitted. */
+export function checkFundState(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: STATE_INTS, what: "fund state" });
+  need(value, [...STATE_INTS, "currency", "frozen"], "fund state");
+  if (typeof value.frozen !== "boolean") throw new TypeError("unexpected fund state.frozen from the chain");
+  if (typeof value.currency !== "string" || !SYMBOL.test(value.currency)) throw new TypeError("unexpected fund state.currency from the chain");
+  return checkDecimals(value, "fund state");
+}
+
+/** Shares owed on a closed repo (`pending_release`): `{ fund, to, shares }`, or null when none are. */
+export function checkPendingRelease(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: ["shares"], addresses: ["fund", "to"], what: "pending release" });
+  need(value, ["fund", "to", "shares"], "pending release");
+  return value;
+}
+
+/** Applies `check` to a settled read: `{ value }` checked, or `{ error }` when the value is not what the contract returns. */
+const settledWith = (check) => (settled) => {
+  if (!settled || settled.error) return settled;
   try {
-    checkDecimals(settled.value, what);
-    return settled;
+    return { value: check(settled.value) };
   } catch (error) {
     return { error };
   }
 };
+const isBool = (value, what) => {
+  if (typeof value !== "boolean") throw new TypeError(`unexpected ${what} from the chain`);
+  return value;
+};
 
-/** The most a simulation may ask in resource fees before anything is signed: legitimate calls cost about 1 XLM on testnet. */
+/** The most a transaction may carry in resource fees before anything is signed: legitimate calls cost about 1 XLM on testnet. */
 export const MAX_RESOURCE_FEE = 250_000_000n;
+
+/** The resource fee a built Soroban transaction declares in its envelope, or null for a classic one. */
+export function resourceFeeOf(tx) {
+  const envelope = tx.toEnvelope();
+  const ext = envelope.type === "envelopeTypeTx" ? envelope.value.tx.ext : null;
+  return ext?.type === "sorobanData" ? BigInt(ext.value.resourceFee.toString()) : null;
+}
+
+/**
+ * Checks the fee of the assembled transaction, the one the wallet is asked to
+ * sign, rather than the simulation's summary of it: the resource fee in its
+ * envelope and its total fee beyond the inclusion bid each stay under
+ * MAX_RESOURCE_FEE, they are the same amount, and they match the simulation's
+ * own estimate when it gives one. An RPC that inflates the fee, or reports
+ * one figure and sets another, is refused before anything is signed. Returns
+ * the resource fee.
+ */
+export function checkFee(tx, { inclusionFee = BigInt(INCLUSION_FEE), cap = MAX_RESOURCE_FEE, estimate = null } = {}) {
+  const resource = resourceFeeOf(tx);
+  const beyond = BigInt(tx.fee) - BigInt(inclusionFee);
+  const highest = resource !== null && resource > beyond ? resource : beyond;
+  if (highest > cap) {
+    throw new TransactionError("TxRefused", t("The network asked for an unusually high fee ({fee} XLM). Nothing was signed.", { fee: formatUnits(highest, 7, { digits: 2 }) }));
+  }
+  if (resource === null || resource !== beyond || (estimate !== null && BigInt(estimate) !== resource)) {
+    throw new TransactionError("TxRefused", t("The fee of the prepared transaction does not match the network's estimate. Nothing was signed."));
+  }
+  return resource;
+}
+
+/** A simulation's fee estimate as an integer, or null when it gives none it can be held to. */
+function estimateOf(sim) {
+  try {
+    return sim?.minResourceFee === undefined || sim.minResourceFee === null ? null : BigInt(sim.minResourceFee);
+  } catch {
+    return -1n; // an estimate that is not a number matches no fee
+  }
+}
 
 const REPO_INTS = ["offer_id", "shares", "principal", "rate_bps", "opened_at", "maturity"];
 const REPO_ADDRESSES = ["borrower", "lender", "fund", "stablecoin"];
@@ -250,18 +404,83 @@ export class Chain {
     const urls = [deployment.rpcUrl, ...(Array.isArray(deployment.rpcFallbacks) ? deployment.rpcFallbacks : [])].filter(Boolean);
     this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: rpcServer(url), lastMs: null, failures: 0 }));
     this.active = 0;
-    /** Called with `{ from, to, reason }` (reason "timeout" or "error") when calls move to another endpoint. */
+    /** Pause between two looks at a submitted transaction, in milliseconds. */
+    this.pollMs = 1000;
+    /**
+     * Called with `{ from, to, reason, behind }` when calls move to another endpoint: reason
+     * "timeout" or "error" (a failing call), "behind" (it lagged by `behind` ledgers) or "level" (back to the first).
+     */
     this.onRpcChange = null;
     this.kinds = contractKinds(deployment.contracts);
+    /** The ticker of each token the page knows, by address: a token's refusal names that token. */
+    this.codes = new Map();
+    if (deployment.contracts.stablecoin && deployment.stablecoin?.code) this.codes.set(deployment.contracts.stablecoin, deployment.stablecoin.code);
     // Every admitted fund's share token and NAV feed, and every registered stablecoin, so a refusal names its contract.
     for (const f of deployment.funds ?? []) {
-      if (f.shares && !this.kinds.has(f.shares)) this.kinds.set(f.shares, f.tokenCode === "stellar-asset-contract" ? "stellar-asset" : "fund-token");
+      const sac = f.tokenCode === "stellar-asset-contract";
+      if (f.shares && !this.kinds.has(f.shares)) this.kinds.set(f.shares, sac ? "stellar-asset" : "fund-token");
+      if (f.shares && sac && f.symbol) this.codes.set(f.shares, f.symbol);
       if (f.navFeed && !this.kinds.has(f.navFeed)) this.kinds.set(f.navFeed, "nav-oracle");
     }
     for (const c of deployment.stablecoins ?? []) {
       if (c.contract && !this.kinds.has(c.contract)) this.kinds.set(c.contract, "stellar-asset");
+      if (c.contract && c.code) this.codes.set(c.contract, c.code);
     }
     this.nativeContract = Asset.native().contractId(this.passphrase);
+    this.kinds.set(this.nativeContract, "stellar-asset");
+    this.codes.set(this.nativeContract, "XLM");
+    /** Addresses whose kind a read is settling, so each is asked once at a time. */
+    this.learning = new Map();
+  }
+
+  /** A simulation's error, decoded and, for a token the page knows, given that token's ticker. */
+  simulationError(text) {
+    const error = decodeSimulationError(text, this.kinds);
+    if (error instanceof ContractError && error.contractId) error.coin = this.codes.get(error.contractId) ?? null;
+    return error;
+  }
+
+  /**
+   * Learns the kind of the stablecoins the chain shows that the deployment
+   * file does not list (offers and repos carry only registered ones), so a
+   * refusal by any of them is named after it. A Stellar Asset Contract is
+   * recognised by its name, "CODE:ISSUER", from which its address derives;
+   * any other contract is a token with no table here. One read per new
+   * address; a read the network did not answer is tried again later.
+   */
+  async learnCoins(addresses) {
+    const fresh = [...new Set(addresses)].filter((a) => typeof a === "string" && STRKEY.test(a) && a.startsWith("C") && !this.kinds.has(a));
+    await Promise.all(
+      fresh.map((address) => {
+        if (!this.learning.has(address)) {
+          const settle = this.identify(address).finally(() => this.learning.delete(address));
+          this.learning.set(address, settle);
+        }
+        return this.learning.get(address);
+      }),
+    );
+  }
+
+  async identify(address) {
+    let name;
+    try {
+      name = await this.read(address, "name");
+    } catch (error) {
+      if (!(error instanceof ContractError)) return; // the network, not the contract: ask again later
+      this.kinds.set(address, "token");
+      return;
+    }
+    const [code, issuer] = typeof name === "string" ? name.split(":") : [];
+    try {
+      if (code && issuer && new Asset(code, issuer).contractId(this.passphrase) === address) {
+        this.kinds.set(address, "stellar-asset");
+        this.codes.set(address, code);
+        return;
+      }
+    } catch {
+      // Not an asset name: a token of its own.
+    }
+    this.kinds.set(address, "token");
   }
 
   explorerTx(hash) {
@@ -296,6 +515,7 @@ export class Chain {
     if (from !== this.active) return true;
     const previous = this.endpoints[this.active];
     previous.failures += 1;
+    previous.failedAt = Date.now();
     this.active = (this.active + 1) % this.endpoints.length;
     try {
       this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
@@ -303,6 +523,60 @@ export class Chain {
       // A failing listener never stops a call.
     }
     return true;
+  }
+
+  /**
+   * The latest ledger of every endpoint, read at once within a short bound:
+   * a sequence per endpoint, null for one that did not answer. `getHealth`
+   * carries it in about 200 bytes, where `getLatestLedger` now ships the
+   * whole ledger's metadata (about 330 KB on testnet); an endpoint that calls
+   * itself unhealthy (its last ledger is old) is asked `getLatestLedger`,
+   * since a lagging endpoint is what the comparison looks for.
+   */
+  async heights() {
+    return Promise.all(
+      this.endpoints.map(async (endpoint) => {
+        try {
+          const health = await withTimeout(endpoint.server.getHealth(), HEIGHT_TIMEOUT_MS);
+          if (Number.isSafeInteger(health?.latestLedger)) return health.latestLedger;
+        } catch (error) {
+          if (error instanceof RpcTimeout || isTransient(error)) return null;
+        }
+        try {
+          const latest = await withTimeout(endpoint.server.getLatestLedger(), HEIGHT_TIMEOUT_MS);
+          return Number.isSafeInteger(latest?.sequence) ? latest.sequence : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+  }
+
+  /**
+   * Moves calls away from an endpoint that answers but lags: compares every
+   * endpoint's latest ledger and applies `pickEndpoint`, so a fallback is
+   * left for the first endpoint once that one is level again, and, when it
+   * was left after a failed call, has rested RETURN_QUIET_MS. The page runs
+   * it before each refresh: the pass, its clock included, then reads an
+   * endpoint that is current. Never throws; returns the heights read.
+   */
+  async checkHeights() {
+    if (this.endpoints.length < 2) return [];
+    const heights = await this.heights();
+    // An endpoint that just failed a call is no target yet, however level it is (RETURN_QUIET_MS).
+    const now = Date.now();
+    const candidates = heights.map((height, i) => (now - (this.endpoints[i].failedAt ?? -Infinity) < RETURN_QUIET_MS ? null : height));
+    const { index, reason, behind } = pickEndpoint(candidates, this.active);
+    if (reason && index !== this.active) {
+      const previous = this.endpoints[this.active];
+      this.active = index;
+      try {
+        this.onRpcChange?.({ from: previous.host, to: this.endpoints[index].host, reason, behind });
+      } catch {
+        // A failing listener never stops a refresh.
+      }
+    }
+    return heights;
   }
 
   /**
@@ -345,7 +619,7 @@ export class Chain {
       .setTimeout(0)
       .build();
     const sim = await this.net(() => this.server.simulateTransaction(tx));
-    if (rpc.Api.isSimulationError(sim)) throw decodeSimulationError(sim.error, this.kinds);
+    if (rpc.Api.isSimulationError(sim)) throw this.simulationError(sim.error);
     return scValToNative(sim.result.retval);
   }
 
@@ -387,26 +661,33 @@ export class Chain {
   }
 
   async offers() {
-    return (await this.scan("get_offer")).map(({ id, value }) => normalizeOffer(id, value));
+    const offers = (await this.scan("get_offer")).map(({ id, value }) => normalizeOffer(id, value));
+    await this.learnCoins(offers.map((o) => o.stablecoin));
+    return offers;
   }
 
   /** Repos from `from` on, until the first id with no repo. */
   async repos(from = 1) {
-    return (await this.scan("get_repo", from)).map(({ id, value }) => normalizeRepo(id, value));
+    const repos = (await this.scan("get_repo", from)).map(({ id, value }) => normalizeRepo(id, value));
+    await this.learnCoins(repos.map((r) => r.stablecoin));
+    return repos;
   }
 
   async repo(id) {
     const value = await this.read(this.contracts.openWindow, "get_repo", [sv.u64(id)]);
-    return value ? normalizeRepo(id, value) : null;
+    const repo = value ? normalizeRepo(id, value) : null;
+    if (repo) await this.learnCoins([repo.stablecoin]);
+    return repo;
   }
 
   /** Interest due on an open repo if repurchased now (principal not included). */
   async repoDue(id) {
-    return BigInt(await this.read(this.contracts.openWindow, "repo_due", [sv.u64(id)]));
+    return BigInt(checkInt(await this.read(this.contracts.openWindow, "repo_due", [sv.u64(id)]), "repo_due"));
   }
 
-  isLenderApproved(address) {
-    return this.read(this.contracts.openWindow, "is_lender_approved", [sv.address(this.fund), sv.address(address)]);
+  /** Whether the fund's steward approves `address` as a lender; anything but true reads as no. */
+  async isLenderApproved(address) {
+    return (await this.read(this.contracts.openWindow, "is_lender_approved", [sv.address(this.fund), sv.address(address)])) === true;
   }
 
   /**
@@ -417,33 +698,44 @@ export class Chain {
     const ow = this.contracts.openWindow;
     const fund = sv.address(this.fund);
     const [config, state, paused, maxTerm, nav, quote, offers, cap, outstanding, now] = await Promise.all([
-      this.settle(ow, "get_fund", [fund]),
-      this.settle(ow, "get_fund_state", [fund]).then(settledDecimals("fund state")),
-      this.settle(ow, "is_paused"),
-      this.settle(ow, "max_term"),
-      this.settle(ow, "fund_price", [fund]),
+      this.settle(ow, "get_fund", [fund]).then(settledWith(checkFund)),
+      this.settle(ow, "get_fund_state", [fund]).then(settledWith(checkFundState)),
+      this.settle(ow, "is_paused").then(settledWith((v) => isBool(v, "is_paused"))),
+      this.settle(ow, "max_term").then(settledWith((v) => checkInt(v, "max_term"))),
+      this.settle(ow, "fund_price", [fund]).then(checkPrice),
       shares > 0n ? this.quote(shares).then((value) => ({ value }), (error) => ({ error })) : { value: null },
       this.offers().then((value) => ({ value }), (error) => ({ error })),
-      this.settle(ow, "currency_cap", [sv.symbol(this.deployment.stablecoin.currency)]),
-      this.settle(ow, "currency_outstanding", [sv.symbol(this.deployment.stablecoin.currency)]),
+      this.settle(ow, "currency_cap", [sv.symbol(this.deployment.stablecoin.currency)]).then(settledWith((v) => checkInt(v, "currency_cap"))),
+      this.settle(ow, "currency_outstanding", [sv.symbol(this.deployment.stablecoin.currency)]).then(settledWith((v) => checkInt(v, "currency_outstanding"))),
       this.ledgerTime().then((value) => ({ value }), (error) => ({ error })),
     ]);
-    let fx = { value: null };
-    const source = config.value?.source;
-    if (Array.isArray(source) && source[0] === "Cross") {
-      fx = checkPrice(await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]));
-    }
+    const fx = await this.exchangeRate(config.value);
     // Every admitted fund the deployment lists (one, or two after `setup -- --second-fund`): settings and state.
     const funds = await Promise.all(
       (this.deployment.funds ?? []).map(async (f) => {
         const [cfg, st] = await Promise.all([
-          this.settle(ow, "get_fund", [sv.address(f.shares)]),
-          this.settle(ow, "get_fund_state", [sv.address(f.shares)]).then(settledDecimals("fund state")),
+          this.settle(ow, "get_fund", [sv.address(f.shares)]).then(settledWith(checkFund)),
+          this.settle(ow, "get_fund_state", [sv.address(f.shares)]).then(settledWith(checkFundState)),
         ]);
         return { ...f, config: cfg, state: st };
       }),
     );
     return { config, state, paused, maxTerm, nav, fx, quote, offers, cap, outstanding, now, funds };
+  }
+
+  /**
+   * The exchange rate of a cross-priced fund, read on its FX oracle: `{ value }`,
+   * `{ error }`, or `{ value: null }` for a fund priced directly. A source the
+   * page cannot read from becomes this field's error, never the whole pass's.
+   */
+  async exchangeRate(config) {
+    const source = config?.source;
+    if (!Array.isArray(source) || source[0] !== "Cross") return { value: null };
+    try {
+      return checkPrice(await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]));
+    } catch (error) {
+      return { error };
+    }
   }
 
   /** Balances of an address: XLM, the stablecoin (null without trustline) and fund shares. */
@@ -459,9 +751,9 @@ export class Chain {
       if (r.error && !missing(r)) throw r.error;
     }
     return {
-      xlm: xlm.error ? null : BigInt(xlm.value),
-      stablecoin: stable.error ? null : BigInt(stable.value),
-      shares: shares.error ? 0n : BigInt(shares.value),
+      xlm: xlm.error ? null : BigInt(checkInt(xlm.value, "balance")),
+      stablecoin: stable.error ? null : BigInt(checkInt(stable.value, "balance")),
+      shares: shares.error ? 0n : BigInt(checkInt(shares.value, "balance")),
     };
   }
 
@@ -504,11 +796,7 @@ export class Chain {
    * cross-priced fund, its exchange rate. Each `{ value }` or `{ error }`.
    */
   async feeds(fund, config) {
-    const source = config?.source;
-    const [nav, fx] = await Promise.all([
-      this.settle(this.contracts.openWindow, "fund_price", [sv.address(fund)]),
-      Array.isArray(source) && source[0] === "Cross" ? this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]).then(checkPrice) : { value: null },
-    ]);
+    const [nav, fx] = await Promise.all([this.settle(this.contracts.openWindow, "fund_price", [sv.address(fund)]).then(checkPrice), this.exchangeRate(config)]);
     return { nav, fx };
   }
 
@@ -610,13 +898,11 @@ export class Chain {
       .setTimeout(TX_VALIDITY_SECS)
       .build();
     const sim = await this.net(() => this.server.simulateTransaction(tx));
-    if (rpc.Api.isSimulationError(sim)) throw decodeSimulationError(sim.error, this.kinds);
-    // The simulation sets the resource fee the wallet is asked to sign: an RPC that inflates it is refused here.
-    const asked = BigInt(sim.minResourceFee ?? 0);
-    if (asked > MAX_RESOURCE_FEE) {
-      throw new TransactionError("TxRefused", t("The network asked for an unusually high fee ({fee} XLM). Nothing was signed.", { fee: formatUnits(asked, 7, { digits: 2 }) }));
-    }
+    if (rpc.Api.isSimulationError(sim)) throw this.simulationError(sim.error);
+    // The simulation sets the resource fee the wallet is asked to sign: the assembled transaction is
+    // checked, since its fee comes from the simulation's transaction data, not from its summary.
     const ready = rpc.assembleTransaction(tx, sim).build();
+    checkFee(ready, { estimate: estimateOf(sim) });
     const signed = await this.signWith(signer, ready, onStatus);
     const { result, hash, seconds, fee } = await this.submit(signed, onStatus);
     return { value: result.returnValue ? scValToNative(result.returnValue) : undefined, hash, seconds, fee };
@@ -634,27 +920,75 @@ export class Chain {
     return this.submit(signed, onStatus);
   }
 
+  /** `getTransaction` on the endpoint in use: its answer with `via`, the index of the endpoint that gave it, or null when none answered. */
   async lookup(hash) {
+    let via = this.active;
     try {
-      return await this.net(() => this.server.getTransaction(hash), { attempts: 2 });
+      const answer = await this.net(
+        () => {
+          via = this.active;
+          return this.server.getTransaction(hash);
+        },
+        { attempts: 2 },
+      );
+      return answer ? { ...answer, via } : null;
     } catch {
       return null; // RPC unreachable: unknown, not failed
     }
   }
 
   /**
+   * Asks the endpoints other than `via` whether `hash` succeeded, so that one
+   * endpoint's word never shows a write as confirmed: an RPC can report
+   * SUCCESS for a transaction it never forwarded. Returns another endpoint's
+   * SUCCESS answer, or null when there is no other endpoint. Throws
+   * TxUnconfirmed when another endpoint reports a failure, does not know the
+   * transaction once its ledgers are past the validity window, or stays
+   * silent until shortly after it.
+   */
+  async confirmElsewhere(hash, via, maxTime, onStatus = () => {}) {
+    const others = this.endpoints.filter((_, i) => i !== via);
+    if (!others.length) return null;
+    const hosts = others.map((e) => e.host).join(", ");
+    onStatus({ stage: "confirming", text: t("Submitted, confirming: waiting for a second RPC endpoint ({host}) to see it.", { host: hosts }), hash });
+    const deadline = (maxTime || Math.floor(Date.now() / 1000) + TX_VALIDITY_SECS) + CONFIRM_GRACE_SECS;
+    for (;;) {
+      const answers = await Promise.all(
+        others.map((endpoint) =>
+          withTimeout(endpoint.server.getTransaction(hash), RPC_TIMEOUT_MS).then(
+            (answer) => ({ endpoint, answer }),
+            () => ({ endpoint, answer: null }),
+          ),
+        ),
+      );
+      const success = answers.find(({ answer }) => answer?.status === "SUCCESS");
+      if (success) return success.answer;
+      const failure = answers.find(({ answer }) => answer?.status === "FAILED");
+      if (failure) throw new TransactionError("TxUnconfirmed", t("{host} reports it failed.", { host: failure.endpoint.host }), hash);
+      // Past the window, an endpoint that has closed later ledgers would know a transaction that landed.
+      const unknown = answers.find(({ answer }) => answer?.status === "NOT_FOUND" && maxTime && Number(answer.latestLedgerCloseTime) > maxTime + 5);
+      if (unknown) throw new TransactionError("TxUnconfirmed", t("{host} does not know it, and its validity window has passed.", { host: unknown.endpoint.host }), hash);
+      if (Date.now() / 1000 > deadline) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
+      await sleep(this.pollMs);
+    }
+  }
+
+  /**
    * Sends a signed transaction and returns once it has landed. Throws only
    * on a definitive outcome: failed on chain, refused by the network, or
-   * expired (the ledger closed past the validity window without it).
+   * expired (the ledger closed past the validity window without it); or
+   * TxUnconfirmed when a second endpoint does not confirm the success the
+   * first one reports (`confirmElsewhere`).
    */
   async submit(tx, onStatus = () => {}) {
     const started = Date.now();
     const hash = toHex(tx.hash());
     const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
-    const done = (result) => {
+    const done = async (answer) => {
+      const confirmed = (await this.confirmElsewhere(hash, answer.via, maxTime, onStatus)) ?? answer;
       const seconds = (Date.now() - started) / 1000;
       onStatus({ stage: "confirmed", text: t("Confirmed in {seconds} s.", { seconds: formatUnits(BigInt(Math.round(seconds * 10)), 1) }), hash });
-      return { result, hash, seconds, fee: feeCharged(result) };
+      return { result: confirmed, hash, seconds, fee: feeCharged(confirmed) };
     };
     const failed = (result) => new TransactionError("TxFailed", t("Result: {code}.", { code: resultCode(result.resultXdr) }), hash);
     const until = maxTime ? new Date(maxTime * 1000).toLocaleTimeString(locale()) : null;
@@ -706,7 +1040,7 @@ export class Chain {
       if (polls === 10) {
         onStatus({ stage: "pending", text: t("Still waiting. It can land until {until}; it is not failed before then.", { until }), hash });
       }
-      await sleep(1000);
+      await sleep(this.pollMs);
     }
   }
 
@@ -730,8 +1064,24 @@ export class Chain {
     return { ...result, repoId: Number(result.value) };
   }
 
-  repurchase(signer, repoId, onStatus) {
-    return this.invoke(signer, "repurchase", [sv.u64(repoId)], onStatus);
+  /** Repays an open repo. `deferred` says whether its shares wait in the contract (`deferredAfter`). */
+  async repurchase(signer, repoId, onStatus) {
+    const result = await this.invoke(signer, "repurchase", [sv.u64(repoId)], onStatus);
+    return { ...result, deferred: await this.deferredAfter(repoId) };
+  }
+
+  /**
+   * After a write that closed repo `repoId`: true when its shares wait in the
+   * contract for a later delivery, false when none do, null when the read
+   * failed. The write succeeds either way: a token refusal, or a lender whose
+   * approval was revoked, only defers the delivery.
+   */
+  async deferredAfter(repoId) {
+    try {
+      return (await this.pendingRelease(repoId)) !== null;
+    } catch {
+      return null;
+    }
   }
 
   async createOffer(signer, { amount, rateBps, maxTerm, funds = [this.fund] }, onStatus) {
@@ -756,22 +1106,27 @@ export class Chain {
   }
 
   /**
-   * Lender takes the shares of an unpaid repo from its maturity on. `to`
-   * must be a lender the fund's steward approved; by default the lender.
+   * Lender takes the shares of an unpaid repo from its maturity on. `to` is
+   * by default the lender; another address must be a lender the fund's
+   * steward approved. Since rc5 the lender of record may seize even after
+   * its approval was revoked: the repo settles and the shares wait in the
+   * contract until it is approved again (`deferred`, see `deferredAfter`).
    */
-  seize(signer, repoId, onStatus, to = signer.address) {
-    return this.invoke(signer, "seize", [sv.u64(repoId), sv.address(to)], onStatus);
+  async seize(signer, repoId, onStatus, to = signer.address) {
+    const result = await this.invoke(signer, "seize", [sv.u64(repoId), sv.address(to)], onStatus);
+    return { ...result, deferred: await this.deferredAfter(repoId) };
   }
 
   /**
-   * Shares owed on a closed repo that the share token refused to move (an
-   * issuer freeze or allowlist removal): `{ fund, to, shares }` or null.
+   * Shares owed on a closed repo and not delivered: the share token refused
+   * to move them (an issuer freeze or allowlist removal), or, for a seizure,
+   * the lender is not approved for the fund. `{ fund, to, shares }` or null.
    */
   async pendingRelease(repoId) {
-    return this.read(this.contracts.openWindow, "pending_release", [sv.u64(repoId)]);
+    return checkPendingRelease(await this.read(this.contracts.openWindow, "pending_release", [sv.u64(repoId)]));
   }
 
-  /** Retries the delivery of held-back shares; anyone may call it. Resolves `value` true when delivered. */
+  /** Retries the delivery of held-back shares; anyone may call it. Resolves `value` true when delivered, false when it still waits. */
   release(signer, repoId, onStatus) {
     return this.invoke(signer, "release", [sv.u64(repoId)], onStatus);
   }

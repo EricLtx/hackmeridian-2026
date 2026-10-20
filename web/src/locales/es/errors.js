@@ -80,4 +80,6 @@ export default {
   "The transaction failed on chain. Nothing changed.": "La transacción falló en la cadena. Nada cambió.",
   "The network did not answer. Check your connection and try again.": "La red no respondió. Compruebe su conexión y vuelva a intentarlo.",
   "Something went wrong.": "Algo salió mal.",
+  "The transaction was sent and one RPC endpoint reports it confirmed, but a second endpoint did not confirm it. Check it on the explorer before relying on it or trying again.":
+    "La transacción se envió y un punto de acceso RPC la da por confirmada, pero un segundo punto de acceso no la confirmó. Compruébela en el explorador antes de fiarse de ella o de volver a intentarlo.",
 };

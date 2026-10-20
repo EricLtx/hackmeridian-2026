@@ -6,7 +6,7 @@
 // and signs through the same chain functions as the guided view: nothing
 // here writes to the chain on its own.
 
-import { sv } from "./chain.js";
+import { rpcChangeText, sv } from "./chain.js";
 import { COMMANDS, NOTATION, completions, parseCommand } from "./command.js";
 import {
   bandItems,
@@ -27,9 +27,10 @@ import {
   withdrawTicket,
 } from "./blotter.js";
 import { describeError } from "./errors.js";
-import { formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
+import { UNSHOWABLE, formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
 import { LANG_NAMES, lang, numberStyle, setLang, t, tc, tk, tn } from "./i18n.js";
 import { HOUR, nextInterestStep } from "./terms.js";
+import { closingLine } from "./timeline.js";
 import { replay } from "./motion.js";
 
 const SLOW_EVERY = 4; // pending changes and layout version: one refresh in four, about a minute
@@ -185,7 +186,7 @@ export function createTerminal(ctx) {
       }),
     );
     for (const id of [...m.dues.keys()]) if (m.repos.get(id)?.status !== "Open") m.dues.delete(id);
-    // Shares a token held back: checked once when a repo closes, then while they wait.
+    // Shares held back (a token refusal, a lender awaiting approval): checked once when a repo closes, then while they wait.
     const ids = [...new Set([...m.toCheck, ...m.releases.keys()])];
     await Promise.all(
       ids.map(async (id) => {
@@ -511,9 +512,18 @@ export function createTerminal(ctx) {
       return;
     }
     const stateTone = { OPEN: "ok", FROZEN: "warn", STALE: "bad", "FX STALE": "bad" };
+    // Each row is drawn on its own: one fund's unreadable value blanks its row only.
+    const drawn = (line) => (f) => {
+      try {
+        return line(f);
+      } catch (error) {
+        console.warn("terminal fund row", error);
+        return `<tr><td>${esc(f.symbol)}</td><td class="t-bad" colspan="6">${esc(t(UNSHOWABLE))}</td></tr>`;
+      }
+    };
     const body = rows
       .map(
-        (f) => `<tr>
+        drawn((f) => `<tr>
           <td><button type="button" class="t-pick" data-fill="${esc(`Q 1K ${f.symbol}`)}" title="${esc(`${f.name}: Q 1K ${f.symbol}`)}">${esc(f.symbol)}</button>${f.iface ? `<span class="t-amber" title="${esc(t("The fund this screen borrows against"))}">◆</span>` : ""} <span class="t-dim" title="${esc(f.token === "SAC" ? t("Classic Stellar asset held through the Stellar Asset Contract") : t("SEP-41 share token"))}">${f.token === "SAC" ? "SAC" : "41"}</span></td>
           <td class="n" data-k="nav:${esc(f.symbol)}" title="${esc(t("NAV in {currency}", { currency: f.navCurrency }))}">${f.nav === null ? "—" : esc(formatUnits(f.nav, f.navDecimals, { digits: 4 }))} <span class="t-dim">${esc(f.navCurrency)}</span></td>
           <td class="n${tone(f.navTone)}" title="${esc(
@@ -536,7 +546,7 @@ export function createTerminal(ctx) {
               : esc(t("{outstanding} of {cap} lent", { outstanding: formatAmount(f.outstanding, sd(), "round"), cap: f.cap === null ? "?" : formatAmount(f.cap, sd()) }))
           }">${f.usedPct === null ? "—" : `${f.usedPct.toFixed(1).replace(".", numberStyle().decimal)} %`}</td>
           <td class="t-${stateTone[f.state] ?? "dim"}">${esc(stateLabel(f.state))}</td>
-        </tr>`,
+        </tr>`),
       )
       .join("");
     setHTML(
@@ -704,7 +714,7 @@ export function createTerminal(ctx) {
         outcome = { ok: true, text: message(result) };
         return result;
       } catch (error) {
-        outcome = { ok: false, text: describeError(error, context).text };
+        outcome = { ok: false, text: describeError(error, context).text, unconfirmed: error?.name === "TxUnconfirmed" };
         throw error;
       }
     };
@@ -727,6 +737,10 @@ export function createTerminal(ctx) {
     const outcome = await ticket.run();
     if (outcome?.ok) {
       say("ok", outcome.text);
+      T.ticket = null;
+    } else if (outcome?.unconfirmed) {
+      // Sent, and perhaps applied: signing the ticket again could apply it twice.
+      say("warn", t("{reason} The ticket is closed: check the transaction before preparing it again.", { reason: outcome.text }));
       T.ticket = null;
     } else {
       say("err", t("{reason} The ticket stays: GO to retry, CANCEL to drop it.", { reason: outcome?.text ?? t("Not sent.") }));
@@ -859,7 +873,7 @@ export function createTerminal(ctx) {
       send(
         errorContext(),
         (onStatus) => S.chain.repurchase(S.wallet, repoId, onStatus),
-        () => t("Repo #{id} repurchased: {shares} back in your wallet.", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)) }),
+        (result) => closingLine("repurchase", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)), deferred: result.deferred }),
       ),
       build,
     );
@@ -916,7 +930,7 @@ export function createTerminal(ctx) {
       send(
         errorContext({ action: "seize" }),
         (onStatus) => S.chain.seize(S.wallet, repoId, onStatus),
-        () => t("Repo #{id} closed: {shares} sent to your wallet.", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)) }),
+        (result) => closingLine("seize", { id: repoId, shares: shareText(BigInt(repo.shares), symbolOf(repo.fund)), deferred: result.deferred }),
       ),
       build,
     );
@@ -935,7 +949,9 @@ export function createTerminal(ctx) {
         (result) =>
           result.value
             ? t("Repo #{id}: shares delivered.", { id: repoId })
-            : t("Repo #{id}: the issuer still blocks the transfer; the shares stay recorded.", { id: repoId }),
+            : repo?.status === "Repurchased"
+              ? t("Repo #{id}: the issuer still blocks the transfer; the shares stay recorded.", { id: repoId })
+              : t("Repo #{id}: the delivery still waits for the share token or the lender's approval; the shares stay recorded.", { id: repoId }),
       ),
       build,
     );
@@ -998,7 +1014,7 @@ export function createTerminal(ctx) {
         return wallet() ? say("ok", t("Connected {address}.", { address: shortAddress(wallet()) })) : say("err", S.walletProblem ?? t("Freighter did not connect."));
       case "refresh":
         say("out", t("Reading the chain…"));
-        await ctx.refreshAll();
+        await ctx.refreshAll({ history: true });
         await refresh({ force: true });
         return say("ok", t("Up to date."));
       case "clear":
@@ -1121,12 +1137,9 @@ export function createTerminal(ctx) {
   }
 
   /** The chain client moved to another RPC endpoint: say so in the console. */
-  function rpcChanged({ from, to, reason }) {
+  function rpcChanged(change) {
     if (!T.active) return;
-    say(
-      "warn",
-      reason === "timeout" ? t("RPC {from} did not answer in time: switched to {to}.", { from, to }) : t("RPC {from} failed: switched to {to}.", { from, to }),
-    );
+    say(change.reason === "level" ? "out" : "warn", rpcChangeText(change));
     renderStatus();
   }
 

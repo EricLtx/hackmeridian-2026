@@ -190,6 +190,21 @@ test("the valuation behind an opening has its own tape line: price per share and
   assert.equal(tapeLine({ ...valued, data: { price: "oops", haircut_bps: "oops" } }, ctx).text, "#12 tMMF valued at 0.0000 tEUR per share, haircut 0.00 %");
 });
 
+test("a malformed event never stops the tape", () => {
+  const ctx = { sd: 7, fd: 7, code: "tEUR", now: T0, symbolOf: (a) => (a === F1 ? "tMMF" : a.slice(0, 4)) };
+  // An RPC or an export can carry a rate that is not a number: it reads as 0, it does not throw.
+  const opened = tapeLine({ event: "repo_opened", topics: ["1", ME], data: { principal: "10000000", rate_bps: "abc", shares: "10000000", fund: F1, offer_id: "1" } }, ctx);
+  assert.equal(opened.code, "OPEN");
+  assert.match(opened.text, /@ 0\.00 % · 1\.00 tMMF/);
+  assert.match(tapeLine({ event: "fund_limits_set", topics: [F1], data: { haircut_bps: "x" } }, ctx).text, /tMMF haircut 0\.00 %/);
+  // A date that is not one keeps a placeholder time.
+  assert.equal(tapeLine({ event: "upgrade_proposed", topics: [], data: { wasm_hash: "abcdef0123", eta: "abc" } }, ctx).text, "code abcdef01 proposed, applicable --:--:-- UTC");
+  assert.equal(tapeLine({ event: "fallback_proposed", topics: [], data: { eta: 1e300 } }, ctx).text, "fallback proposed, applicable --:--:-- UTC");
+  // A known event whose line cannot be made keeps the generic line of its name.
+  const odd = tapeLine({ event: "fund_set", topics: [5], data: { haircut_bps: 100 } }, ctx);
+  assert.deepEqual([odd.code, odd.text, odd.known], ["GOV", "fund set", true]);
+});
+
 test("an event the tape does not name is marked unknown, whatever its name", () => {
   for (const event of ["something_new", "constructor", "toString", "__proto__", ""]) {
     const line = tapeLine({ event, topics: [], data: {} }, {});
@@ -302,6 +317,14 @@ test("seize, withdraw, lend and release tickets", () => {
   assert.equal(releaseTicket({ repoId: 4, pending: { to: ME, shares: 10n * ONE }, wallet: ME, sym: "tMMF" }).blocking, false);
 });
 
+test("a deferred delivery waits for the share token or for the lender's approval (rc5)", () => {
+  const deferred = tapeLine({ event: "release_deferred", topics: ["4"], data: { to: LENDER, shares: "10000000000" }, closedAt: new Date(T0 * 1000).toISOString() }, { now: T0 });
+  assert.deepEqual([deferred.code, deferred.tone, deferred.repoId], ["HELD", "warn", 4]);
+  assert.equal(deferred.text, "#4 1,000.00 shares owed to GLEN…AAAL: the delivery waits for the share token or for the lender's approval");
+  const note = releaseTicket({ repoId: 4, pending: { to: ME, shares: 10n * ONE }, wallet: ME, sym: "tMMF" }).note;
+  assert.match(note, /While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves/);
+});
+
 test("the quote view and the band", () => {
   const q = quoteView({ shares: 1_000n * ONE, quote, fundSymbol: "tMMF", bestRateBps: 250, code: "tEUR" });
   assert.equal(row(q, "Ceiling"), "1,000.00 tEUR");
@@ -316,4 +339,31 @@ test("the quote view and the band", () => {
     ["DELAY", "5m00s"],
     ["GOV", "none pending"],
   ]);
+});
+
+test("a fund whose value cannot be formatted marks its own band item, not the band", () => {
+  const fund = (symbol, extra = {}) => ({
+    symbol,
+    name: symbol,
+    navCurrency: "USD",
+    nav: 108_500_000_000_000n,
+    navDecimals: 14,
+    navAge: 60,
+    navMaxAge: H,
+    navTone: "ok",
+    fx: null,
+    frozen: false,
+    ...extra,
+  });
+  const band = bandItems({ network: "testnet", paused: false, funds: [fund("tBAD", { navDecimals: 99 }), fund("tOK"), fund("tFX", { fx: 1n, fxDecimals: -3 })] });
+  assert.deepEqual(band.map((i) => [i.label, i.value, i.tone]), [
+    ["TESTNET", "", "amber"],
+    ["STATE", "OPEN", "ok"],
+    ["tBAD", "—", "bad"],
+    ["tOK", "1.0850 USD 1m00s", "ok"],
+    ["tFX", "—", "bad"],
+  ]);
+  assert.equal(band[2].title, "The chain returned a value this page cannot show.");
+  // A coarse feed's NAV shows with the four digits asked, padded.
+  assert.equal(bandItems({ funds: [fund("tTWO", { nav: 97n, navDecimals: 2 })] })[2].value, "0.9700 USD 1m00s");
 });

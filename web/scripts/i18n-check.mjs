@@ -1,5 +1,6 @@
 // Completeness of the translations: every text the code or the pages mark
-// for translation has a French and a Spanish entry with the same {placeholders}.
+// for translation has a French and a Spanish entry with the same {placeholders}
+// and the same HTML tags.
 //
 //   node scripts/i18n-check.mjs                 every source
 //   node scripts/i18n-check.mjs src/terminal.js only these files
@@ -99,6 +100,30 @@ const placeholders = (s) =>
     .sort()
     .join(",");
 
+// Elements a translation may never bring, even bare: the void ones and those whose content is raw text or a document.
+const ALWAYS_TAGS = new Set([
+  "area", "base", "br", "col", "embed", "frame", "frameset", "hr", "iframe", "image", "img", "input", "link", "math",
+  "meta", "noscript", "object", "param", "script", "source", "style", "svg", "template", "textarea", "title", "track", "wbr",
+]);
+
+/**
+ * The HTML tags of a text, attributes included, in a fixed order. Some
+ * translations are inserted as markup: a translation must carry exactly the
+ * tags of its source, so a translation-only change cannot add a link, an
+ * image or a redirect to the page. A bare `<word>` with no closing tag is
+ * usage notation ("Q <shares> [FUND]"), translated like any word, unless the
+ * word names an element in ALWAYS_TAGS.
+ */
+export function tagsOf(s) {
+  const found = [...String(s).matchAll(/<(\/?)([A-Za-z][A-Za-z0-9-]*)([\s/][^>]*)?>/g)];
+  const closed = new Set(found.filter((m) => m[1]).map((m) => m[2].toLowerCase()));
+  return found
+    .filter(([, slash, name, rest]) => slash || (rest ?? "").trim() || ALWAYS_TAGS.has(name.toLowerCase()) || closed.has(name.toLowerCase()))
+    .map((m) => m[0].replace(/\s+/g, " "))
+    .sort()
+    .join(" ");
+}
+
 /** The default sources: every module of src/ except the language module, and both pages. */
 export function sources() {
   const src = readdirSync(join(ROOT, "src"))
@@ -118,14 +143,14 @@ async function load(lang) {
 
 /**
  * Checks `files` (paths relative to web/). Returns { missing, mismatched,
- * problems, conflicts, unused, keys }: what is missing per language, which
- * translations change the placeholders, markup that cannot be read, a key
- * translated differently in two module files, and keys no source uses
- * (only when every source is checked).
+ * tags, problems, conflicts, unused, keys }: what is missing per language,
+ * which translations change the placeholders, which change the HTML tags,
+ * markup that cannot be read, a key translated differently in two module
+ * files, and keys no source uses (only when every source is checked).
  */
 export async function check(files = sources()) {
   const dicts = { fr: await load("fr"), es: await load("es") };
-  const out = { missing: [], mismatched: [], problems: [], conflicts: [], unused: [], keys: 0 };
+  const out = { missing: [], mismatched: [], tags: [], problems: [], conflicts: [], unused: [], keys: 0 };
   const used = new Set();
   const counted = new Set();
   for (const file of files) {
@@ -142,8 +167,12 @@ export async function check(files = sources()) {
       out.keys += 1;
       for (const lang of ["fr", "es"]) {
         const value = dicts[lang].merged[key];
-        if (typeof value !== "string" || !value.trim()) out.missing.push(`${lang} ${file}:${line} ${JSON.stringify(key)}`);
-        else if (placeholders(value) !== placeholders(key)) out.mismatched.push(`${lang} ${file}:${line} ${JSON.stringify(key)} -> ${JSON.stringify(value)}`);
+        if (typeof value !== "string" || !value.trim()) {
+          out.missing.push(`${lang} ${file}:${line} ${JSON.stringify(key)}`);
+          continue;
+        }
+        if (placeholders(value) !== placeholders(key)) out.mismatched.push(`${lang} ${file}:${line} ${JSON.stringify(key)} -> ${JSON.stringify(value)}`);
+        if (tagsOf(value) !== tagsOf(key)) out.tags.push(`${lang} ${file}:${line} ${JSON.stringify(key)} -> ${JSON.stringify(value)}`);
       }
     }
   }
@@ -167,10 +196,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const section = (title, list) => list.length && console.log(`\n${title} (${list.length}):\n  ${list.join("\n  ")}`);
   section("Missing", result.missing);
   section("Placeholders differ", result.mismatched);
+  section("HTML tags differ", result.tags);
   section("Markup", result.problems);
   section("Translated differently in two files", result.conflicts);
   section("Unused (warning)", result.unused);
-  const bad = result.missing.length + result.mismatched.length + result.problems.length + result.conflicts.length;
+  const bad = result.missing.length + result.mismatched.length + result.tags.length + result.problems.length + result.conflicts.length;
   console.log(`\n${result.keys} marked texts checked; ${bad ? `${bad} problem(s)` : "complete in French and Spanish"}.`);
   process.exitCode = bad ? 1 : 0;
 }

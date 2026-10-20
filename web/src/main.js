@@ -4,9 +4,12 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
-import { Chain } from "./chain.js";
+import { Chain, rpcChangeText } from "./chain.js";
+import { checkDeployment, privacyLine } from "./deployment.js";
+import { refuseFrame, refusesFrame } from "./frame.js";
 import { describeError } from "./errors.js";
 import {
+  UNSHOWABLE,
   formatAge,
   formatAmount,
   formatCountdown,
@@ -31,7 +34,7 @@ import {
   withdrawalAmount,
 } from "./terms.js";
 import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
-import { eventsOfRepo, timelineOf } from "./timeline.js";
+import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
@@ -63,8 +66,9 @@ const S = {
   nextRepo: 1, // first repo id not scanned yet
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
-  releases: new Map(), // closed repo id -> shares the token refused to deliver
+  releases: new Map(), // closed repo id -> shares held back (the token refused them, or the lender awaits approval)
   history: null, // the indexer's export (history.json) when the page can read it: events by repo, for the timelines
+  historyDue: false, // fetch the export again on the next pass (REF, the page back in view)
   delay: null, // the contract's time delay, seconds
   version: null, // contract version
   guideRole: "borrower",
@@ -101,7 +105,7 @@ const terminal = createTerminal({
   setHTML: (el, html) => setHTML(el, html),
   runTx: (el, context, action, message) => runTx(el, context, action, message),
   connect: () => connect(),
-  refreshAll: () => refreshAll(),
+  refreshAll: (options) => refreshAll(options),
   setFace: (face) => setFace(face),
   fundLimits: () => fundLimits(),
   onboardCommand,
@@ -248,8 +252,14 @@ function renderGuide() {
      </div>`,
   );
   if (b) {
-    const rows = guideTerms({ dep: S.dep, board: b, maxTermSecs: ctx.maxTermSecs, delaySecs: ctx.delaySecs, version: S.version, paused: b.paused.value });
-    setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(t(label))}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(t(note))}</span>` : ""}</dd></div>`).join(""));
+    let rows = null;
+    try {
+      rows = guideTerms({ dep: S.dep, board: b, maxTermSecs: ctx.maxTermSecs, delaySecs: ctx.delaySecs, version: S.version, paused: b.paused.value });
+    } catch (error) {
+      // A value the page cannot show leaves the terms as last drawn; the board goes on.
+      console.warn("guide terms", error);
+    }
+    if (rows) setHTML(terms, rows.map(([label, value, note]) => `<div><dt>${esc(t(label))}</dt><dd>${esc(value)}${note ? `<span class="muted small"> ${esc(t(note))}</span>` : ""}</dd></div>`).join(""));
     $("guide-meta").textContent = S.dep.network === "testnet" ? t("terms read from the chain on testnet") : t("terms read from the chain");
   }
 }
@@ -282,61 +292,65 @@ function renderBoard() {
   const navCurrency = S.dep.fund.navCurrency;
   const tooOld = `${esc(t("Too old to lend against."))} `;
   const since = (timestamp) => `<span data-since="${esc(String(timestamp))}"></span>`;
-  if (b.nav.value && state) {
+  // Each tile is drawn on its own: a value the page cannot show blanks its tile, never the board.
+  const draw = (label, build) => {
+    try {
+      tiles.push(build());
+    } catch (error) {
+      console.warn("board tile", error);
+      tiles.push(tile(label, "—", `<span class="text-error">${esc(t(UNSHOWABLE))}</span>`, "tile-warn"));
+    }
+  };
+  draw(esc(t("Fund share NAV")), () => {
+    if (!b.nav.value || !state) return tile(esc(t("Fund share NAV")), "—", b.nav.error ? errorLine(b.nav) : "");
     const old = config && ts - Number(b.nav.value.timestamp) > Number(config.nav_max_age_secs);
-    tiles.push(
-      tile(
-        esc(t("Fund share NAV")),
-        `${formatUnits(b.nav.value.price, state.nav_decimals, { digits: 4 })} <span class="unit-inline">${navCurrency}</span>`,
-        `${old ? tooOld : ""}${t("Published {age}", { age: since(b.nav.value.timestamp) })}`,
-        old ? "tile-warn" : "",
-      ),
+    return tile(
+      esc(t("Fund share NAV")),
+      `${formatUnits(b.nav.value.price, state.nav_decimals, { digits: 4 })} <span class="unit-inline">${navCurrency}</span>`,
+      `${old ? tooOld : ""}${t("Published {age}", { age: since(b.nav.value.timestamp) })}`,
+      old ? "tile-warn" : "",
     );
-  } else {
-    tiles.push(tile(esc(t("Fund share NAV")), "—", b.nav.error ? errorLine(b.nav) : ""));
-  }
+  });
 
   const leg = Array.isArray(config?.source) && config.source[0] === "Cross" ? config.source[1] : null;
-  if (leg && b.fx.value && state) {
-    const old = ts - Number(b.fx.value.timestamp) > Number(leg.max_age_secs);
-    tiles.push(
-      tile(
+  if (leg) {
+    draw(`${S.dep.stablecoin.currency}/${navCurrency}`, () => {
+      if (!b.fx.value || !state) return tile(`${S.dep.stablecoin.currency}/${navCurrency}`, "—", b.fx.error ? errorLine(b.fx) : esc(t("No rate")));
+      const old = ts - Number(b.fx.value.timestamp) > Number(leg.max_age_secs);
+      return tile(
         `${S.dep.stablecoin.currency}/${navCurrency}`,
         formatUnits(b.fx.value.price, state.fx_decimals, { digits: 4 }),
         `${old ? tooOld : ""}${t("Exchange rate, {age}", { age: since(b.fx.value.timestamp) })}`,
         old ? "tile-warn" : "",
-      ),
-    );
-  } else if (leg) {
-    tiles.push(tile(`${S.dep.stablecoin.currency}/${navCurrency}`, "—", b.fx.error ? errorLine(b.fx) : esc(t("No rate"))));
+      );
+    });
   }
 
-  if (b.quote.value) {
-    const q = b.quote.value;
-    tiles.push(
-      tile(
+  if (b.quote.value || b.quote.error) {
+    draw(esc(t("Share value in {code}", { code: code() })), () => {
+      if (!b.quote.value) return tile(esc(t("Share value in {code}", { code: code() })), "—", errorLine(b.quote), "tile-warn");
+      const q = b.quote.value;
+      return tile(
         esc(t("Share value in {code}", { code: code() })),
         formatUnits(q.price, q.price_decimals, { digits: 4 }),
         esc(t("Lent against with a {haircut} haircut", { haircut: formatRate(q.haircut_bps) })),
-      ),
-    );
-  } else if (b.quote.error) {
-    tiles.push(tile(esc(t("Share value in {code}", { code: code() })), "—", errorLine(b.quote), "tile-warn"));
+      );
+    });
   }
 
   if (config && state) {
-    const used = BigInt(state.outstanding);
-    const cap = BigInt(config.max_outstanding);
-    const pct = cap > 0n ? Number((used * 1000n) / cap) / 10 : 0;
-    tiles.push(
-      tile(
+    draw(esc(t("Lent against this fund")), () => {
+      const used = BigInt(state.outstanding);
+      const cap = BigInt(config.max_outstanding);
+      const pct = cap > 0n ? Number((used * 1000n) / cap) / 10 : 0;
+      return tile(
         esc(t("Lent against this fund")),
         `${formatAmount(used, SD(), "round")} <span class="unit-inline">${esc(t("of {cap}", { cap: `${formatAmount(cap, SD())} ${code()}` }))}</span>`,
         `<span class="bar${firstShow("bar")}" role="img" aria-label="${esc(t("{pct} percent of the fund cap used", { pct: decimalText(pct.toFixed(1)) }))}"><span style="width:${Math.min(pct, 100)}%"></span></span>${esc(
           t("Up to {amount} per loan", { amount: money(config.max_principal_per_repo) }),
         )}`,
-      ),
-    );
+      );
+    });
   }
   setHTML($("tiles"), tiles.join(""));
   tick();
@@ -357,16 +371,25 @@ function renderFunds(funds) {
   }
   const heads = [t("Fund share"), t("NAV in"), t("FX leg"), t("Haircut"), t("Max NAV age"), t("Lent")].map((h) => esc(h));
   const rows = funds.map((f) => {
-    const cfg = f.config.value;
-    const st = f.state.value;
-    const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
-    const lent =
-      cfg && st
-        ? esc(t("{used} of {cap}", { used: formatAmount(BigInt(st.outstanding), SD(), "round"), cap: `${formatAmount(BigInt(cfg.max_outstanding), SD())} ${code()}` }))
-        : "—";
-    const leg = source === "Cross" ? esc(t("exchange-rate leg")) : source === "Direct" ? esc(t("none")) : "—";
-    const maxAge = cfg ? `${decimalText(Number(cfg.nav_max_age_secs) / 3600)} h` : "—";
-    return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
+    // Each row is drawn on its own: one fund's unreadable value blanks its row only.
+    try {
+      const cfg = f.config.value;
+      const st = f.state.value;
+      const source = Array.isArray(cfg?.source) ? cfg.source[0] : cfg?.source;
+      const lent =
+        cfg && st
+          ? esc(t("{used} of {cap}", { used: formatAmount(BigInt(st.outstanding), SD(), "round"), cap: `${formatAmount(BigInt(cfg.max_outstanding), SD())} ${code()}` }))
+          : "—";
+      const leg = source === "Cross" ? esc(t("exchange-rate leg")) : source === "Direct" ? esc(t("none")) : "—";
+      const maxAge = cfg ? `${decimalText(Number(cfg.nav_max_age_secs) / 3600)} h` : "—";
+      return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
+    } catch (error) {
+      console.warn("fund row", error);
+      return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="text-error small">${esc(t(UNSHOWABLE))}</span></td>${heads
+        .slice(1)
+        .map((h) => `<td data-label="${h}">—</td>`)
+        .join("")}</tr>`;
+    }
   });
   setHTML(
     out,
@@ -826,7 +849,7 @@ async function refreshPositions() {
       }
     }),
   );
-  // A closed repo may still owe shares the issuer's token refused to move.
+  // A closed repo may still owe shares: the token refused to move them, or (a seizure) the lender awaits approval.
   const closedIds = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status !== "Open").map((r) => r.id);
   await Promise.all(
     closedIds.map(async (id) => {
@@ -925,7 +948,7 @@ function onRepurchase(id) {
     $("positions-tx"),
     { code: code() },
     (onStatus) => S.chain.repurchase(S.wallet, id, onStatus),
-    () => t("Repo #{id} repurchased: {shares} back in your wallet.", { id, shares: shareAmount(repo.shares) }),
+    (result) => closingLine("repurchase", { id, shares: shareAmount(repo.shares), deferred: result.deferred }),
   );
 }
 
@@ -1148,7 +1171,8 @@ function releaseNote(id) {
   const pending = S.releases.get(id);
   if (!pending) return "";
   const mine = pending.to === S.wallet?.address;
-  return ` <span class="pill pill-danger">${esc(t("{shares} held: the issuer blocks the transfer", { shares: shareAmount(pending.shares) }))}</span>${
+  const status = (S.mine.get(id) ?? S.lent.get(id))?.status;
+  return ` <span class="pill pill-danger">${esc(heldNote(status, shareAmount(pending.shares)))}</span>${
     mine ? ` <button type="button" class="btn btn-secondary" data-write data-release="${id}">${esc(t("Release"))}</button>` : ""
   }`;
 }
@@ -1162,7 +1186,7 @@ function onRelease(id) {
     (result) =>
       result.value
         ? t("Repo #{id}: {shares} delivered to your wallet.", { id, shares: shareAmount(pending?.shares ?? 0n) })
-        : t("Repo #{id}: the issuer still blocks the transfer. The shares stay reserved for you; try again later.", { id }),
+        : stillHeldLine((S.mine.get(id) ?? S.lent.get(id))?.status, id),
   );
 }
 
@@ -1173,7 +1197,7 @@ function onSeize(id) {
     $("lend-tx"),
     { action: "seize", when: formatDateTime(repo.maturity) },
     (onStatus) => S.chain.seize(S.wallet, id, onStatus),
-    () => t("Repo #{id} closed: {shares} sent to your wallet.", { id, shares: shareAmount(repo.shares) }),
+    (result) => closingLine("seize", { id, shares: shareAmount(repo.shares), deferred: result.deferred }),
   );
 }
 
@@ -1204,13 +1228,25 @@ async function refreshWallet() {
   if (S.face !== "terminal") await refreshPositions();
 }
 
-async function refreshAll() {
+/**
+ * One pass over every view. `history` also fetches the indexer's export
+ * again: on REF and when the page comes back into view, not on every 15 s
+ * pass, since it changes only when the export is published. A request made
+ * while a pass runs is kept for the next one.
+ */
+async function refreshAll({ history = false } = {}) {
+  if (history) S.historyDue = true;
   if (S.refreshing || !S.chain) return;
   S.refreshing = true;
   const updated = $("board-updated");
   try {
+    // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger.
+    await S.chain.checkHeights();
     await refreshBoard();
-    await loadHistory();
+    if (S.historyDue) {
+      S.historyDue = false;
+      await loadHistory();
+    }
     await refreshWallet();
     await terminal.refresh();
     S.updatedAt = now();
@@ -1298,7 +1334,7 @@ function wire() {
     if (!target) return;
     if (target.id === "connect") return connect();
     if (target.id === "disconnect") return disconnect();
-    if (target.id === "refresh") return refreshAll();
+    if (target.id === "refresh") return refreshAll({ history: true });
     if (target.dataset.face) return transition(() => setFace(target.dataset.face));
     if (target.dataset.gotoFace) {
       window.scrollTo({ top: 0 });
@@ -1367,28 +1403,18 @@ function wire() {
   $("borrow-form").addEventListener("submit", submitBorrow);
   $("lend-form").addEventListener("submit", submitLend);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refreshAll();
+    if (!document.hidden) refreshAll({ history: true });
   });
 }
 
 /**
- * The deployment file's symbols and URLs end up in markup and links; accept
- * only plain tickers and https URLs so a tampered file cannot inject either.
+ * The indexer's export, when it sits next to the page: it dates and links the
+ * closing steps of the timelines. Optional. "no-cache" revalidates it with
+ * the host, which answers 304 while it is unchanged.
  */
-function checkDeployment(dep) {
-  const ticker = /^[A-Za-z0-9]{1,12}$/;
-  const symbols = [dep?.stablecoin?.code, dep?.stablecoin?.currency, dep?.fund?.symbol, dep?.fund?.navCurrency];
-  if (!symbols.every((s) => ticker.test(String(s)))) throw new Error(t("unexpected asset symbol"));
-  if (dep.rpcFallbacks !== undefined && !Array.isArray(dep.rpcFallbacks)) throw new Error(t("unexpected URL"));
-  if (![dep.rpcUrl, dep.explorer, ...(dep.rpcFallbacks ?? [])].every((u) => /^https:\/\/[^\s"'<>]+$/.test(String(u)))) throw new Error(t("unexpected URL"));
-  if (!Number.isInteger(dep.stablecoin.decimals) || !Number.isInteger(dep.fund.decimals)) throw new Error(t("unexpected decimals"));
-  return dep;
-}
-
-/** The indexer's export, when it sits next to the page: it dates and links the closing steps of the timelines. Optional. */
 async function loadHistory() {
   try {
-    const response = await fetch("./history.json", { cache: "no-store" });
+    const response = await fetch("./history.json", { cache: "no-cache" });
     if (!response.ok) return;
     const h = await response.json();
     if (Array.isArray(h?.events)) S.history = { generatedAt: h.generatedAt, events: h.events };
@@ -1397,19 +1423,22 @@ async function loadHistory() {
   }
 }
 
-/** The footer: the contracts behind the page, each linked to the explorer. */
+/** The footer: the contracts behind the page, each linked to the explorer, the endpoint in use and who sees the visitor's reads. */
 function renderFoot() {
   const C = S.dep.contracts;
-  $("foot").innerHTML = t(
-    "Open Window contract {contract} on Stellar {network}. Fund shares {shares}, {code} {stablecoin}. Every figure is read from the chain; nothing here has real value. Apache-2.0.",
-    {
-      contract: link(S.chain.explorerAccount(C.openWindow), shortAddress(C.openWindow)),
-      network: esc(S.dep.network),
-      shares: link(S.chain.explorerAccount(C.fundShares), shortAddress(C.fundShares)),
-      code: esc(code()),
-      stablecoin: link(S.chain.explorerAccount(C.stablecoin), shortAddress(C.stablecoin)),
-    },
-  ) + ` <span class="rpc-note">${esc(t("Chain read through {host}.", { host: S.chain.rpcInfo().host }))}</span>`;
+  $("foot").innerHTML =
+    t(
+      "Open Window contract {contract} on Stellar {network}. Fund shares {shares}, {code} {stablecoin}. Every figure is read from the chain; nothing here has real value. Apache-2.0.",
+      {
+        contract: link(S.chain.explorerAccount(C.openWindow), shortAddress(C.openWindow)),
+        network: esc(S.dep.network),
+        shares: link(S.chain.explorerAccount(C.fundShares), shortAddress(C.fundShares)),
+        code: esc(code()),
+        stablecoin: link(S.chain.explorerAccount(C.stablecoin), shortAddress(C.stablecoin)),
+      },
+    ) +
+    ` <span class="rpc-note">${esc(t("Chain read through {host}.", { host: S.chain.rpcInfo().host }))}</span>` +
+    `<span class="rpc-note">${esc(privacyLine(S.dep, "market"))}</span>`;
 }
 
 /**
@@ -1435,6 +1464,8 @@ function setLanguage(choice, { persist = true } = {}) {
 async function start() {
   // The language comes first: every text below, the load error included, is written in it.
   bootLang();
+  // Inside another site's frame the page does nothing: no read, no wallet, no button wired.
+  if (refusesFrame(window)) return refuseFrame(document);
   applyStatic();
   markLangButtons();
   initMotion();
@@ -1461,8 +1492,7 @@ async function start() {
     terminal.rpcChanged(change);
     if (S.face === "terminal" || Date.now() - rpcToastAt < REFRESH_MS) return;
     rpcToastAt = Date.now();
-    const { from, to, reason } = change;
-    toast(reason === "timeout" ? t("RPC {from} did not answer in time: switched to {to}.", { from, to }) : t("RPC {from} failed: switched to {to}.", { from, to }), { tone: "warn" });
+    toast(rpcChangeText(change), { tone: change.reason === "level" ? "info" : "warn" });
   };
   // The terminal shows at once and fills as its own reads land; the guided
   // page waits for the instance settings below.

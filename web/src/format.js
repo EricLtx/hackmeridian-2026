@@ -2,7 +2,7 @@
 // a 7-decimal token amount does not survive a round trip through a float.
 // Separators, units and dates follow the interface language (i18n.js).
 
-import { locale, numberStyle, t, tn } from "./i18n.js";
+import { locale, numberStyle, t, tk, tn } from "./i18n.js";
 
 /**
  * Parses a decimal string into integer units, or null when invalid. English:
@@ -53,23 +53,56 @@ function group(digits) {
   return digits.length < minGroup ? digits : digits.replace(/\B(?=(\d{3})+(?!\d))/g, separator);
 }
 
+/** Most decimals a value may carry: a larger count, from a feed or an RPC, would freeze the page in a power of ten. */
+export const MAX_DECIMALS = 38;
+
+/** What a tile, a row or a line says in place of a value it cannot format. */
+export const UNSHOWABLE = tk("The chain returned a value this page cannot show.");
+
+/** A count of decimals or digits as an integer from 0 to MAX_DECIMALS, or a RangeError. */
+function places(count, what) {
+  const n = typeof count === "bigint" || (typeof count === "string" && /^\d{1,2}$/.test(count)) ? Number(count) : count;
+  if (!Number.isInteger(n) || n < 0 || n > MAX_DECIMALS) throw new RangeError(`${what} out of range: ${String(count).slice(0, 24)}`);
+  return n;
+}
+
 /**
  * Formats integer units with `digits` fraction digits (default all of them).
  * `rounding` is "round" (half up), "floor" or "ceil"; amounts owed are shown
  * rounded up so the screen never promises less than the contract will take.
+ * `decimals` and `digits` are integers from 0 to 38; more digits than the
+ * value has pad it with zeros (a 2-decimal price shown with 4 digits).
  */
 export function formatUnits(units, decimals, { digits = decimals, rounding = "round" } = {}) {
+  const d = places(decimals, "decimals");
+  const shown = places(digits, "digits");
   const value = BigInt(units);
   const negative = value < 0n;
-  const scaled = divide(negative ? -value : value, 10n ** BigInt(decimals - digits), rounding);
-  const base = 10n ** BigInt(digits);
+  const magnitude = negative ? -value : value;
+  // Scale up when more digits are asked than the value has: never a negative power of ten.
+  const scaled = shown >= d ? magnitude * 10n ** BigInt(shown - d) : divide(magnitude, 10n ** BigInt(d - shown), rounding);
+  const base = 10n ** BigInt(shown);
   const whole = group((scaled / base).toString());
-  const fraction = digits > 0 ? `${numberStyle().decimal}${(scaled % base).toString().padStart(digits, "0")}` : "";
+  const fraction = shown > 0 ? `${numberStyle().decimal}${(scaled % base).toString().padStart(shown, "0")}` : "";
   return `${negative ? "-" : ""}${whole}${fraction}`;
 }
 
 /** A token amount for display: two decimals, grouped. */
 export const formatAmount = (units, decimals = 7, rounding = "round") => formatUnits(units, decimals, { digits: 2, rounding });
+
+/**
+ * An integer from untrusted data (an exported journal, a decoded event)
+ * formatted by `format`, or a dash when it is empty, not an integer, or
+ * cannot be formatted: one bad cell never stops a page.
+ */
+export function formatOrDash(raw, format) {
+  if (raw === "" || raw === null || raw === undefined) return "—";
+  try {
+    return format(BigInt(raw));
+  } catch {
+    return "—";
+  }
+}
 
 /** Units back to a plain input string ("1250.5", "1250,5" in French), no grouping, no trailing zeros. */
 export function unitsToInput(units, decimals) {
