@@ -46,7 +46,7 @@ const CANARY = wasmWith(8_192);
  * `life` is the days the code entry has to live (null: not uploaded, or
  * archived); an upload leaves 7, as on testnet, and an extension what it asked.
  */
-function recorder({ executable = null, pending = null, now = 1_000, held = null, life = null } = {}) {
+function recorder({ executable = null, pending = null, now = 1_000, held = null, life = null, readings = null } = {}) {
   const calls = [];
   const reads = { pending_upgrade: pending, schema_version: 2 };
   let days = life;
@@ -81,6 +81,11 @@ function recorder({ executable = null, pending = null, now = 1_000, held = null,
     executableHash: async () => {
       calls.push(["executable"]);
       return held ?? executable;
+    },
+    // What each endpoint says the instance runs: both the same, unless `readings` says otherwise.
+    executableHashes: async () => {
+      calls.push(["executables"]);
+      return readings ?? [{ url: "https://one.stub.invalid", hex: held ?? executable }, { url: "https://two.stub.invalid", hex: held ?? executable }];
     },
     announce: (hex) => calls.push(["announce", hex]),
     acknowledge: (hex) => calls.push(["acknowledge", hex]),
@@ -211,8 +216,37 @@ test("a slice the rent made shorter is followed by one more round of counting, n
 test("--restore-code restores exactly the instance's own archived code, then extends it; a live code is only extended (TOOL-4)", async () => {
   const archived = recorder({ executable: sha(SHIPPED), life: null });
   assert.ok((await upgrade.restoreCode(state, { io: archived })) >= 90);
-  assert.deepEqual(archived.calls, [["executable"], ["restore", sha(SHIPPED)], ["extend", sha(SHIPPED), 7, 35], ["extend", sha(SHIPPED), 35, 63], ["extend", sha(SHIPPED), 63, 91]]);
+  assert.deepEqual(archived.calls, [["executables"], ["restore", sha(SHIPPED)], ["extend", sha(SHIPPED), 7, 35], ["extend", sha(SHIPPED), 35, 63], ["extend", sha(SHIPPED), 63, 91]]);
   const live = recorder({ executable: sha(SHIPPED), life: 100 });
   assert.equal(await upgrade.restoreCode(state, { io: live }), 100);
-  assert.deepEqual(live.calls, [["executable"]]);
+  assert.deepEqual(live.calls, [["executables"]]);
+});
+
+test("--restore-code pays only for a code two endpoints agree on, or one endpoint and --expect: a lying or silent endpoint restores nothing", async () => {
+  const one = "https://one.stub.invalid";
+  const two = "https://two.stub.invalid";
+  const ours = sha(SHIPPED);
+  const theirs = sha(FOREIGN_CODE);
+  // The active endpoint names another code, archived: the keeper would have restored and rented it.
+  const lying = recorder({ life: null, readings: [{ url: one, hex: theirs }, { url: two, hex: ours }] });
+  await assert.rejects(upgrade.restoreCode(state, { io: lying }), new RegExp(`the endpoints disagree on the code the instance runs: ${one} says ${theirs}, ${two} says ${ours}; nothing restored`));
+  assert.deepEqual(lying.calls, [["executables"]]);
+  // A second endpoint that could not say: nothing restored either.
+  const silent = recorder({ life: null, readings: [{ url: one, hex: ours }, { url: two, hex: null, error: "fetch failed" }] });
+  await assert.rejects(upgrade.restoreCode(state, { io: silent }), new RegExp(`${two} could not say which code the instance runs \\(fetch failed\\): nothing restored`));
+  assert.deepEqual(silent.calls, [["executables"]]);
+  // --expect contradicted by both endpoints: the operator's word wins, nothing paid.
+  const contradicted = recorder({ executable: theirs, life: null });
+  await assert.rejects(upgrade.restoreCode(state, { expect: ours, io: contradicted }), new RegExp(`the instance runs ${theirs}, not the expected ${ours}: nothing restored`));
+  await assert.rejects(upgrade.restoreCode(state, { expect: "abc", io: contradicted }), /--expect takes a sha256 in hex, 64 characters, not abc; nothing restored/);
+  assert.deepEqual(contradicted.calls, [["executables"], ["executables"]]);
+  // One endpoint configured: its word alone is refused; with --expect naming the same code, accepted.
+  const single = recorder({ life: null, readings: [{ url: one, hex: ours }] });
+  await assert.rejects(upgrade.restoreCode(state, { io: single }), new RegExp(`rests on ${one} alone: pass --expect=<sha256> .* or list a second endpoint in STELLAR_RPC_URLS; nothing restored`));
+  assert.deepEqual(single.calls, [["executables"]]);
+  assert.ok((await upgrade.restoreCode(state, { expect: ours.toUpperCase(), io: single })) >= 90);
+  assert.deepEqual(single.calls[2], ["restore", ours]);
+  // The pure rule, for the record.
+  assert.equal(upgrade.codeToRestore([{ url: one, hex: ours }, { url: two, hex: ours }]), ours);
+  assert.equal(upgrade.codeToRestore([{ url: one, hex: ours }], ours), ours);
 });

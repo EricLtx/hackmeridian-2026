@@ -62,6 +62,8 @@ const servers = RPC_URLS.map((url) => new rpc.Server(url));
 let activeRpc = 0;
 /** The endpoint currently in use. */
 export const activeRpcUrl = () => RPC_URLS[activeRpc];
+/** Its index in `RPC_URLS`, for a reading that must come from it alone (`endpointClient`). */
+export const activeEndpoint = () => activeRpc;
 /**
  * The RPC client. With one endpoint it is the plain client; with several, a
  * proxy that fails over to the next endpoint on a transient error, so every

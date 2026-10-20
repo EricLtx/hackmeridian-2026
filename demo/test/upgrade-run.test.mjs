@@ -104,3 +104,25 @@ test("--apply from a 29.99-day life buys three slices to 91 days, about 512 XLM,
   assert.match(foreign.out, /the pending upgrade is fd5cdbd3.*not the built and expected night_window.wasm/);
   assert.deepEqual(submitted(foreign.log), []);
 });
+
+test("--restore-code pays for the code both endpoints say the instance runs; an endpoint that names another code is refused before anything is signed", { skip }, () => {
+  // Honest endpoints, the code archived: a RestoreFootprint on exactly that entry, then the slices to 91 days.
+  const r = run(["--restore-code"], { executable: BUILT, pending: null, codes: { [BUILT]: null } });
+  assert.equal(r.status, 0, r.out);
+  const subs = submitted(r.log);
+  assert.deepEqual([subs[0].kind, subs[0].keys], ["restoreFootprint", [`code:${BUILT}`]]);
+  assert.ok(subs[0].fee <= 100.2);
+  assert.ok(subs.slice(1).every((s) => s.kind === "extendFootprintTtl" && s.keys[0] === `code:${BUILT}`));
+  assert.ok(Number(/has ([\d.]+) days to live/.exec(r.out)?.[1]) >= 90, r.out);
+  assert.ok(r.log.filter((e) => e.rpc === "getLedgerEntries").some((e) => e.at.startsWith("https://two.")), "the second endpoint was asked for the executable");
+  // The active endpoint reports another executable, archived: nothing is restored, nothing paid.
+  const lie = run(["--restore-code"], { executable: BUILT, lieExecutable: FOREIGN, pending: null, codes: { [FOREIGN]: null, [BUILT]: 50 } });
+  assert.equal(lie.status, 1, lie.out);
+  assert.match(lie.out, /the endpoints disagree on the code the instance runs: https:\/\/one\.stub\.invalid says fd5cdbd3.*https:\/\/two\.stub\.invalid says .*nothing restored/);
+  assert.deepEqual(submitted(lie.log), [], "the keeper paid for nothing");
+  // Both endpoints lying alike cannot be told apart, but --expect can: the operator names the code.
+  const named = run(["--restore-code", `--expect=${BUILT}`], { executable: BUILT, lieExecutable: FOREIGN, lieAt: "https://", pending: null, codes: { [FOREIGN]: null, [BUILT]: 50 } });
+  assert.equal(named.status, 1, named.out);
+  assert.match(named.out, /the instance runs fd5cdbd3.*not the expected .*nothing restored/);
+  assert.deepEqual(submitted(named.log), []);
+});

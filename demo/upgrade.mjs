@@ -9,6 +9,7 @@
 //   npm run upgrade -- --propose --expect=<sha256>   propose and announce only
 //   npm run upgrade -- --apply --expect=<sha256>     upgrade and migrate a proposal whose delay has elapsed
 //   npm run upgrade -- --restore-code                restore the instance's own code if archived, then extend it
+//                                                    (two endpoints must agree on that code, or --expect=<sha256> names it)
 //
 // `--expect` is the sha256 of night_window.wasm as `stellar contract build`
 // produces it at the release tag, in a clean shell. The built WASM must be
@@ -44,8 +45,10 @@ import {
   STATE_NAME,
   UPLOAD_MAX_FEE,
   WASM_DIR,
+  activeEndpoint,
   checkUpgradeWasm,
   codeKey,
+  endpointClient,
   explorer,
   extendCode,
   invoke,
@@ -54,6 +57,7 @@ import {
   loadState,
   read,
   restoreEntries,
+  secondEndpoint,
   send,
   sleep,
   storageKey,
@@ -65,12 +69,31 @@ import { acknowledgeUpgrade, announceUpgrade, monitorFileName } from "./monitor-
 // The file the monitor's watch of this instance reads (monitor.mjs names it the same way).
 const MONITOR_FILE = path.join(STATE_DIR, monitorFileName(STATE_NAME));
 
-/** The WASM hash the ledger holds as the executable of `contractId`. */
-async function executableHash(contractId) {
-  const head = await ledgerEntries([storageKey(contractId)]);
+/** The WASM hash the ledger holds as the executable of `contractId`, read through `reader` (the failover client by default). */
+async function executableHash(contractId, reader = ledgerEntries) {
+  const head = await reader([storageKey(contractId)]);
   const raw = head.entries[0]?.value?.contractData?.val?.instance?.executable?.wasmHash;
   if (!raw) return null;
   return typeof raw.toXDR === "function" ? raw.toXDR("hex") : Buffer.from(raw).toString("hex");
+}
+
+/**
+ * The executable of `contractId` as each endpoint reports it, the active one
+ * first, then the second one when configured: `[{ url, hex }]`, `hex` null
+ * when that endpoint could not say (an unreadable instance, a failed read).
+ * Each is asked directly, never through the failover client, so no endpoint
+ * vouches for itself.
+ */
+async function executableHashes(contractId) {
+  const indexes = [activeEndpoint(), secondEndpoint()].filter((i) => i !== null);
+  return Promise.all(indexes.map(async (index) => {
+    const client = endpointClient(index);
+    try {
+      return { url: client.url, hex: await executableHash(contractId, client.ledgerEntries) };
+    } catch (error) {
+      return { url: client.url, hex: null, error: String(error?.message ?? error).split("\n")[0].slice(0, 80) };
+    }
+  }));
 }
 
 /** The schema version the built code expects, read from the source constant, so the script needs no rebuild of the contract crate. */
@@ -106,6 +129,7 @@ export function chainIo(state) {
     ledgerTime,
     sleep,
     executableHash: () => executableHash(ow),
+    executableHashes: () => executableHashes(ow),
     // The monitor reports an announced upgrade as a warning, an unannounced
     // one as an attack it cancels; a running watch merges the file (TOOL-3).
     announce: (hex) => announceUpgrade(MONITOR_FILE, hex),
@@ -252,13 +276,39 @@ export async function keepCodeAlive(io, hex) {
 }
 
 /**
+ * The code entry `--restore-code` pays for: the instance's executable as two
+ * endpoints report it, in agreement, or as one endpoint reports it when
+ * `--expect` names the same hash. One endpoint's word alone is never enough
+ * (review finding TOOL-1, and the TOOL-4 residual of 20 October 2026): a
+ * lying endpoint would have the keeper restore and rent a code entry of its
+ * choosing. `readings` is what `executableHashes` returns; throws with
+ * "nothing restored" otherwise.
+ */
+export function codeToRestore(readings, expect = undefined) {
+  const expected = expect === undefined ? null : String(expect).toLowerCase();
+  if (expected !== null && !/^[0-9a-f]{64}$/.test(expected)) throw new Error(`--expect takes a sha256 in hex, 64 characters, not ${expect}; nothing restored`);
+  for (const r of readings) {
+    if (!r.hex) throw new Error(`${r.url} could not say which code the instance runs${r.error ? ` (${r.error})` : ""}: nothing restored; retry, or check the endpoint`);
+  }
+  const hexes = [...new Set(readings.map((r) => r.hex))];
+  if (hexes.length > 1) throw new Error(`the endpoints disagree on the code the instance runs: ${readings.map((r) => `${r.url} says ${r.hex}`).join(", ")}; nothing restored; check them before paying for a restore`);
+  const [hex] = hexes;
+  if (expected !== null && hex !== expected) throw new Error(`the instance runs ${hex}, not the expected ${expected}: nothing restored; check the deployment before paying for a restore`);
+  if (readings.length < 2 && expected === null) throw new Error(`with one endpoint configured, the code the instance runs rests on ${readings[0].url} alone: pass --expect=<sha256> (the hash the instance must run) or list a second endpoint in STELLAR_RPC_URLS; nothing restored`);
+  return hex;
+}
+
+/**
  * Restores the instance's own code entry when it is archived, a
  * RestoreFootprint on exactly that key under its own cap, then extends it to
- * the 90-day policy (TOOL-4). A live entry is only extended.
+ * the 90-day policy (TOOL-4). A live entry is only extended. The entry is
+ * the one two endpoints agree the instance runs, or the one `--expect`
+ * names when one endpoint confirms it (`codeToRestore`).
  */
-export async function restoreCode(state, { io = chainIo(state) } = {}) {
-  const hex = await io.executableHash();
-  if (!hex) throw new Error("the instance's executable is unreadable: nothing restored");
+export async function restoreCode(state, { expect = undefined, io = chainIo(state) } = {}) {
+  const readings = await io.executableHashes();
+  const hex = codeToRestore(readings, expect);
+  io.log(`the instance runs ${hex}, as ${readings.map((r) => r.url).join(" and ")} report${readings.length === 1 ? "s" : ""}${expect === undefined ? "" : ", the expected code"}`);
   const life = await io.codeLife(hex);
   if (life === null) {
     const r = await io.restoreCode(hex);
@@ -275,8 +325,8 @@ async function main(args) {
     console.error("No deployment found: run `npm run setup` first.");
     process.exit(1);
   }
-  if (args.includes("--restore-code")) return restoreCode(state);
   const expect = args.find((a) => a.startsWith("--expect="))?.slice("--expect=".length);
+  if (args.includes("--restore-code")) return restoreCode(state, { expect });
   const wasm = fs.readFileSync(path.join(WASM_DIR, "night_window.wasm"));
   if (args.includes("--apply")) return apply(state, { wasm, expect });
   const proposed = await propose(state, { wasm, expect });
