@@ -308,6 +308,34 @@ test("fx and nav: a value unchanged past the threshold warns, a move resets it",
   assert.equal(run("nav", withFx(6n, NOW + 74 * H), monitor).length, 0);
 });
 
+test("keeper: the float must cover one 30-day slice of the code, about 215 XLM on testnet", () => {
+  assert.equal(LIMITS.keeperMinXlm, 250);
+  assert.deepEqual(run("keeper", snap({ keeperXlm: 250 })), []);
+  const [low] = run("keeper", snap({ keeperXlm: 249.9 }));
+  assert.match(low.message, /float 249\.9 XLM is below 250 XLM: one 30-day extension of the contract code costs about 215 XLM on testnet/);
+});
+
+test("exposure: one opening per pass never warns; more than 20 within the last hour does", () => {
+  const monitor = {};
+  const opening = (ledger) => snap({ latest: ledger, from: ledger - 6, events: [{ name: "repo_opened", ledger, topics: [1n] }] });
+  const warned = [];
+  for (let n = 1; n <= 21; n += 1) {
+    const out = run("exposure", opening(10_000 + 6 * n), monitor).filter((a) => /opened/.test(a.message));
+    warned.push(out.length);
+  }
+  assert.deepEqual(warned, [...Array(20).fill(0), 1]);
+  // An hour later the burst is forgotten: one opening is quiet again.
+  assert.deepEqual(run("exposure", opening(10_000 + 6 * 21 + 721), monitor), []);
+  assert.deepEqual(monitor.openLedgers, [10_000 + 6 * 21 + 721]);
+});
+
+test("events: a stretch past the RPC's retention is reported, never skipped in silence", () => {
+  const [gap] = run("events", snap({ eventGap: { from: 1_000, to: 4_999 } }));
+  assert.equal(gap.level, "warning");
+  assert.match(gap.message, /^the events of ledgers 1000 to 4999 are past the RPC's retention/);
+  assert.deepEqual(run("events", snap({ eventGap: null })), []);
+});
+
 test("keeper: a float below the threshold warns; an unreadable keeper warns", () => {
   assert.equal(run("keeper", snap({ keeperXlm: LIMITS.keeperMinXlm })).length, 0);
   assert.equal(run("keeper", snap({ keeperXlm: LIMITS.keeperMinXlm - 0.1 })).length, 1);

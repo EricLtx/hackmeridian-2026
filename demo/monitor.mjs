@@ -389,8 +389,13 @@ async function snapshot(monitor) {
   const wasmHash = rawHash ? (typeof rawHash.toXDR === "function" ? rawHash.toXDR("hex") : Buffer.from(rawHash).toString("hex")) : null;
 
   // The RPC serves events up to its latest ledger and for about a week back.
-  const from = Math.min(Math.max(monitor.cursor ?? ledger.latest - 720, ledger.latest - 17_000), ledger.latest);
-  const events = await contractEvents(C.openWindow, from);
+  // They are read from where the last pass stopped, with that retention as
+  // the only floor: an outage shorter than a week loses nothing, and a
+  // longer one is reported as a gap (detector `events`).
+  const asked = Math.min(monitor.cursor ?? ledger.latest - 720, ledger.latest);
+  const events = await contractEvents(C.openWindow, asked);
+  const from = events.startLedger ?? asked;
+  const eventGap = from > asked ? { from: asked, to: from - 1 } : null;
   // rc4: the layout version behind the code means an upgrade without its migration; the sentinel is the key that acts.
   const [schemaVersion, sentinel] = await Promise.all([
     read(state, C.openWindow, "schema_version").then(Number, () => null),
@@ -411,7 +416,7 @@ async function snapshot(monitor) {
   // Two sources for the chain head (every configured RPC) and for the event trail (the indexer's journal).
   const rpcHeights = RPC_URLS.length > 1 ? await latestLedgers() : null;
   const journal = readJournal(C.openWindow);
-  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl() };
+  return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, offers, releases, stablecoins, lenders, eventGap, eventsReached: events.reachedLedger, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel, pending, second, primaryUrl: activeRpcUrl() };
 }
 
 /**
@@ -459,7 +464,8 @@ async function secondFacts(latest) {
 async function pass(monitor, { quiet = false } = {}) {
   const s = await snapshot(monitor);
   const alerts = detect(s, monitor, { limits: LIMITS, journalPending: JOURNAL.pending });
-  monitor.cursor = s.latest + 1;
+  // The next pass reads events after the last ledger this one covered.
+  monitor.cursor = (s.eventsReached ?? s.latest) + 1;
   if (s.wasmHash) monitor.wasmHash = monitor.wasmHash ?? s.wasmHash;
   if (!quiet) report(s, alerts);
   for (const a of alerts) {

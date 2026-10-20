@@ -952,23 +952,34 @@ export async function latestLedgers(timeoutMs = 10_000) {
   }));
 }
 
-/** Contract events since `startLedger`, decoded: `{ ledger, name, topics, data, txHash, id }`; `id` is the RPC event id, the key of the indexer's journal. */
-export async function contractEvents(contractId, startLedger) {
+/** Pages of events one read may fetch: a week of ledgers needs about 13 empty ones, and every 200 events one more. */
+const EVENT_PAGES = 1_000;
+
+/**
+ * Contract events since `startLedger`, decoded: `{ ledger, name, topics,
+ * data, txHash, id }`; `id` is the RPC event id, the key of the indexer's
+ * journal. The array also carries `startLedger`, where the read began (the
+ * RPC's oldest ledger when the one asked is past its retention), and
+ * `reachedLedger`, the last ledger it covered: the next read starts after it.
+ */
+export async function contractEvents(contractId, startLedger, client = server) {
   const out = [];
   let cursor;
-  for (let page = 0; page < 20; page += 1) {
+  let start = startLedger;
+  let reached = null;
+  for (let page = 0; page < EVENT_PAGES; page += 1) {
     const request = cursor
       ? { filters: [{ type: "contract", contractIds: [contractId] }], cursor, limit: 200 }
-      : { filters: [{ type: "contract", contractIds: [contractId] }], startLedger, limit: 200 };
+      : { filters: [{ type: "contract", contractIds: [contractId] }], startLedger: start, limit: 200 };
     let response;
     try {
-      response = await net(() => server.getEvents(request), "events");
+      response = await net(() => client.getEvents(request), "events");
     } catch (error) {
       // The public RPC keeps a window of events it announces in this error
       // (sometimes well under a day): start from its oldest ledger instead.
       const range = /startLedger must be within the ledger range: (\d+) - (\d+)/.exec(error.message ?? "");
-      if (!cursor && range && Number(range[1]) > startLedger) {
-        startLedger = Number(range[1]);
+      if (!cursor && range && Number(range[1]) > start) {
+        start = Number(range[1]);
         page -= 1;
         continue;
       }
@@ -984,12 +995,22 @@ export async function contractEvents(contractId, startLedger) {
     // latest ledger (the cursor is `<toid>-<index>`, ledger in the toid's
     // top 32 bits).
     const next = response.cursor;
-    if (!next || next === cursor) break;
+    const latest = response.latestLedger ? Number(response.latestLedger) : null;
+    if (!next || next === cursor) {
+      reached = latest ?? reached;
+      break;
+    }
     const reachedLedger = /^(\d+)-/.exec(String(next)) ? Number(BigInt(/^(\d+)-/.exec(String(next))[1]) >> 32n) : null;
-    if (response.events.length < 200 && (reachedLedger === null || !response.latestLedger || reachedLedger >= response.latestLedger)) break;
+    if (response.events.length < 200 && (reachedLedger === null || !latest || reachedLedger >= latest)) {
+      reached = latest ?? reachedLedger ?? reached;
+      break;
+    }
+    // Not done yet: if the page limit stops the read here, the next one
+    // resumes from this ledger.
+    reached = reachedLedger === null ? reached : reachedLedger - 1;
     cursor = next;
   }
-  return out;
+  return Object.assign(out, { startLedger: start, reachedLedger: reached });
 }
 
 /**

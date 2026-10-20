@@ -18,7 +18,7 @@ export const LIMITS = {
   codeTtlDays: 90,
   navWarnHours: 24, // warn two hours before the contract refuses a 26-hour-old NAV
   capWarnRatio: 0.8, // warn when outstanding passes 80 % of a cap
-  opensPerHour: 20, // an unusual rate of new repos
+  opensPerHour: 20, // an unusual rate of new repos: more than this within the last hour
   // The FX feed republishes a frozen rate with a fresh timestamp while the
   // market is closed (observed on the testnet feed over a weekend): the
   // contract's age check cannot see it, only the band and the haircut bound
@@ -29,7 +29,12 @@ export const LIMITS = {
   // without a move spans a weekend. A constant-NAV fund publishes the same
   // value by design: set the threshold to Infinity for it (`--nav-frozen-hours=`).
   navFrozenHours: 72,
-  keeperMinXlm: 20, // below this float the keeper cannot pay a month of rent
+  // The keeper pays the rent. Its largest bill is one 30-day slice of the
+  // contract code: about 215 XLM at the testnet rate measured on 20 October
+  // 2026 (7.15 XLM a day for the 1.88 MB the network counts for the rc4
+  // code; rc5's is about 2 % larger). 250 XLM covers one slice, the small
+  // entries' extensions and the fees.
+  keeperMinXlm: 250,
   rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
 };
 
@@ -390,7 +395,7 @@ export const DETECTORS = {
         days: t.days,
       }));
   },
-  exposure(s, _monitor, { limits }) {
+  exposure(s, monitor, { limits }) {
     const out = [];
     const ratio = (a, b) => (BigInt(b) > 0n ? Number((BigInt(a) * 1000n) / BigInt(b)) / 1000 : 0);
     for (const f of s.funds) {
@@ -406,9 +411,13 @@ export const DETECTORS = {
       const currencyRatio = ratio(c.outstanding, c.cap);
       if (currencyRatio >= limits.capWarnRatio) out.push({ level: "warning", message: `${currency} outstanding at ${(currencyRatio * 100).toFixed(0)} % of its cap`, action: "review limits" });
     }
-    const hours = Math.max(((s.latest - s.from) * LEDGER_SECS) / 3600, 1 / 60);
-    const opens = s.events.filter((e) => e.name === "repo_opened").length;
-    if (opens / hours > limits.opensPerHour) out.push({ level: "warning", message: `${opens} repos opened in ${(hours * 60).toFixed(0)} min`, action: "pause if unexplained" });
+    // The openings of the last hour, kept between passes: a pass every 30 s
+    // reads one or two openings, which is no rate at all. Only more than the
+    // threshold within the hour warns.
+    const hourAgo = s.latest - 3600 / LEDGER_SECS;
+    monitor.openLedgers = [...(monitor.openLedgers ?? []), ...s.events.filter((e) => e.name === "repo_opened").map((e) => e.ledger)].filter((ledger) => ledger > hourAgo);
+    const opens = monitor.openLedgers.length;
+    if (opens > limits.opensPerHour) out.push({ level: "warning", message: `${opens} repos opened in the last hour, above ${limits.opensPerHour}`, action: "pause if unexplained" });
     return out.map((a) => ({ detector: "exposure", threat: "DoS.1", ...a }));
   },
   fx(s, monitor, { limits }) {
@@ -442,15 +451,22 @@ export const DETECTORS = {
     if (s.keeperXlm === null) return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} account not readable`, action: "check the account" }];
     const min = monitor.keeperMinXlmOverride ?? limits.keeperMinXlm;
     if (s.keeperXlm >= min) return [];
-    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM`, action: "top up the keeper from treasury" }];
+    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM: one 30-day extension of the contract code costs about 215 XLM on testnet (rate measured on 20 October 2026)`, action: "top up the keeper from treasury" }];
   },
   events(s) {
     // Every repo opened inside the event window must have its repo_opened event (Repud.1).
     const seen = new Set(s.events.filter((e) => e.name === "repo_opened").map((e) => Number(e.topics[0])));
     const windowStart = s.now - (s.latest - s.from) * LEDGER_SECS;
-    return s.repos
+    const out = s.repos
       .filter((r) => Number(r.opened_at) > windowStart + 60 && !seen.has(r.id))
-      .map((r) => ({ detector: "events", threat: "Repud.1", level: "warning", message: `repo #${r.id} has no repo_opened event`, action: "investigate" }));
+      .map((r) => ({ level: "warning", message: `repo #${r.id} has no repo_opened event`, action: "investigate" }));
+    // Events are read from where the last pass stopped, down to the RPC's
+    // retention (about a week): a longer outage leaves a stretch nobody
+    // checked, said once rather than skipped in silence.
+    if (s.eventGap) {
+      out.unshift({ level: "warning", message: `the events of ledgers ${s.eventGap.from} to ${s.eventGap.to} are past the RPC's retention: the monitor was down longer than it keeps, they were not checked`, action: "check that stretch in the indexer's journal or in an archive" });
+    }
+    return out.map((a) => ({ detector: "events", threat: "Repud.1", ...a }));
   },
   rpc(s, _monitor, { limits }) {
     // Infra.1: the monitor reads one RPC and trusts it. With several configured,
