@@ -1011,6 +1011,96 @@ export async function deploySac(state, sourceRole, classicAsset) {
 export { Asset, Operation, Keypair, StrKey };
 
 // ---------------------------------------------------------------------------
+// The WASM an upgrade installs (review finding STATE-2, 20 October 2026)
+// ---------------------------------------------------------------------------
+//
+// `stellar contract build` writes target/wasm32v1-none/release/, unless
+// CARGO_TARGET_DIR sends it elsewhere, and links the contract with the stack
+// NIGHT_WINDOW_STACK_SIZE names when it is set (the CI canary's 8 KiB, an
+// experiment's 1 KiB): an upgrade could install a WASM nobody reviewed.
+// These checks run before any network call.
+
+/** The stack night_window.wasm ships with: 64 KiB, first in linear memory (contracts/night-window/build.rs). */
+export const SHIPPED_STACK_BYTES = 65_536;
+
+/** The variables that change the WASM `stellar contract build` writes, or where it writes it. */
+export const BUILD_VARIABLES = ["NIGHT_WINDOW_STACK_SIZE", "CARGO_TARGET_DIR"];
+
+/** An unsigned or signed LEB128 number at `at`: `[value, next]`. */
+function leb128(bytes, at, signed = false) {
+  let value = 0n;
+  let shift = 0n;
+  for (let next = at; ; next += 1) {
+    if (next >= bytes.length) throw new Error("not a whole WASM module");
+    const byte = bytes[next];
+    value |= BigInt(byte & 0x7f) << shift;
+    shift += 7n;
+    if ((byte & 0x80) === 0) {
+      if (signed && shift < 64n && (byte & 0x40) !== 0) value |= -1n << shift;
+      return [Number(value), next + 1];
+    }
+  }
+}
+
+/**
+ * The initial linear memory (pages of 64 KiB) and the initial stack pointer
+ * of a WASM module: its memory section and its first global, read as the
+ * contract's layout test does (`memory_layout` in test_perf.rs).
+ */
+export function wasmMemoryLayout(bytes) {
+  const wasm = Buffer.from(bytes);
+  if (wasm.length < 8 || wasm.readUInt32LE(0) !== 0x6d736100) throw new Error("not a WASM module");
+  let pages = null;
+  let stack = null;
+  for (let at = 8; at < wasm.length; ) {
+    const id = wasm[at];
+    const [size, body] = leb128(wasm, at + 1);
+    if (id === 5) {
+      const [, flags] = leb128(wasm, body); // number of memories
+      const [, min] = leb128(wasm, flags);
+      [pages] = leb128(wasm, min);
+    }
+    // The first global: value type, mutability, then `i32.const <value>`.
+    if (id === 6) {
+      const [, first] = leb128(wasm, body);
+      if (wasm[first + 2] === 0x41) [stack] = leb128(wasm, first + 3, true);
+    }
+    at = body + size;
+  }
+  return { pages, stack };
+}
+
+/** Refuses to go on while a variable that changes the build is set in `env`: unset it, rebuild in a clean shell, and run again. */
+export function checkBuildEnv(env = process.env) {
+  for (const name of BUILD_VARIABLES) {
+    const value = env[name];
+    if (value === undefined || value === "") continue;
+    throw new Error(`${name} is set (${value}): ${name === "CARGO_TARGET_DIR" ? "`stellar contract build` writes there, while this script reads target/" : "`stellar contract build` links night_window.wasm with that stack, not the shipped 64 KiB"}; unset it, rebuild in a clean shell and run again; nothing uploaded or signed`);
+  }
+}
+
+/**
+ * The WASM an upgrade may upload, propose or install: built in a clean
+ * environment, linked with the shipped stack, and exactly the build the
+ * operator expects (`--expect=<sha256>`, the hash of `stellar contract
+ * build` at the release tag). Returns `{ hash, hex, size, stack, pages }`;
+ * throws before any network call.
+ */
+export function checkUpgradeWasm(bytes, expectedHex, env = process.env) {
+  checkBuildEnv(env);
+  if (!expectedHex) throw new Error("--expect=<sha256> is required: the sha256 of night_window.wasm built at the release tag, which the instance must run; nothing uploaded or signed");
+  const expected = String(expectedHex).toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected)) throw new Error(`--expect takes a sha256 in hex, 64 characters, not ${expectedHex}; nothing uploaded or signed`);
+  const digest = Buffer.from(hash(Buffer.from(bytes)));
+  const hex = digest.toString("hex");
+  const { pages, stack } = wasmMemoryLayout(bytes);
+  const stackNote = stack === SHIPPED_STACK_BYTES ? "" : `, linked with a ${stack ?? "unknown"}-byte stack`;
+  if (hex !== expected) throw new Error(`the built night_window.wasm is ${hex}${stackNote}, not the expected ${expected}: rebuild at the release tag in a clean shell; nothing uploaded or signed`);
+  if (stack !== SHIPPED_STACK_BYTES) throw new Error(`night_window.wasm ${hex} starts its stack pointer at ${stack ?? "an unknown value"}, not the shipped ${SHIPPED_STACK_BYTES} bytes: it was linked with another stack; nothing uploaded or signed`);
+  return { hash: digest, hex, size: bytes.length, stack, pages };
+}
+
+// ---------------------------------------------------------------------------
 // Ledger entries and their time to live (monitoring)
 // ---------------------------------------------------------------------------
 
