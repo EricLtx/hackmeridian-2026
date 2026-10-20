@@ -785,6 +785,58 @@ fn an_eighteen_decimal_cross_fund_prices_a_thousand_dollar_share() {
     }
 }
 
+/// Review finding VAL-3, second round (20 October 2026): the split still
+/// formed the remainder times `10^d`, which overflows for an 18-decimal
+/// rate above about 170, so a cross fund with JPY-based feeds at EUR/JPY
+/// 175 was admitted, priced at 345 JPY a share and failed with
+/// `ArithmeticOverflow` at 349 JPY, where the remainder is 174 x 10^18. The
+/// remainder now goes through a wide product: both NAVs price at the exact
+/// floor, about 1.97 and 1.99 EUR, and an opening lends what the quote
+/// announces.
+#[test]
+fn an_eighteen_decimal_rate_above_one_hundred_seventy_prices_every_nav() {
+    let e18 = 10i128.pow(18);
+    let rate = 175 * e18;
+    let price_of = |nav: i128| {
+        let f = bare();
+        let jpy = Symbol::new(&f.env, "JPY");
+        let (nav_oracle, nav_feed) = feed_with_decimals(&f, jpy.clone(), 18);
+        let (fx_oracle, fx_feed) = feed_with_decimals(&f, jpy, 18);
+        nav_feed.set_price(&Asset::Stellar(f.shares.clone()), &nav, &T0);
+        fx_feed.set_price(&Asset::Other(eur(&f.env)), &rate, &T0);
+        let config = FundConfig {
+            oracle: nav_oracle,
+            source: PriceSource::Cross(FxLeg {
+                oracle: fx_oracle,
+                asset: Asset::Other(eur(&f.env)),
+                haircut_bps: 200,
+                max_age_secs: 3 * DAY,
+                band_bps: 200,
+            }),
+            ..fund_config(&f)
+        };
+        let (f, offer_id) = ready_with(f, config);
+        let quote = f.client.quote(&f.shares, &ONE, &f.eurc);
+        let repo_id = f.client.open_repo(
+            &f.borrower,
+            &offer_id,
+            &f.shares,
+            &ONE,
+            &quote.max_principal,
+            &DAY,
+        );
+        assert_eq!(
+            f.client.get_repo(&repo_id).unwrap().principal,
+            quote.max_principal
+        );
+        (quote.price, quote.price_decimals)
+    };
+    // floor(nav x 10^18 / (175 x 10^18)) = floor(nav / 175), in 18 decimals.
+    assert_eq!(price_of(345 * e18), (345 * e18 / 175, 18));
+    assert!((174 * e18).checked_mul(e18).is_none());
+    assert_eq!(price_of(349 * e18), (349 * e18 / 175, 18));
+}
+
 /// A re-anchor installs references in the decimals of the feeds it reads,
 /// so the same rule holds there: a NAV or FX feed publishing with fewer than
 /// `MIN_FEED_DECIMALS` is refused when the re-anchor is proposed, and when

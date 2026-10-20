@@ -115,10 +115,12 @@ pub const MAX_PENDING_CURRENCY_CAPS: u32 = 8;
 /// 0.01 bps.
 pub const MIN_FEED_DECIMALS: u32 = 6;
 /// Most decimals a NAV, FX or fallback feed may publish with (review finding
-/// VAL-3, 20 October 2026). The valuation is exact up to 18 decimals: the
-/// cross price divides the NAV by the rate without forming the NAV times
-/// `10^decimals`, and the share value splits its product, which covers up
-/// to 19. A feed with more could be admitted and then never price.
+/// VAL-3, 20 October 2026). The cross price divides the NAV by the rate
+/// without forming the NAV times `10^decimals`, through a wide product
+/// where its remainder needs one, and is the exact floor whenever the
+/// result fits in i128, whatever the rate; the share value splits its
+/// product, which is exact up to 19 decimals. A feed with more could be
+/// admitted and then never price.
 pub const MAX_FEED_DECIMALS: u32 = 18;
 /// Decimals of every stablecoin: those of a Stellar classic asset through
 /// its Stellar Asset Contract. Caps and outstanding totals add base units

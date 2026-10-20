@@ -274,7 +274,8 @@ proptest! {
 
     /// Beyond the direct formula's reach, the cross price is still the exact
     /// floor of `nav * 10^d / rate`. The only overflow left is a result that
-    /// does not fit in i128, or a rate whose mantissa times `10^d` does not.
+    /// does not fit in i128: since the second round of review finding VAL-3
+    /// a rate whose mantissa times `10^d` does not fit no longer counts.
     #[test]
     fn divided_by_is_exact_beyond_the_direct_formula(
         nav in 1i128..=i128::MAX,
@@ -301,8 +302,38 @@ proptest! {
             Err(error) => {
                 prop_assert_eq!(error, Error::ArithmeticOverflow);
                 let result_too_large = product >= Wide::of(i128::MAX).times(rate).plus(rate);
-                let rate_too_fine = Wide::of(rate).times(unit) > Wide::of(i128::MAX);
-                prop_assert!(result_too_large || rate_too_fine);
+                prop_assert!(result_too_large);
+            }
+        }
+    }
+
+    /// The wide floor is the exact floor of `a * b / c` whenever that
+    /// quotient fits in i128, however large the product (review finding
+    /// VAL-3, second round): the only overflow is a quotient that does not
+    /// fit, and the result is the direct formula's wherever that one fits.
+    #[test]
+    fn mul_div_floor_wide_is_the_exact_floor_wherever_the_quotient_fits(
+        a in 1i128..=i128::MAX,
+        b in 1i128..=i128::MAX,
+        c in 1i128..=i128::MAX,
+        scales in (0u32..=38, 0u32..=38, 0u32..=38),
+    ) {
+        let a = (a / 10i128.pow(scales.0)).max(1);
+        let b = (b / 10i128.pow(scales.1)).max(1);
+        let c = (c / 10i128.pow(scales.2)).max(1);
+        let product = Wide::of(a).times(b);
+        match math::mul_div_floor_wide(a, b, c) {
+            Ok(quotient) => {
+                let floor = Wide::of(quotient).times(c);
+                prop_assert!(floor <= product);
+                prop_assert!(product < floor.plus(c));
+                if let Some(direct) = a.checked_mul(b) {
+                    prop_assert_eq!(quotient, direct / c);
+                }
+            }
+            Err(error) => {
+                prop_assert_eq!(error, Error::ArithmeticOverflow);
+                prop_assert!(product >= Wide::of(i128::MAX).times(c).plus(c));
             }
         }
     }
@@ -426,6 +457,7 @@ proptest! {
         check(math::pow10(small))?;
         check(math::mul_div_floor(a, b, c))?;
         check(math::mul_div_ceil(a, b, c))?;
+        check(math::mul_div_floor_wide(a, b, c))?;
         check(math::rescale_floor(a, small, other))?;
         check(math::interest(a, small, time))?;
         check(math::model_path(a, time, later, small, window))?;
@@ -477,6 +509,7 @@ fn edge_values_give_typed_errors_not_panics() {
             for &c in &wide {
                 assert!(ok(math::mul_div_floor(a, b, c)));
                 assert!(ok(math::mul_div_ceil(a, b, c)));
+                assert!(ok(math::mul_div_floor_wide(a, b, c)));
             }
             for &n in &narrow {
                 assert!(ok(math::within_band(a, b, n).map(i128::from)));
