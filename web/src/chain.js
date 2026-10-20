@@ -226,6 +226,7 @@ export class Chain {
    */
   async net(call, { timeoutMs = RPC_TIMEOUT_MS, attempts = 4 } = {}) {
     let delay = 800;
+    let moves = 0;
     for (let attempt = 1; ; attempt += 1) {
       const index = this.active;
       const endpoint = this.endpoints[index];
@@ -237,7 +238,9 @@ export class Chain {
         return result;
       } catch (error) {
         if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
-        if (!this.failover(error, index)) {
+        // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
+        if (moves < this.endpoints.length - 1 && this.failover(error, index)) moves += 1;
+        else {
           await sleep(delay);
           delay *= 2;
         }

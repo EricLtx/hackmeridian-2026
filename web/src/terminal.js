@@ -203,11 +203,14 @@ export function createTerminal(ctx) {
   }
 
   async function refreshTape() {
+    // A read from the start of the RPC window (the first, or the first after failed ones) only fills in the past: none of its rows is news.
+    const backfill = T.tape.nextLedger === null;
     try {
       const { events, nextLedger } = await S.chain.contractEvents(T.tape.nextLedger);
       T.tape.events = mergeEvents([S.history?.events ?? [], T.tape.events, events], 300);
       T.tape.nextLedger = nextLedger;
       T.tape.error = null;
+      if (backfill) T.tapeSeen = null;
     } catch (error) {
       T.tape.events = mergeEvents([S.history?.events ?? [], T.tape.events], 300);
       T.tape.error = describeError(error).text;
@@ -435,7 +438,7 @@ export function createTerminal(ctx) {
     }
     setHTML(
       box,
-      `<dl class="t-dl">${rows}</dl>${checks ? `<ul class="t-checks">${checks}</ul>` : ""}${view.note ? `<p class="t-note">${esc(view.note)}</p>` : ""}${action}`,
+      `<dl class="t-dl">${rows}</dl>${checks ? `<ul class="t-checks${T.shownView !== view ? " is-new" : ""}">${checks}</ul>` : ""}${view.note ? `<p class="t-note">${esc(view.note)}</p>` : ""}${action}`,
     );
     if (T.shownView !== view) {
       T.shownView = view;

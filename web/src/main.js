@@ -34,7 +34,7 @@ import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
 import { eventsOfRepo, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
-import { applyStatic, bootLang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
+import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
 import { flashChanges, initMotion, setLoading, snapshot, toast, transition } from "./motion.js";
 
 const REFRESH_MS = 15_000;
@@ -114,10 +114,20 @@ const terminal = createTerminal({
  */
 function setHTML(el, html) {
   if (el._html === html) return;
-  const before = el._html === undefined ? null : snapshot(el);
+  // Markup written in another language is not compared: only its separators differ, not its figures.
+  const before = el._html === undefined || el._lang !== lang() ? null : snapshot(el);
   el._html = html;
+  el._lang = lang();
   el.innerHTML = html;
   flashChanges(el, before);
+}
+
+/** The entrance class the first time `key` is shown (its animation plays once), "" afterwards. */
+function firstShow(key) {
+  S.shown ??= new Set();
+  if (S.shown.has(key)) return "";
+  S.shown.add(key);
+  return key === "bar" ? " bar-enter" : " is-new";
 }
 
 const link = (href, text) => `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(text)}</a>`;
@@ -178,7 +188,7 @@ async function runTx(el, context, action, message) {
     const result = await action((status) => track.update(status));
     if (result?.hash) {
       track.success(message(result), result);
-      toast(message(result), { tone: "ok" });
+      toast(message(result), { tone: "ok", announce: false });
     }
     else track.note(message(result));
   } catch (error) {
@@ -271,7 +281,7 @@ function renderBoard() {
   const tiles = [];
   const navCurrency = S.dep.fund.navCurrency;
   const tooOld = `${esc(t("Too old to lend against."))} `;
-  const since = (timestamp) => `<span data-since="${timestamp}">${esc(formatAge(timestamp, ts))}</span>`;
+  const since = (timestamp) => `<span data-since="${timestamp}"></span>`;
   if (b.nav.value && state) {
     const old = config && ts - Number(b.nav.value.timestamp) > Number(config.nav_max_age_secs);
     tiles.push(
@@ -322,13 +332,14 @@ function renderBoard() {
       tile(
         esc(t("Lent against this fund")),
         `${formatAmount(used, SD(), "round")} <span class="unit-inline">${esc(t("of {cap}", { cap: `${formatAmount(cap, SD())} ${code()}` }))}</span>`,
-        `<span class="bar" role="img" aria-label="${esc(t("{pct} percent of the fund cap used", { pct: decimalText(pct.toFixed(1)) }))}"><span style="width:${Math.min(pct, 100)}%"></span></span>${esc(
+        `<span class="bar${firstShow("bar")}" role="img" aria-label="${esc(t("{pct} percent of the fund cap used", { pct: decimalText(pct.toFixed(1)) }))}"><span style="width:${Math.min(pct, 100)}%"></span></span>${esc(
           t("Up to {amount} per loan", { amount: money(config.max_principal_per_repo) }),
         )}`,
       ),
     );
   }
   setHTML($("tiles"), tiles.join(""));
+  tick();
   renderFunds(b.funds ?? []);
   renderGuide();
 
@@ -361,7 +372,7 @@ function renderFunds(funds) {
     out,
     `<h3 class="sub">${esc(t("Funds admitted"))}</h3>
      <p class="muted small">${esc(t("Each fund is admitted by the governor and its own issuer, with its own NAV feed and settings. The contract is the same for all of them."))}</p>
-     <table class="table"><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`,
+     <table class="table${firstShow("table:funds")}"><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`,
   );
 }
 
@@ -401,7 +412,7 @@ function renderOffers() {
     .join("");
   setHTML(
     $("offers"),
-    `<table class="table"><caption class="sr-only">${esc(t("Offers open to these fund shares, issuer first, then cheapest"))}</caption>
+    `<table class="table${firstShow("table:offers")}"><caption class="sr-only">${esc(t("Offers open to these fund shares, issuer first, then cheapest"))}</caption>
       <thead><tr><th scope="col">${label.offer}</th><th scope="col" class="num">${label.available}</th><th scope="col" class="num">${label.rate}</th><th scope="col" class="num">${label.term}</th></tr></thead>
       <tbody>${rows}</tbody></table>`,
   );
@@ -738,7 +749,7 @@ function updateBorrowForm() {
     const term = Math.min(hours, maxHours || hours) * HOUR;
     const atTerm = interest(principal, offer.rate_bps, term);
     const row = (label, value, strong = false) =>
-      `<div><dt>${esc(label)}</dt><dd class="num" data-k="preview:${esc(label)}">${strong ? `<strong>${esc(value)}</strong>` : esc(value)}</dd></div>`;
+      `<div><dt>${esc(label)}</dt><dd class="num">${strong ? `<strong>${esc(value)}</strong>` : esc(value)}</dd></div>`;
     preview.push(
       row(t("Rate"), t("{rate} a year, offer #{id}", { rate: formatRate(offer.rate_bps), id: offer.id })),
       row(t("Interest for the first hour"), exact(interest(principal, offer.rate_bps, HOUR))),
@@ -868,7 +879,7 @@ function renderPositions() {
     const step = nextInterestStep(r.opened_at, ts);
     const matured = ts >= Number(r.maturity);
     const short = total !== null && balance < total ? total - balance : 0n;
-    return `<article class="position${matured ? " position-late" : ""}" aria-labelledby="repo-${r.id}">
+    return `<article class="position${matured ? " position-late" : ""}${firstShow(`repo:${r.id}`)}" aria-labelledby="repo-${r.id}">
       <header><h3 id="repo-${r.id}">Repo #${r.id}</h3><span class="pill ${matured ? "pill-danger" : "pill-ok"}">${esc(matured ? t("Past term") : t("Open"))}</span></header>
       <dl class="facts">
         <div><dt>${esc(t("Borrowed"))}</dt><dd class="num">${esc(money(r.principal))}</dd></div>
@@ -987,7 +998,7 @@ function renderMyOffers() {
     .join("");
   setHTML(
     $("my-offers"),
-    `<h3 class="sub">${esc(t("Your offers"))}</h3><table class="table"><caption class="sr-only">${esc(t("Your offers"))}</caption>
+    `<h3 class="sub">${esc(t("Your offers"))}</h3><table class="table${firstShow("table:mine")}"><caption class="sr-only">${esc(t("Your offers"))}</caption>
       <thead><tr><th scope="col">${label.offer}</th><th scope="col" class="num">${label.available}</th><th scope="col" class="num">${label.rate}</th><th scope="col" class="num">${label.term}</th><th scope="col" class="num">${label.withdraw}</th></tr></thead>
       <tbody>${rows}</tbody></table>`,
   );
@@ -1062,7 +1073,7 @@ function renderLent() {
   const cards = open.map((r) => {
     const state = seizeState(r, ts);
     const due = S.dues.get(r.id);
-    return `<article class="position${state.allowed ? " position-late" : ""}" aria-labelledby="lent-${r.id}">
+    return `<article class="position${state.allowed ? " position-late" : ""}${firstShow(`lent:${r.id}`)}" aria-labelledby="lent-${r.id}">
       <header><h3 id="lent-${r.id}">Repo #${r.id}</h3><span class="pill ${state.allowed ? "pill-danger" : "pill-ok"}">${esc(
         state.allowed ? t("Past term, unpaid") : t("Open"),
       )}</span></header>
@@ -1233,7 +1244,7 @@ function tick() {
 // ---------------------------------------------------------------------------
 
 /** Shows one face. The choice is kept in the URL (?view=terminal) and, when allowed, in local storage. */
-function setFace(face, { persist = true } = {}) {
+function setFace(face, { persist = true, refresh = true } = {}) {
   const term = face === "terminal";
   S.face = term ? "terminal" : "guide";
   document.body.classList.toggle("face-terminal", term);
@@ -1255,7 +1266,7 @@ function setFace(face, { persist = true } = {}) {
   if (term) terminal.mount();
   else {
     terminal.unmount();
-    refreshAll();
+    if (refresh) refreshAll();
   }
 }
 
@@ -1280,6 +1291,7 @@ function wire() {
     if (!tab) return;
     S.guideRole = tab.dataset.role;
     renderGuide();
+    $(`tab-${S.guideRole}`)?.focus();
   });
   document.addEventListener("click", async (event) => {
     const target = event.target.closest("button");
@@ -1435,6 +1447,7 @@ async function start() {
     const box = $("load-error");
     box.hidden = false;
     setLoading(false);
+    $("tiles").replaceChildren();
     box.textContent = t("The deployment file could not be loaded ({reason}). The interface needs deployment.testnet.json next to this page.", {
       reason: error.message,
     });
@@ -1442,14 +1455,19 @@ async function start() {
   }
   S.chain = new Chain(S.dep);
   // A slow or failing RPC is left for the next endpoint; both views say where the data now comes from.
+  let rpcToastAt = -Infinity;
   S.chain.onRpcChange = (change) => {
     renderFoot();
     terminal.rpcChanged(change);
-    if (S.face !== "terminal") toast(t("The chain is now read through {host}: the first RPC was slow or down.", { host: change.to }), { tone: "warn" });
+    if (S.face === "terminal" || Date.now() - rpcToastAt < REFRESH_MS) return;
+    rpcToastAt = Date.now();
+    const { from, to, reason } = change;
+    toast(reason === "timeout" ? t("RPC {from} did not answer in time: switched to {to}.", { from, to }) : t("RPC {from} failed: switched to {to}.", { from, to }), { tone: "warn" });
   };
   // The terminal shows at once and fills as its own reads land; the guided
   // page waits for the instance settings below.
   if (initialFace() === "terminal") setFace("terminal", { persist: false });
+  wire();
   await loadHistory();
   const ow = S.dep.contracts.openWindow;
   const [delay, version] = await Promise.all([S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
@@ -1462,9 +1480,8 @@ async function start() {
   $("network").textContent = S.dep.network === "testnet" ? "Testnet" : S.dep.network;
   renderFoot();
 
-  wire();
   renderAllWalletViews();
-  if (S.face !== "terminal") setFace(initialFace(), { persist: false });
+  if (S.face !== "terminal") setFace(initialFace(), { persist: false, refresh: false });
   await refreshAll();
   setLoading(false);
   setInterval(() => {

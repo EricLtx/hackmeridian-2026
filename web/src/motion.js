@@ -18,9 +18,11 @@ export const reducedMotion = () => typeof matchMedia === "function" && matchMedi
  * text holds no number.
  */
 export function readNumber(text, decimal = numberStyle().decimal) {
-  const match = String(text ?? "").match(/-?\d[\d\s  .,]*/);
+  // Only the no-break spaces of the French grouping join digits: an ordinary
+  // space ends the number ("1.0855 12m03s" is 1.0855, not 1.085512).
+  const match = String(text ?? "").match(/-?\d[\d  .,]*/);
   if (!match) return null;
-  let raw = match[0].replace(/[\s  ]/g, "").replace(/[.,]$/, "");
+  let raw = match[0].replace(/[  ]/g, "").replace(/[.,]$/, "");
   raw = decimal === "." ? raw.replace(/,/g, "") : raw.replace(/\./g, "").replace(",", ".");
   const value = Number(raw);
   return Number.isFinite(value) ? value : null;
@@ -58,8 +60,19 @@ export function flashChanges(root, before) {
     if (move === "same") continue;
     el.classList.remove("flash-up", "flash-down", "flash");
     void el.offsetWidth; // restarts the animation on an element that flashed a moment ago
-    el.classList.add(move === "up" ? "flash-up" : move === "down" ? "flash-down" : "flash");
+    playOnce(el, move === "up" ? "flash-up" : move === "down" ? "flash-down" : "flash");
   }
+}
+
+/** Adds `cls` and takes it off when the element's own animation ends, so showing the view again does not replay it. */
+function playOnce(el, cls) {
+  const done = (event) => {
+    if (event.target !== el) return; // animationend bubbles up from animated children
+    el.removeEventListener("animationend", done);
+    el.classList.remove(cls);
+  };
+  el.addEventListener("animationend", done);
+  el.classList.add(cls);
 }
 
 /** Plays an entrance once more on `el` (a new ticket, a new tab). */
@@ -79,8 +92,8 @@ export function transition(update) {
   document.startViewTransition(() => update());
 }
 
-/** A short message in the corner, read by screen readers, gone after `timeout`. Tones: info, ok, warn, error. */
-export function toast(message, { tone = "info", timeout = 5200 } = {}) {
+/** The live region of the toasts, created once before any message so the first one is announced too. */
+function toastBox() {
   let box = document.getElementById("toasts");
   if (!box) {
     box = document.createElement("div");
@@ -90,8 +103,19 @@ export function toast(message, { tone = "info", timeout = 5200 } = {}) {
     box.setAttribute("aria-live", "polite");
     document.body.append(box);
   }
+  return box;
+}
+
+/**
+ * A short message in the corner, gone after `timeout`. Tones: info, ok,
+ * warn, error. Screen readers read it unless `announce` is false, for a
+ * message another live region already reads (a confirmed transaction).
+ */
+export function toast(message, { tone = "info", timeout = 5200, announce = true } = {}) {
+  const box = toastBox();
   const item = document.createElement("div");
   item.className = `toast toast-${tone}`;
+  if (!announce) item.setAttribute("aria-hidden", "true");
   const icon = document.createElement("span");
   icon.className = "toast-icon";
   icon.setAttribute("aria-hidden", "true");
@@ -176,9 +200,14 @@ let started = false;
 export function initMotion() {
   if (started || typeof document === "undefined") return;
   started = true;
+  toastBox();
   // Each group counts from zero: the terminal's panels never wait behind the guided page's cards.
   for (const group of [".intro > *", "main > .card", ".t-grid > .t-panel"]) stagger(group);
   const header = document.querySelector(".top");
+  // Anchors and the sticky preview clear the real height of the header, which wraps on narrow screens.
+  const measureHeader = () => header && document.documentElement.style.setProperty("--header-h", `${header.offsetHeight}px`);
+  measureHeader();
+  if (header && typeof ResizeObserver === "function") new ResizeObserver(measureHeader).observe(header);
   const onScroll = () => header?.classList.toggle("is-scrolled", window.scrollY > 4);
   window.addEventListener("scroll", onScroll, { passive: true });
   onScroll();

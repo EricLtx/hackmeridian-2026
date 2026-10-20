@@ -100,7 +100,7 @@ function renderRegistry(h) {
       </tr>`;
     })
     .join("");
-  $("registry-body").innerHTML = `<table class="table">
+  $("registry-body").innerHTML = `<table class="table is-new">
     <caption class="sr-only">${esc(t("Repos rebuilt from the journal"))}</caption>
     <thead><tr><th>${col.repo}</th><th>${col.status}</th><th>${col.lender}</th><th>${col.borrower}</th><th class="num">${col.shares}</th><th class="num">${col.principal}</th><th class="num">${col.rate}</th><th>${col.opened}</th><th>${col.maturity}</th><th>${col.closed}</th><th>${col.lastTx}</th></tr></thead>
     <tbody>${body}</tbody></table>
@@ -129,7 +129,7 @@ function renderEvents(h) {
       </tr>`,
     )
     .join("");
-  $("events-body").innerHTML = `<table class="table">
+  $("events-body").innerHTML = `<table class="table is-new">
     <caption class="sr-only">${esc(t("Latest events of the contract"))}</caption>
     <thead><tr><th class="num">#</th><th>${col.time}</th><th>${col.event}</th><th>${col.topics}</th><th>${col.data}</th><th>Tx</th></tr></thead>
     <tbody>${body}</tbody></table>`;
@@ -209,8 +209,11 @@ async function main() {
   } catch (error) {
     view.error = error;
   }
-  render();
-  setLoading(false);
+  try {
+    render();
+  } finally {
+    setLoading(false);
+  }
 }
 
 main();

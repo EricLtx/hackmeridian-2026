@@ -24,3 +24,10 @@ test("a move is up, down, same, or changed when the text is not a number", () =>
   assert.equal(changeOf("OPEN", "PAUSED", "."), "changed");
   assert.equal(changeOf("—", "1.00", "."), "changed");
 });
+
+test("an age next to a rate is not part of the number", () => {
+  assert.equal(readNumber("1.0855 12m03s", "."), 1.0855);
+  assert.equal(readNumber("1,0855 12m03s", ","), 1.0855);
+  assert.equal(changeOf("1.0855 59m50s", "1.0855 1h00m", "."), "same");
+  assert.equal(changeOf("1.0855 50s", "1.0855 1m05s", "."), "same");
+});

@@ -9,17 +9,19 @@
   --surface-2: #f5f5f7;
   --surface-3: #e8e8ed;
   --text: #1d1d1f;
-  --muted: #6e6e73;
+  --muted: #636366;
   --subtle: #86868b;
   --border: #e3e3e8;
   --field: #d2d2d7;
+  --input-border: #8e8e93;
   --accent: #0066cc;
   --accent-strong: #0071e3;
   --accent-hover: #0077ed;
   --accent-text: #ffffff;
   --accent-soft: #e8f1fd;
   --grad: linear-gradient(100deg, #0071e3 0%, #00a3e0 52%, #19c3a4 100%);
-  --ok: #1d7f3b;
+  --grad-text: linear-gradient(100deg, #0060b8 0%, #006e8c 52%, #007560 100%);
+  --ok: #1b7a38;
   --ok-soft: #e6f5ea;
   --warn: #a35200;
   --warn-soft: #fff3e3;
@@ -51,10 +53,12 @@
     --subtle: #86868b;
     --border: #2c2c2e;
     --field: #424245;
+    --input-border: #6e6e73;
     --accent: #2997ff;
     --accent-strong: #0071e3;
     --accent-hover: #147ce5;
     --accent-soft: #0b2440;
+    --grad-text: linear-gradient(100deg, #2997ff 0%, #00a3e0 52%, #19c3a4 100%);
     --ok: #30d158;
     --ok-soft: #0c2414;
     --warn: #ffb340;
@@ -83,7 +87,7 @@
 
 html {
   -webkit-text-size-adjust: 100%;
-  scroll-padding-top: 84px;
+  scroll-padding-top: calc(var(--header-h, 64px) + 16px);
   scroll-behavior: smooth;
 }
 
@@ -118,7 +122,6 @@ p {
 
 a {
   color: var(--accent);
-  text-decoration: none;
   text-underline-offset: 3px;
 }
 
@@ -134,7 +137,7 @@ code,
 }
 
 :focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--focus) 70%, transparent);
+  outline: 3px solid var(--focus);
   outline-offset: 2px;
   border-radius: 6px;
 }
@@ -290,15 +293,15 @@ code,
 }
 
 .flash-up {
-  animation: flash-up 1.4s var(--ease) both;
+  animation: flash-up 1.4s var(--ease);
 }
 
 .flash-down {
-  animation: flash-down 1.4s var(--ease) both;
+  animation: flash-down 1.4s var(--ease);
 }
 
 .flash {
-  animation: flash-neutral 1.4s var(--ease) both;
+  animation: flash-neutral 1.4s var(--ease);
 }
 
 /* Entrances: each card, panel and hero line rises in turn (motion.js sets --i). */
@@ -335,15 +338,21 @@ body.is-loading .progress {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -40%;
+  left: 0;
   width: 40%;
   background: var(--grad);
+  transform: translateX(-100%);
   animation: ow-progress 1.3s var(--ease) infinite;
+}
+
+/* Once the first read lands the segment stops: a paused animation asks for no frames. */
+body:not(.is-loading) .progress::before {
+  animation-play-state: paused;
 }
 
 @keyframes ow-progress {
   to {
-    left: 100%;
+    transform: translateX(250%);
   }
 }
 
@@ -492,7 +501,7 @@ body.is-loading .progress {
   height: 8px;
   border-radius: 50%;
   background: var(--ok);
-  animation: ow-pulse 2.4s infinite;
+  animation: ow-pulse 2.4s 3;
 }
 
 /* Hero */
@@ -522,7 +531,7 @@ body.is-loading .progress {
   font-size: 0.82rem;
   font-weight: 650;
   letter-spacing: 0.01em;
-  background: var(--grad);
+  background: var(--grad-text);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -627,7 +636,7 @@ body.is-loading .progress {
 }
 
 .pill-ok::before {
-  animation: ow-pulse 2.4s infinite;
+  animation: ow-pulse 2.4s 3;
 }
 
 .pill-warn {
@@ -734,6 +743,9 @@ body.is-loading .progress {
   border-radius: 980px;
   background: var(--grad);
   transform-origin: left;
+}
+
+.bar.bar-enter span {
   animation: ow-bar 1.1s var(--ease-out) both;
 }
 
@@ -762,7 +774,7 @@ select {
   font: inherit;
   color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--field);
+  border: 1px solid var(--input-border);
   border-radius: 12px;
   padding: 10px 14px;
   width: 100%;
@@ -782,7 +794,7 @@ select {
 
 input:hover,
 select:hover {
-  border-color: var(--subtle);
+  border-color: var(--muted);
 }
 
 input:focus-visible,
@@ -799,7 +811,7 @@ input[aria-invalid="true"] {
 .input-unit {
   display: flex;
   align-items: stretch;
-  border: 1px solid var(--field);
+  border: 1px solid var(--input-border);
   border-radius: 12px;
   background: var(--surface);
   overflow: hidden;
@@ -809,7 +821,7 @@ input[aria-invalid="true"] {
 }
 
 .input-unit:hover {
-  border-color: var(--subtle);
+  border-color: var(--muted);
 }
 
 .input-unit:focus-within {
@@ -1034,7 +1046,7 @@ input[aria-invalid="true"] {
   transition: background-color 0.2s var(--ease);
 }
 
-.table tbody {
+.table.is-new tbody {
   animation: ow-fade 0.45s var(--ease) both;
 }
 
@@ -1181,7 +1193,7 @@ input[aria-invalid="true"] {
   padding: 20px;
   align-self: start;
   position: sticky;
-  top: 84px;
+  top: calc(var(--header-h, 64px) + 16px);
 }
 
 .preview .sub {
@@ -1226,6 +1238,9 @@ input[aria-invalid="true"] {
   transition:
     box-shadow 0.25s var(--ease),
     border-color 0.25s var(--ease);
+}
+
+.position.is-new {
   animation: ow-rise 0.5s var(--ease-out) both;
 }
 
@@ -1593,6 +1608,10 @@ code.err {
 .timeline li {
   position: relative;
   padding: 0 0 14px 14px;
+}
+
+.position.is-new .timeline li,
+.tl-closed[open] .timeline li {
   animation: ow-slide 0.4s var(--ease-out) both;
 }
 
@@ -1634,7 +1653,7 @@ code.err {
 
 .timeline .tl-now::before {
   background: var(--ok);
-  animation: ow-pulse 2s infinite;
+  animation: ow-pulse 2s 3;
 }
 
 .timeline .tl-next::before {
@@ -2012,7 +2031,7 @@ body.face-terminal {
   --accent: #409cff;
   --accent-strong: #0a84ff;
   --accent-hover: #2a95ff;
-  --accent-text: #ffffff;
+  --accent-text: #000000;
   --accent-soft: #0a2440;
   --ok: #30d158;
   --ok-soft: #0a2412;
@@ -2027,6 +2046,11 @@ body.face-terminal {
   --shadow-lg: 0 14px 44px rgb(0 0 0 / 70%);
   --t-id: #64d2ff;
   color-scheme: dark;
+}
+
+html:has(body.face-terminal) {
+  color-scheme: dark;
+  background: #000;
 }
 
 body.face-terminal .nav {
@@ -2175,7 +2199,8 @@ body.face-terminal .top.is-scrolled {
 }
 
 .t-input::placeholder {
-  color: #48484a;
+  color: var(--muted);
+  opacity: 1;
 }
 
 .t-input:focus,
@@ -2436,7 +2461,7 @@ body.face-terminal .top.is-scrolled {
 }
 
 .row-new td {
-  animation: ow-row-new 2.6s var(--ease) both;
+  animation: ow-row-new 2.6s var(--ease);
 }
 
 @keyframes ow-row-new {
@@ -2486,6 +2511,7 @@ body.face-terminal .top.is-scrolled {
 
 .t-tx {
   color: var(--t-id);
+  text-decoration: none;
 }
 
 .t-empty {
@@ -2534,7 +2560,7 @@ body.face-terminal .top.is-scrolled {
   border-top: 1px dashed var(--border);
 }
 
-.t-checks li {
+.t-checks.is-new li {
   animation: ow-slide 0.3s var(--ease-out) both;
   animation-delay: calc(var(--i, 0) * 45ms);
 }
@@ -2653,5 +2679,27 @@ body.face-terminal .top.is-scrolled {
     animation-iteration-count: 1 !important;
     animation-delay: 0ms !important;
     transition-duration: 0.01ms !important;
+  }
+
+  /* A still, full-width strip while loading, instead of nothing. */
+  .progress::before {
+    animation: none;
+    transform: none;
+    width: 100%;
+  }
+}
+
+/* Windows contrast themes drop box shadows: keep an outline on focused fields and selected keys. */
+@media (forced-colors: active) {
+  input:focus-visible,
+  select:focus-visible,
+  .input-unit:focus-within {
+    outline: 2px solid CanvasText;
+    outline-offset: 1px;
+  }
+
+  .face-btn[aria-pressed="true"],
+  .tab[aria-selected="true"] {
+    outline: 1px solid CanvasText;
   }
 }

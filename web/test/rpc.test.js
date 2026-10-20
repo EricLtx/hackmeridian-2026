@@ -96,3 +96,15 @@ test("many calls failing at once switch once, not back and forth", async () => {
   assert.equal(chain.rpcInfo().host, "up.example");
   assert.equal(changes.length, 1);
 });
+
+test("every endpoint down: many calls switch once, then give up instead of bouncing", async () => {
+  const down = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+  const chain = chainWith(fake("a.example", { getHealth: down }), fake("b.example", { getHealth: down }));
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change);
+  const outcomes = await Promise.allSettled(Array.from({ length: 12 }, () => chain.net(() => chain.server.getHealth(), { timeoutMs: 50, attempts: 2 })));
+  assert.ok(outcomes.every((o) => o.status === "rejected"));
+  assert.equal(changes.length, 1);
+});
