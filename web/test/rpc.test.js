@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { xdr } from "@stellar/stellar-sdk";
+import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import {
   Chain,
   HEIGHT_BUDGET_MS,
@@ -684,6 +684,47 @@ test("a read moves away on the second timeout within 30 s of the endpoint in use
   const send = chainWith(fake("a.example", {}), fake("b.example", {}));
   assert.ok(send.failover(new RpcTimeout(10_000), 0, { since: send.moveCount }));
   assert.equal(send.rpcInfo().host, "b.example");
+});
+
+test("a scan of events whose bounds came from one endpoint and whose calls moved to another starts again on that one, instead of 'startLedger must be within the ledger range'", async () => {
+  const G = "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN";
+  const raw = (ledger, name, ...topics) => ({
+    ledger,
+    ledgerClosedAt: "2026-10-20T20:00:00Z",
+    txHash: "ab".repeat(32),
+    id: `${ledger}-1`,
+    topic: [xdr.ScVal.scvSymbol(name), ...topics],
+    value: xdr.ScVal.scvVoid(),
+  });
+  const run = async (scan) => {
+    const requests = [];
+    // The first endpoint keeps ledgers 100 to 200 and fails every getEvents on the network; the second keeps 150 to 200.
+    const a = fake("a.example", {
+      getHealth: async () => ({ status: "healthy", oldestLedger: 100, latestLedger: 200 }),
+      getEvents: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    const b = fake("b.example", {
+      getHealth: async () => ({ status: "healthy", oldestLedger: 150, latestLedger: 200 }),
+      getEvents: async (request) => {
+        requests.push(request.startLedger ?? "cursor");
+        if (request.startLedger < 150) throw new Error("startLedger must be within the ledger range: 150 - 200");
+        return { events: [raw(160, "repo_opened", nativeToScVal(5n, { type: "u64" }), nativeToScVal(G, { type: "address" }))], latestLedger: 200, cursor: null };
+      },
+    });
+    const chain = chainWith(a, b);
+    return { result: await scan(chain), requests, host: chain.rpcInfo().host };
+  };
+  const tape = await run((chain) => chain.contractEvents(100));
+  assert.equal(tape.result.events.length, 1);
+  assert.equal(tape.result.events[0].event, "repo_opened");
+  assert.equal(tape.result.nextLedger, 200);
+  assert.deepEqual(tape.requests, [100, 150], "refused once with the first endpoint's bound, then asked with its own");
+  assert.equal(tape.host, "b.example");
+  const openings = await run((chain) => chain.repoOpenings(G, 100));
+  assert.deepEqual([...openings.result.openings.keys()], [5]);
+  assert.deepEqual(openings.requests, [100, 150]);
 });
 
 test("every move between endpoints is told in a sentence", () => {

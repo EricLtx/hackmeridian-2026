@@ -1097,8 +1097,6 @@ export class Chain {
    * it does not replace it.
    */
   async repoOpenings(borrower, startLedger = null) {
-    const health = await this.net(() => this.server.getHealth());
-    const start = Math.max(startLedger ?? health.oldestLedger, health.oldestLedger);
     const filters = [
       {
         type: "contract",
@@ -1106,21 +1104,44 @@ export class Chain {
         topics: [[sv.symbol("repo_opened").toXDR("base64"), "*", sv.address(borrower).toXDR("base64")]],
       },
     ];
-    const openings = new Map();
-    let request = { startLedger: Math.min(start, health.latestLedger), filters, limit: 100 };
-    let latest = health.latestLedger;
-    // Each response covers a bounded ledger range; follow the cursor to the tip.
-    for (let page = 0; page < 40; page += 1) {
-      const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
-      for (const event of response.events) {
-        openings.set(Number(scValToNative(event.topic[1])), { txHash: event.txHash, ledger: event.ledger });
+    return this.onOneEndpoint(async () => {
+      const health = await this.net(() => this.server.getHealth());
+      const start = Math.max(startLedger ?? health.oldestLedger, health.oldestLedger);
+      const openings = new Map();
+      let request = { startLedger: Math.min(start, health.latestLedger), filters, limit: 100 };
+      let latest = health.latestLedger;
+      // Each response covers a bounded ledger range; follow the cursor to the tip.
+      for (let page = 0; page < 40; page += 1) {
+        const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
+        for (const event of response.events) {
+          openings.set(Number(scValToNative(event.topic[1])), { txHash: event.txHash, ledger: event.ledger });
+        }
+        latest = response.latestLedger;
+        if (!response.cursor || response.cursor === request.cursor) break;
+        if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
+        request = { cursor: response.cursor, filters, limit: 100 };
       }
-      latest = response.latestLedger;
-      if (!response.cursor || response.cursor === request.cursor) break;
-      if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
-      request = { cursor: response.cursor, filters, limit: 100 };
+      return { openings, nextLedger: latest };
+    });
+  }
+
+  /**
+   * Runs `read`, a read whose later calls depend on an earlier one: a scan
+   * of events takes its ledger bounds from the `getHealth` of the endpoint
+   * in use, and another endpoint keeps another range. When the calls moved
+   * while `read` ran and it failed ("startLedger must be within the ledger
+   * range" from the endpoint that now answers), it runs once more from the
+   * start, on the endpoint now in use.
+   */
+  async onOneEndpoint(read) {
+    for (let attempt = 0; ; attempt += 1) {
+      const since = this.moveCount;
+      try {
+        return await read();
+      } catch (error) {
+        if (attempt > 0 || this.moveCount === since) throw error;
+      }
     }
-    return { openings, nextLedger: latest };
   }
 
   /**
@@ -1163,22 +1184,24 @@ export class Chain {
    * event name taken out of the topics. Returns `{ events, nextLedger }`.
    */
   async contractEvents(startLedger = null, { maxPages = 20 } = {}) {
-    const health = await this.net(() => this.server.getHealth());
-    const wanted = startLedger ?? health.oldestLedger;
-    const start = Math.min(Math.max(wanted, health.oldestLedger), health.latestLedger);
     const filters = [{ type: "contract", contractIds: [this.contracts.openWindow] }];
-    const events = [];
-    let request = { startLedger: start, filters, limit: 100 };
-    let latest = health.latestLedger;
-    for (let page = 0; page < maxPages; page += 1) {
-      const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
-      for (const raw of response.events) events.push(decodeEvent(raw));
-      latest = response.latestLedger;
-      if (!response.cursor || response.cursor === request.cursor) break;
-      if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
-      request = { cursor: response.cursor, filters, limit: 100 };
-    }
-    return { events, nextLedger: latest };
+    return this.onOneEndpoint(async () => {
+      const health = await this.net(() => this.server.getHealth());
+      const wanted = startLedger ?? health.oldestLedger;
+      const start = Math.min(Math.max(wanted, health.oldestLedger), health.latestLedger);
+      const events = [];
+      let request = { startLedger: start, filters, limit: 100 };
+      let latest = health.latestLedger;
+      for (let page = 0; page < maxPages; page += 1) {
+        const response = await this.net(() => this.server.getEvents(request), { timeoutMs: EVENTS_TIMEOUT_MS });
+        for (const raw of response.events) events.push(decodeEvent(raw));
+        latest = response.latestLedger;
+        if (!response.cursor || response.cursor === request.cursor) break;
+        if (response.events.length < 100 && cursorLedger(response.cursor) >= response.latestLedger) break;
+        request = { cursor: response.cursor, filters, limit: 100 };
+      }
+      return { events, nextLedger: latest };
+    });
   }
 
   // -------------------------------------------------------------------------
