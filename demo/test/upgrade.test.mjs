@@ -55,7 +55,7 @@ function recorder({ executable = null, pending = null, now = 1_000, held = null 
     },
     read: async (fn) => {
       calls.push(["read", fn]);
-      return reads[fn];
+      return typeof reads[fn] === "function" ? reads[fn]() : reads[fn];
     },
     ledgerTime: async () => now + 600,
     sleep: async () => {},
@@ -108,4 +108,30 @@ test("propose and apply refuse before any chain call, and propose uploads, annou
   const same = recorder({ executable: sha(SHIPPED) });
   assert.equal(await upgrade.propose(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: same }), null);
   assert.deepEqual(same.calls, [["executable"]]);
+});
+
+// drill 8's stand-in for hostile code: the hash of another contract's WASM.
+const FOREIGN_CODE = wasmWith(65_536, { salt: 8 });
+
+test("apply installs only the built and expected code: a pending upgrade to other code is refused before anything is signed (TOOL-2)", async () => {
+  const io = recorder({ pending: { wasm_hash: Buffer.from(sha(FOREIGN_CODE), "hex"), eta: 1_000n } });
+  await assert.rejects(
+    upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io }),
+    new RegExp(`the pending upgrade is ${sha(FOREIGN_CODE)}, not the built and expected night_window.wasm ${sha(SHIPPED)}: nothing signed`),
+  );
+  assert.deepEqual(io.calls, [["read", "pending_upgrade"]]);
+  // Swapped during the delay: refused again right before the governor would sign.
+  const answers = [{ wasm_hash: Buffer.from(sha(SHIPPED), "hex"), eta: 1_000n }, { wasm_hash: Buffer.from(sha(FOREIGN_CODE), "hex"), eta: 1_000n }];
+  const swapped = recorder();
+  swapped.read = async (fn) => {
+    swapped.calls.push(["read", fn]);
+    return answers.shift();
+  };
+  await assert.rejects(upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: swapped }), /nothing signed/);
+  assert.equal(swapped.calls.some(([kind]) => kind === "invoke"), false);
+  // Once the expected code is the one pending, it is installed, and the monitor's baseline follows.
+  const ours = recorder({ pending: { wasm_hash: Buffer.from(sha(SHIPPED), "hex"), eta: 1_000n }, held: sha(SHIPPED) });
+  await upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: ours });
+  assert.deepEqual(ours.calls.filter(([kind]) => kind === "invoke"), [["invoke", "governor", "upgrade", sha(SHIPPED)]]);
+  assert.ok(ours.calls.some(([kind, hex]) => kind === "acknowledge" && hex === sha(SHIPPED)));
 });

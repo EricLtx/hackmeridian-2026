@@ -113,26 +113,37 @@ export async function propose(state, { wasm, expect, env = process.env, io = cha
 /**
  * Waits for the delay of the pending upgrade, installs it, checks the
  * executable the ledger holds and runs `migrate` when the stored layout is
- * behind. `wasm` and `expect` as for `propose`; `hash` is the code just
- * proposed, when `propose` ran first.
+ * behind. `wasm` and `expect` as for `propose`.
+ *
+ * Only the code built here, which is the code expected, is installed (review
+ * finding TOOL-2, 20 October 2026): the pending slot is single, and a
+ * proposal of other code (drill 8's stand-in, a stolen governor key's) may
+ * have replaced ours. The pending hash must equal both, before the wait and
+ * again right before the governor signs; otherwise nothing is signed.
  */
-export async function apply(state, { wasm, expect, hash = null, env = process.env, io = chainIo(state) }) {
-  checkUpgradeWasm(wasm, expect, env);
-  const pending = await io.read("pending_upgrade");
-  if (!pending) throw new Error("no pending upgrade: run with --propose first");
-  const wasmHash = hash ?? Buffer.from(pending.wasm_hash);
-  const eta = Number(pending.eta);
+export async function apply(state, { wasm, expect, env = process.env, io = chainIo(state) }) {
+  const built = checkUpgradeWasm(wasm, expect, env);
+  const pendingEta = async (say) => {
+    const pending = await io.read("pending_upgrade");
+    if (!pending) throw new Error("no pending upgrade: run with --propose first");
+    const hex = Buffer.from(pending.wasm_hash).toString("hex");
+    if (say) io.log(`pending upgrade ${hex}\nbuilt WASM      ${built.hex}\n--expect        ${String(expect).toLowerCase()}`);
+    if (hex !== built.hex) throw new Error(`the pending upgrade is ${hex}, not the built and expected night_window.wasm ${built.hex}: nothing signed; the governor cancels it (cancel_upgrade), then propose again`);
+    return Number(pending.eta);
+  };
+  const eta = await pendingEta(true);
   for (;;) {
     const now = await io.ledgerTime();
     if (now >= eta) break;
     io.log(`  waiting ${eta - now} s for the delay`);
     await io.sleep(Math.min(30_000, (eta - now) * 1000 + 1000));
   }
-  const up = await io.invoke("governor", "upgrade", [sv.bytes(wasmHash)]);
+  await pendingEta(false);
+  const up = await io.invoke("governor", "upgrade", [sv.bytes(built.hash)]);
   io.log(`upgraded in ${up.seconds.toFixed(1)} s  ${explorer(up.hash)}`);
   const held = await io.executableHash();
   io.log(`ledger executable ${held}`);
-  if (held !== Buffer.from(wasmHash).toString("hex")) throw new Error("the ledger holds another executable: stop and investigate");
+  if (held !== built.hex) throw new Error("the ledger holds another executable: stop and investigate");
   io.acknowledge(held);
   io.log("monitor baseline moved to the new executable; a running watch takes it up at its next pass");
   // Pre-rc4 code has no schema_version: read it through the new code, after the upgrade.
@@ -157,7 +168,7 @@ async function main(args) {
   if (args.includes("--apply")) return apply(state, { wasm, expect });
   const proposed = await propose(state, { wasm, expect });
   if (!proposed || args.includes("--propose")) return;
-  await apply(state, { wasm, expect, hash: proposed.hash });
+  await apply(state, { wasm, expect });
 }
 
 // Run as a script; imported by the tests, it only exports the flows.
