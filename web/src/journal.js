@@ -1,11 +1,42 @@
-// The indexer's export (history.json) as the History page shows it. The
-// export is a committed file the page fetches, read with the care the
-// deployment file gets: its explorer must be an https URL, its cells may be
-// anything, and the decimals come from the deployment file only when they
-// are usable. Pure: no DOM, no network.
+// The indexer's export (history.json) as the History page shows it, and as
+// the market page reads it for its timelines. The export is a committed file
+// the page fetches, read with the care the deployment file gets: its
+// explorer must be an https URL, its cells may be anything, and the decimals
+// come from the deployment file only when they are usable. Pure: no DOM, and
+// no network but the fetch a caller hands to `loadExport`.
 
 import { httpsUrl, isDecimals, isTicker } from "./deployment.js";
 import { shortAddress } from "./format.js";
+
+/** How long the market page waits for the export before it draws without it. */
+export const EXPORT_WAIT_MS = 2000;
+
+/**
+ * The export for the market page's timelines: `fetchExport()` resolves the
+ * parsed file (or null), and this resolves `{ generatedAt, events }`, or
+ * null when the export is missing, unreachable or malformed, or not there
+ * within `waitMs`. The export is optional: a render never waits longer for
+ * it, and one that lands later is handed to `onLate`, which fills the
+ * timelines then.
+ */
+export async function loadExport(fetchExport, { waitMs = EXPORT_WAIT_MS, onLate = () => {} } = {}) {
+  const loading = Promise.resolve()
+    .then(fetchExport)
+    .then((h) => (Array.isArray(h?.events) ? { generatedAt: h.generatedAt, events: h.events } : null))
+    .catch(() => null);
+  const late = Symbol("late");
+  let timer;
+  const bound = new Promise((resolve) => {
+    timer = setTimeout(resolve, waitMs, late);
+  });
+  const first = await Promise.race([loading, bound]);
+  clearTimeout(timer);
+  if (first !== late) return first;
+  loading.then((h) => {
+    if (h) onLate(h);
+  });
+  return null;
+}
 
 /** Text made safe for markup. */
 export const esc = (value) =>

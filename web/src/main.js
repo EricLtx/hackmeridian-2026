@@ -4,10 +4,11 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
-import { Chain, rpcChangeText } from "./chain.js";
+import { Chain, rpcChangeText, unverifiedText } from "./chain.js";
 import { checkDeployment, privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
 import { describeError } from "./errors.js";
+import { loadExport } from "./journal.js";
 import {
   UNSHOWABLE,
   formatAge,
@@ -37,7 +38,7 @@ import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
-import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t } from "./i18n.js";
+import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t, tn } from "./i18n.js";
 import { flashChanges, initMotion, setLoading, snapshot, toast, transition } from "./motion.js";
 
 const REFRESH_MS = 15_000;
@@ -64,6 +65,8 @@ const S = {
   mine: new Map(), // repos I borrowed, by id
   lent: new Map(), // repos on my offers, by id
   nextRepo: 1, // first repo id not scanned yet
+  unreadable: new Set(), // repo ids the scan could not read (a field missing from the chain's answer)
+  positionsError: null, // what stopped the last read of the positions, shown in the panel
   dues: new Map(),
   openings: new Map(), // repo id -> opening tx, from events
   releases: new Map(), // closed repo id -> shares held back (the token refused them, or the lender awaits approval)
@@ -161,6 +164,13 @@ function tracker(el) {
         hash ? ` ${link(S.chain.explorerTx(hash), t("View on Stellar Expert"))}` : ""
       }`;
     },
+    /** Applied according to the endpoint in use, which no other endpoint could confirm: amber, never "Confirmed". */
+    unverified(message, { hash, unverified }) {
+      el.className = "tx tx-unverified";
+      el.innerHTML = `<span class="icon" aria-hidden="true">?</span><span>${esc(message)} ${esc(unverifiedText(unverified.host))}</span>${
+        hash ? ` ${link(S.chain.explorerTx(hash), t("View on Stellar Expert"))}` : ""
+      }`;
+    },
     fail(error, context) {
       const { text, name } = describeError(error, context);
       el.className = "tx tx-error";
@@ -181,7 +191,9 @@ function syncWriteButtons() {
 
 /**
  * Runs one write. `context` feeds the error sentences; `message(result)`
- * is the success line. Everything is refreshed afterwards either way.
+ * is the success line. A write that no second endpoint could confirm
+ * (`result.unverified`) ends in amber, as applied according to one endpoint.
+ * Everything is refreshed afterwards either way, and the page is free again.
  */
 async function runTx(el, context, action, message) {
   if (S.busy) return;
@@ -190,7 +202,10 @@ async function runTx(el, context, action, message) {
   const track = tracker(el);
   try {
     const result = await action((status) => track.update(status));
-    if (result?.hash) {
+    if (result?.unverified) {
+      track.unverified(message(result), result);
+      toast(`${message(result)} ${unverifiedText(result.unverified.host)}`, { tone: "warn", announce: false });
+    } else if (result?.hash) {
       track.success(message(result), result);
       toast(message(result), { tone: "ok", announce: false });
     }
@@ -399,7 +414,25 @@ function renderFunds(funds) {
   );
 }
 
+/**
+ * Draws one part of the page on its own, as the board's tiles are: a value it
+ * cannot show leaves a short note in `el`, and the pass, with the wallet,
+ * positions and terminal after it, goes on (WEB-5).
+ */
+function drawPart(el, label, draw) {
+  try {
+    draw();
+  } catch (error) {
+    console.warn(label, error);
+    if (el) setHTML(el, `<span class="text-error">${esc(t(UNSHOWABLE))}</span>`);
+  }
+}
+
 function renderQuote(result, shares) {
+  drawPart($("quote-out"), "quote", () => drawQuote(result, shares));
+}
+
+function drawQuote(result, shares) {
   const out = $("quote-out");
   if (!shares || shares <= 0n) {
     setHTML(out, `<span class="muted">${esc(t("Enter a number of shares."))}</span>`);
@@ -411,6 +444,10 @@ function renderQuote(result, shares) {
 }
 
 function renderOffers() {
+  drawPart($("offers"), "offers", drawOffers);
+}
+
+function drawOffers() {
   const fund = S.chain.fund;
   const offers = S.offers.filter((o) => o.funds.includes(fund) && o.available > 0n);
   if (S.board?.offers.error && !S.offers.length) {
@@ -570,6 +607,8 @@ function adoptWallet(wallet) {
   S.mine = new Map();
   S.lent = new Map();
   S.nextRepo = 1;
+  S.unreadable = new Set();
+  S.positionsError = null;
   S.dues = new Map();
   S.openings = new Map();
   S.releases = new Map();
@@ -600,6 +639,8 @@ function disconnect(reason = null) {
   S.balances = null;
   S.mine = new Map();
   S.lent = new Map();
+  S.unreadable = new Set();
+  S.positionsError = null;
   try {
     localStorage.removeItem(REMEMBER_KEY);
   } catch {
@@ -819,10 +860,17 @@ function submitBorrow(event) {
 // Positions
 // ---------------------------------------------------------------------------
 
+/**
+ * Reads the wallet's repos: the scan from the first id not scanned yet, then
+ * the tracked open ones again. A repo the boundary refuses is skipped and
+ * counted (`S.unreadable`, shown in the panel), never shown with a field
+ * missing; the scan goes on past it, and `refreshWallet` keeps one failure
+ * here from stopping the rest of the pass (WEB-5).
+ */
 async function refreshPositions() {
   const address = S.wallet?.address;
   if (!address) return;
-  const fresh = await S.chain.repos(S.nextRepo);
+  const { repos: fresh, unreadable } = await S.chain.readRepos(S.nextRepo);
   if (S.wallet?.address !== address) return;
   const keep = (repo) => {
     if (repo.borrower === address) S.mine.set(repo.id, repo);
@@ -830,15 +878,26 @@ async function refreshPositions() {
   };
   for (const repo of fresh) {
     keep(repo);
+    S.unreadable.delete(repo.id);
     S.nextRepo = Math.max(S.nextRepo, repo.id + 1);
   }
-  // Closed repos never change; open ones close by repurchase or seizure.
+  // An unreadable id stays before `nextRepo` when it is the last one: it is read again on the next pass.
+  for (const id of unreadable) S.unreadable.add(id);
+  // Closed repos never change; open ones close by repurchase or seizure. One that cannot be read now keeps its last reading.
   const freshIds = new Set(fresh.map((r) => r.id));
   const tracked = new Map([...S.mine, ...S.lent]);
   const recheck = [...tracked.values()].filter((r) => r.status === "Open" && !freshIds.has(r.id));
-  for (const repo of await Promise.all(recheck.map((r) => S.chain.repo(r.id)))) {
-    if (repo) keep(repo);
+  const again = await Promise.all(recheck.map((r) => S.chain.repo(r.id).then((repo) => ({ id: r.id, repo }), (error) => ({ id: r.id, error }))));
+  for (const { id, repo, error } of again) {
+    if (error) {
+      console.warn(`repo #${id} could not be read again: ${error?.message ?? error}`);
+      S.unreadable.add(id);
+    } else if (repo) {
+      keep(repo);
+      S.unreadable.delete(id);
+    }
   }
+  S.positionsError = null;
   const open = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status === "Open");
   await Promise.all(
     open.map(async (r) => {
@@ -887,7 +946,11 @@ function renderPositions() {
   const repos = [...S.mine.values()].sort((a, b) => b.id - a.id);
   const open = repos.filter((r) => r.status === "Open");
   const closed = repos.filter((r) => r.status !== "Open");
-  meta.textContent = repos.length ? t("{open} open, {closed} closed", { open: open.length, closed: closed.length }) : "";
+  const notes = [];
+  if (repos.length) notes.push(t("{open} open, {closed} closed", { open: open.length, closed: closed.length }));
+  if (S.unreadable.size) notes.push(tn("{n} repo could not be read", "{n} repos could not be read", S.unreadable.size));
+  if (S.positionsError) notes.push(S.positionsError);
+  meta.textContent = notes.join(" · ");
   if (!repos.length) {
     setHTML(body, `<p class="muted">${esc(t("No positions yet. Borrow above to open one."))}</p>`);
     return;
@@ -1225,7 +1288,15 @@ async function refreshWallet() {
   renderBorrow();
   renderLend();
   // The terminal keeps its own view of every repo; the guided view's positions catch up when it returns.
-  if (S.face !== "terminal") await refreshPositions();
+  if (S.face === "terminal") return;
+  try {
+    await refreshPositions();
+  } catch (error) {
+    // A failed read of the positions is told in their panel: it never skips the terminal's refresh nor the "Updated" line (WEB-5).
+    console.warn("positions", error);
+    S.positionsError = describeError(error).text;
+    renderPositions();
+  }
 }
 
 /**
@@ -1240,8 +1311,9 @@ async function refreshAll({ history = false } = {}) {
   S.refreshing = true;
   const updated = $("board-updated");
   try {
-    // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger.
-    await S.chain.checkHeights();
+    // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger;
+    // the poll holds the pass 1.5 s at most (a silent endpoint), and a move it decides later applies to later calls.
+    await S.chain.pollHeights();
     await refreshBoard();
     if (S.historyDue) {
       S.historyDue = false;
@@ -1409,18 +1481,33 @@ function wire() {
 
 /**
  * The indexer's export, when it sits next to the page: it dates and links the
- * closing steps of the timelines. Optional. "no-cache" revalidates it with
- * the host, which answers 304 while it is unchanged.
+ * closing steps of the timelines. Optional: the first render, or a pass that
+ * fetches it again, waits for it EXPORT_WAIT_MS at most, and one that lands
+ * later fills the timelines then. Without it, the timelines show what the
+ * chain alone tells. "no-cache" revalidates it with the host, which answers
+ * 304 while it is unchanged.
  */
+let historyLoads = 0;
+let historyApplied = 0;
 async function loadHistory() {
-  try {
+  const load = (historyLoads += 1);
+  // An export that lands after a newer one was applied is dropped.
+  const apply = (h) => {
+    if (load < historyApplied) return false;
+    historyApplied = load;
+    S.history = h;
+    return true;
+  };
+  const fetchExport = async () => {
     const response = await fetch("./history.json", { cache: "no-cache" });
-    if (!response.ok) return;
-    const h = await response.json();
-    if (Array.isArray(h?.events)) S.history = { generatedAt: h.generatedAt, events: h.events };
-  } catch {
-    // No export: the timelines show what the chain alone tells.
-  }
+    return response.ok ? response.json() : null;
+  };
+  const h = await loadExport(fetchExport, {
+    onLate: (late) => {
+      if (apply(late) && S.chain && S.face !== "terminal") renderPositions();
+    },
+  });
+  if (h) apply(h);
 }
 
 /** The footer: the contracts behind the page, each linked to the explorer, the endpoint in use and who sees the visitor's reads. */
@@ -1498,9 +1585,9 @@ async function start() {
   // page waits for the instance settings below.
   if (initialFace() === "terminal") setFace("terminal", { persist: false });
   wire();
-  await loadHistory();
+  // The export (2 s at most, EXPORT_WAIT_MS) and the instance settings are read together.
   const ow = S.dep.contracts.openWindow;
-  const [delay, version] = await Promise.all([S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
+  const [, delay, version] = await Promise.all([loadHistory(), S.chain.settle(ow, "timelock_delay"), S.chain.settle(ow, "version")]);
   S.delay = delay.value === undefined ? null : Number(delay.value);
   S.version = version.value === undefined ? null : Number(version.value);
   renderGuide();

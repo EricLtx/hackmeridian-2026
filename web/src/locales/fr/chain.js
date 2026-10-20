@@ -23,8 +23,10 @@ export default {
   "{host} reports it failed.": "{host} la signale comme échouée.",
   "{host} does not know it, and its validity window has passed.": "{host} ne la connaît pas, et sa fenêtre de validité est passée.",
   "{host} did not confirm it in time.": "{host} ne l'a pas confirmée à temps.",
+  "Applied according to {host}; no second endpoint could confirm it.": "Appliquée selon {host} ; aucun second point d'accès n'a pu la confirmer.",
   "RPC {from} did not answer in time: switched to {to}.": "Le RPC {from} n'a pas répondu à temps : bascule vers {to}.",
   "RPC {from} is {n} ledgers behind: switched to {to}.": "Le RPC {from} a {n} ledgers de retard : bascule vers {to}.",
   "RPC {to} has caught up: switched back to it.": "Le RPC {to} est de nouveau à jour : retour vers lui.",
   "RPC {from} failed: switched to {to}.": "Le RPC {from} a échoué : bascule vers {to}.",
+  "RPC {from} keeps refusing requests as too many: switched to {to}.": "Le RPC {from} continue de refuser les requêtes comme trop nombreuses : bascule vers {to}.",
 };

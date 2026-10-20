@@ -110,18 +110,29 @@ const ALWAYS_TAGS = new Set([
  * The HTML tags of a text, attributes included, in a fixed order. Some
  * translations are inserted as markup: a translation must carry exactly the
  * tags of its source, so a translation-only change cannot add a link, an
- * image or a redirect to the page. A bare `<word>` with no closing tag is
- * usage notation ("Q <shares> [FUND]"), translated like any word, unless the
- * word names an element in ALWAYS_TAGS.
+ * image or a redirect to the page. A tag name is read as the HTML parser
+ * reads it, a letter then anything up to a space, a slash or `>`: an
+ * element such as `<x:y style="…">` is a tag too (its style would apply).
+ * A bare `<word>` with no closing tag is usage notation ("Q <shares>
+ * [FUND]"), translated like any word, unless the word names an element in
+ * ALWAYS_TAGS. A `<` followed by a letter that no `>` ever closes is a tag
+ * too, listed as `<name…`: the parser reads an unterminated tag on to the
+ * `>` of whatever markup follows the text, so `<b style="…"` at the end of
+ * a translation becomes an element with that style.
  */
 export function tagsOf(s) {
-  const found = [...String(s).matchAll(/<(\/?)([A-Za-z][A-Za-z0-9-]*)([\s/][^>]*)?>/g)];
+  const text = String(s);
+  const found = [...text.matchAll(/<(\/?)([A-Za-z][^\s/>]*)([\s/][^>]*)?>/g)];
   const closed = new Set(found.filter((m) => m[1]).map((m) => m[2].toLowerCase()));
-  return found
+  const tags = found
     .filter(([, slash, name, rest]) => slash || (rest ?? "").trim() || ALWAYS_TAGS.has(name.toLowerCase()) || closed.has(name.toLowerCase()))
-    .map((m) => m[0].replace(/\s+/g, " "))
-    .sort()
-    .join(" ");
+    .map((m) => m[0].replace(/\s+/g, " "));
+  // A comment or a processing instruction is markup too, complete or not.
+  for (const m of text.matchAll(/<!--[^]*?-->|<\?[^>]*>/g)) tags.push(m[0].replace(/\s+/g, " "));
+  // What is left once every complete tag is removed holds no `>`: an open `<letter`, `<!--` or `<?` there never ends.
+  const rest = text.replace(/<!--[^]*?-->|<\?[^>]*>/g, " ").replace(/<(\/?)([A-Za-z][^\s/>]*)([\s/][^>]*)?>/g, " ");
+  for (const m of rest.matchAll(/<(?:\/?[A-Za-z][^\s/<]*|!--|\?)/g)) tags.push(`${m[0]}…`);
+  return tags.sort().join(" ");
 }
 
 /** The default sources: every module of src/ except the language module, and both pages. */

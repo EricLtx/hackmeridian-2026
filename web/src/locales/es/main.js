@@ -114,6 +114,8 @@ export default {
   "Repo #{id} opened: {amount} sent to your wallet.": "Repo #{id} abierto: {amount} enviados a su billetera.",
   "Connect a wallet to see your positions.": "Conecte una billetera para ver sus posiciones.",
   "{open} open, {closed} closed": "Abiertas: {open}, cerradas: {closed}",
+  "{n} repo could not be read": "{n} repo no se pudo leer",
+  "{n} repos could not be read": "{n} repos no se pudieron leer",
   "No positions yet. Borrow above to open one.": "Todavía no hay posiciones. Pida un préstamo arriba para abrir una.",
   "now": "ahora",
   "Opening transaction": "Transacción de apertura",

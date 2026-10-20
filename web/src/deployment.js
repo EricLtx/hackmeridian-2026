@@ -4,13 +4,15 @@
 // anything uses them. A copy of the page that edits only this file cannot
 // point it at another network. Pure: no DOM, no network.
 
-import { Networks } from "@stellar/stellar-sdk";
+import { Networks, StrKey } from "@stellar/stellar-sdk";
 import { MAX_DECIMALS } from "./format.js";
 import { locale, t } from "./i18n.js";
 
 const TICKER = /^[A-Za-z0-9]{1,12}$/;
 const HTTPS = /^https:\/\/[^\s"'<>]+$/;
-const CONTRACT = /^C[A-Z2-7]{55}$/;
+
+/** A contract strkey, its checksum included: a typo that keeps the alphabet would make every read that uses it fail. */
+const isContract = (address) => typeof address === "string" && StrKey.isValidContract(address);
 
 /** A whole number of decimals the page can format: 0 to 38. */
 export const isDecimals = (value) => Number.isInteger(value) && value >= 0 && value <= MAX_DECIMALS;
@@ -76,7 +78,7 @@ export function checkDeployment(dep) {
   if (dep.rpcFallbacks !== undefined && !Array.isArray(dep.rpcFallbacks)) throw new Error(t("unexpected URL"));
   if (![dep.rpcUrl, dep.explorer, ...(dep.rpcFallbacks ?? [])].every((u) => httpsUrl(u))) throw new Error(t("unexpected URL"));
   if (!isDecimals(dep.stablecoin.decimals) || !isDecimals(dep.fund.decimals)) throw new Error(t("unexpected decimals"));
-  // Every address the page turns into an ScVal: a malformed one would stop each read that uses it.
+  // Every address the page turns into an ScVal, checksum included: a malformed one would stop each read that uses it.
   const lists = [dep.funds, dep.stablecoins];
   if (lists.some((list) => list !== undefined && !Array.isArray(list))) throw new Error(t("unexpected contract address"));
   const given = (a) => a !== undefined && a !== null;
@@ -85,6 +87,6 @@ export function checkDeployment(dep) {
     ...(dep.funds ?? []).flatMap((f) => [f?.shares, ...(given(f?.navFeed) ? [f.navFeed] : [])]),
     ...(dep.stablecoins ?? []).map((c) => c?.contract).filter(given),
   ];
-  if (!dep.contracts?.openWindow || !addresses.every((a) => CONTRACT.test(String(a)))) throw new Error(t("unexpected contract address"));
+  if (!dep.contracts?.openWindow || !addresses.every(isContract)) throw new Error(t("unexpected contract address"));
   return dep;
 }

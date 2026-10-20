@@ -20,6 +20,7 @@ import {
   tapeTime,
   withdrawTicket,
 } from "../src/blotter.js";
+import { setLang } from "../src/i18n.js";
 
 const ONE = 10_000_000n;
 const H = 3600;
@@ -190,6 +191,34 @@ test("the valuation behind an opening has its own tape line: price per share and
   assert.equal(tapeLine({ ...valued, data: { price: "oops", haircut_bps: "oops" } }, ctx).text, "#12 tMMF valued at 0.0000 tEUR per share, haircut 0.00 %");
 });
 
+test("a valuation priced by the fund's backup feed says so on the tape (rc5, RepoValued.fallback)", () => {
+  const valued = (fallback) => ({
+    event: "repo_valued",
+    topics: ["12", F1],
+    data: { nav: "108500000000000", nav_time: "1792000000", fx: "0", fx_applied: "0", fx_time: "0", price: "96892302196820", haircut_bps: 400, ...(fallback === undefined ? {} : { fallback }) },
+    closedAt: new Date(T0 * 1000).toISOString(),
+    txHash: "feedface02",
+  });
+  const ctx = { sd: 7, fd: 7, code: "tEUR", now: T0, symbolOf: (a) => (a === F1 ? "tMMF" : "?"), navDecimalsOf: (a) => (a === F1 ? 14 : null) };
+  const backup = tapeLine(valued(true), ctx);
+  assert.deepEqual([backup.code, backup.tone, backup.repoId, backup.known], ["VALUE", "warn", 12, true]);
+  assert.equal(backup.text, "#12 tMMF valued by the backup feed at 0.9689 tEUR per share, haircut 4.00 %");
+  assert.equal(tapeLine(valued(true), { ...ctx, navDecimalsOf: () => null }).text, "#12 tMMF valued by the backup feed, haircut 4.00 %");
+  // The primary feed, or an event published before the field existed: the line as before.
+  for (const fallback of [false, undefined, "true", 1]) {
+    const line = tapeLine(valued(fallback), ctx);
+    assert.deepEqual([line.tone, line.text], ["dim", "#12 tMMF valued at 0.9689 tEUR per share, haircut 4.00 %"], String(fallback));
+  }
+  try {
+    setLang("fr");
+    assert.equal(tapeLine(valued(true), ctx).text, "#12 tMMF valorisé par le flux de secours à 0,9689 tEUR par part, décote 4,00 %");
+    setLang("es");
+    assert.equal(tapeLine(valued(true), ctx).text, "#12 tMMF valorado por la fuente de respaldo a 0,9689 tEUR por participación, recorte 4,00 %");
+  } finally {
+    setLang("en");
+  }
+});
+
 test("a malformed event never stops the tape", () => {
   const ctx = { sd: 7, fd: 7, code: "tEUR", now: T0, symbolOf: (a) => (a === F1 ? "tMMF" : a.slice(0, 4)) };
   // An RPC or an export can carry a rate that is not a number: it reads as 0, it does not throw.
@@ -323,6 +352,25 @@ test("a deferred delivery waits for the share token or for the lender's approval
   assert.equal(deferred.text, "#4 1,000.00 shares owed to GLEN…AAAL: the delivery waits for the share token or for the lender's approval");
   const note = releaseTicket({ repoId: 4, pending: { to: ME, shares: 10n * ONE }, wallet: ME, sym: "tMMF" }).note;
   assert.match(note, /While the share token refuses them, or a lender beneficiary is not approved for the fund, nothing moves/);
+});
+
+test("the seize ticket says the shares wait in the contract when the lender is not approved (WEB-8)", () => {
+  // Since rc5 a lender whose approval was revoked may still seize: the repo settles, the shares wait in the contract.
+  const repo = { id: 7, status: "Open", borrower: OTHER, lender: ME, fund: F1, principal: 500n * ONE, rate_bps: 300, opened_at: T0, maturity: T0 + 64 * H, shares: 600n * ONE };
+  const note = () => seizeTicket({ repo, wallet: ME, now: T0 + 65 * H, code: "tEUR", sym: "tMMF" }).note;
+  assert.doesNotMatch(note(), /which the issuer approved/, "no promise the ticket cannot check");
+  assert.equal(
+    note(),
+    "The shares go to your address if the issuer approves you as lender for this fund; if not, the repo still settles and the shares wait in the contract until it approves you again (REL then delivers them). The borrower can still repurchase until this lands.",
+  );
+  try {
+    setLang("fr");
+    assert.match(note(), /sinon, le repo est tout de même dénoué et les parts attendent dans le contrat/);
+    setLang("es");
+    assert.match(note(), /si no, el repo se liquida igualmente y las participaciones esperan en el contrato/);
+  } finally {
+    setLang("en");
+  }
 });
 
 test("the quote view and the band", () => {
