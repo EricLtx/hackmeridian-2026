@@ -33,11 +33,12 @@ export const LIMITS = {
   // value by design: set the threshold to Infinity for it (`--nav-frozen-hours=`).
   navFrozenHours: 72,
   // The keeper pays the rent. Its largest bill is one 30-day slice of the
-  // contract code: about 215 XLM at the testnet rate measured on 20 October
-  // 2026 (7.15 XLM a day for the 1.88 MB the network counts for the rc4
-  // code; rc5's is about 2 % larger). 250 XLM covers one slice, the small
-  // entries' extensions and the fees.
-  keeperMinXlm: 250,
+  // contract code, and the testnet rate moves: 7.15 XLM a day in the
+  // morning of 20 October 2026, 8.35 to 8.40 XLM a day in the afternoon,
+  // so about 250 XLM a slice for the rc4 code and 257 XLM for rc5's, about
+  // 2 % larger (review finding TOOL-6). 600 XLM covers two slices, the
+  // small entries' extensions and the fees.
+  keeperMinXlm: 600,
   rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
   // A re-stamped frozen feed is bounded neither by the corridor nor by the
   // band (residual risk of Tamper.6 and Tamper.7). A variable NAV moves every
@@ -49,6 +50,8 @@ export const LIMITS = {
 export const LEDGER_SECS = 5;
 /** Largest extension of the code entry in one transaction, in days. */
 export const CODE_STEP_DAYS = 30;
+/** The code entry is never extended beyond this many days of life. */
+export const CODE_MAX_DAYS = 120;
 /** What the small entries are extended to, in ledgers: about 140 days. */
 export const ENTRY_EXTEND_LEDGERS = 2_419_200;
 
@@ -529,7 +532,7 @@ export const DETECTORS = {
     if (s.keeperXlm === null) return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} account not readable`, action: "check the account" }];
     const min = monitor.keeperMinXlmOverride ?? limits.keeperMinXlm;
     if (s.keeperXlm >= min) return [];
-    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM: one 30-day extension of the contract code costs about 215 XLM on testnet (rate measured on 20 October 2026)`, action: "top up the keeper from treasury" }];
+    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM, two 30-day extensions of the contract code: one costs about 250 XLM on testnet (8.35 to 8.40 XLM a day on 20 October 2026), and the rate moves`, action: "top up the keeper from treasury" }];
   },
   events(s) {
     // Every repo opened inside the event window must have its repo_opened event (Repud.1).
@@ -730,9 +733,10 @@ export function decideActions(alerts, s, monitor = {}, { actor = "guardian", key
   const small = extend.filter((a) => a.kind !== "code").map((a) => a.key);
   if (small.length) actions.push({ kind: "extend", keys: small, ledgers: ENTRY_EXTEND_LEDGERS, belowDays: limits.ttlDays });
   // The code entry is large: extend it by 30 days at most per transaction, so
-  // its rent stays well under the largest fee a transaction may carry.
+  // its rent stays well under the largest fee a transaction may carry. The
+  // life it has now (`days`) sizes a shorter slice when the rent has risen.
   for (const a of extend.filter((x) => x.kind === "code")) {
-    actions.push({ kind: "extend_code", key: a.key, targetDays: Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120), belowDays: limits.codeTtlDays });
+    actions.push({ kind: "extend_code", key: a.key, days: a.days, targetDays: Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, CODE_MAX_DAYS), belowDays: limits.codeTtlDays });
   }
   // rc5: an old price reference is stepped along the model by the keeper.
   for (const a of alerts.filter((x) => x.action === "refresh_reference" && x.fund)) {

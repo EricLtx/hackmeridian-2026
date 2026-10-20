@@ -384,11 +384,12 @@ test("feed-flat: an FX rate flat over 24 business hours warns; a second FX sourc
   assert.deepEqual(compare(null), []);
 });
 
-test("keeper: the float must cover one 30-day slice of the code, about 215 XLM on testnet", () => {
-  assert.equal(LIMITS.keeperMinXlm, 250);
-  assert.deepEqual(run("keeper", snap({ keeperXlm: 250 })), []);
-  const [low] = run("keeper", snap({ keeperXlm: 249.9 }));
-  assert.match(low.message, /float 249\.9 XLM is below 250 XLM: one 30-day extension of the contract code costs about 215 XLM on testnet/);
+test("keeper: the float must cover two 30-day slices of the code, about 250 XLM each on testnet (TOOL-6)", () => {
+  assert.equal(LIMITS.keeperMinXlm, 600);
+  assert.deepEqual(run("keeper", snap({ keeperXlm: 600 })), []);
+  // 250 XLM, the old threshold, no longer pays one slice at the rate of 20 October afternoon.
+  const [low] = run("keeper", snap({ keeperXlm: 250 }));
+  assert.match(low.message, /float 250\.0 XLM is below 600 XLM, two 30-day extensions of the contract code: one costs about 250 XLM on testnet \(8\.35 to 8\.40 XLM a day on 20 October 2026\), and the rate moves$/);
 });
 
 test("exposure: one opening per pass never warns; more than 20 within the last hour does", () => {
@@ -453,6 +454,8 @@ test("decideActions: cancellation and extensions follow the alerts, in order", (
   assert.deepEqual(actions.map((a) => a.kind), ["cancel_upgrade", "cancel_stablecoin", "extend", "extend_code", "refresh_reference"]);
   assert.deepEqual([actions[0].role, actions[0].hash], ["sentinel", "ab".repeat(32)]);
   assert.deepEqual([actions[3].targetDays, actions[3].belowDays, actions[2].belowDays], [119, 90, 14]);
+  // The code's life now goes with the action: it sizes a shorter slice when the rent has risen (TOOL-6).
+  assert.equal(actions[3].days, 89);
   // An announced code is never cancelled, whatever an event alert asked.
   assert.deepEqual(decideActions(alerts.slice(0, 1), s, { announced: ["ab".repeat(32)] }, {}).actions, []);
 });

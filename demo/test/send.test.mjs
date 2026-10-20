@@ -50,13 +50,15 @@ beforeEach(() => {
   answer = { auth: [], readOnly: [instanceKey(OW)], readWrite: [], fee: 1n * XLM };
   server.getAccount = async (publicKey) => new Account(publicKey, "100");
   server.getLatestLedger = async () => ({ sequence: 1_000, closeTime: "1800000000" });
-  server.simulateTransaction = async () => {
+  server.simulateTransaction = async (tx) => {
     simulations += 1;
-    const data = new SorobanDataBuilder().setReadOnly(answer.readOnly).setReadWrite(answer.readWrite).setResourceFee(answer.fee).build();
+    // The fee may depend on the transaction: an extension's rent on the days it adds.
+    const fee = typeof answer.fee === "function" ? answer.fee(tx) : answer.fee;
+    const data = new SorobanDataBuilder().setReadOnly(answer.readOnly).setReadWrite(answer.readWrite).setResourceFee(fee).build();
     return rpc.parseRawSimulation({
       id: String(simulations),
       latestLedger: 1_000,
-      minResourceFee: String(answer.fee),
+      minResourceFee: String(fee),
       transactionData: data.toXDR("base64"),
       results: [{ auth: answer.auth.map((a) => a.toXDR("base64")), xdr: xdr.ScVal.scvVoid().toXDR("base64") }],
       events: [],
@@ -179,12 +181,42 @@ test("an extension whose footprint is swapped for other entries is refused", asy
 test("the code extension pays one slice at most: refused at 25 XLM, sent under its own cap", async () => {
   const code = lib.codeKey(Buffer.alloc(32, 1));
   answer.readOnly = [code];
-  answer.fee = 215n * XLM;
+  // rc5's code at 8.40 XLM a day (20 October 2026, afternoon): about 257 XLM a slice.
+  answer.fee = 257n * XLM;
   await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400), /above the 25\.00 XLM/);
   await lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE });
   assert.equal(sent.length, 1);
   answer.fee = lib.CODE_SLICE_MAX_FEE + 1n;
-  await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE }), /above the 300\.00 XLM/);
+  await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE }), /above the 400\.00 XLM/);
+});
+
+test("the slice cap is 400 XLM, and a slice the rent has made dearer falls back once to a shorter one that fits (TOOL-6)", async () => {
+  // Under the 429.49 XLM a transaction fee can carry, with the inclusion bid on top.
+  assert.equal(lib.CODE_SLICE_MAX_FEE, 4_000_000_000n);
+  assert.ok(lib.CODE_SLICE_MAX_FEE + 2_000_000n <= 4_294_967_295n);
+  const code = lib.codeKey(Buffer.alloc(32, 1));
+  answer.readOnly = [code];
+  // The code has 89 days to live and the rent has risen to 15 XLM a day:
+  // the 30-day slice asks 450 XLM, more than a transaction can even carry.
+  // Nine tenths of the cap buy 24 days, 360 XLM.
+  const now = 89 * lib.LEDGERS_PER_DAY;
+  answer.fee = (tx) => (BigInt(tx.operations[0].extendTo - now) * 15n * XLM) / BigInt(lib.LEDGERS_PER_DAY);
+  const r = await lib.extendCode(state, "keeper", code, { fromDays: 89, toDays: 119 });
+  assert.equal(simulations, 2);
+  assert.equal(sent.length, 1);
+  assert.equal(r.days, 113);
+  assert.equal(sent[0].operations[0].extendTo, 113 * lib.LEDGERS_PER_DAY);
+  assert.equal(BigInt(sent[0].fee), 2_000_000n + 360n * XLM);
+  // At the measured rate the slice asked is the slice sent.
+  answer.fee = (tx) => (BigInt(tx.operations[0].extendTo - now) * 84n * XLM) / (10n * BigInt(lib.LEDGERS_PER_DAY));
+  assert.equal((await lib.extendCode(state, "keeper", code, { fromDays: 89, toDays: 119 })).days, 119);
+  assert.equal(sent[1].operations[0].extendTo, 119 * lib.LEDGERS_PER_DAY);
+  // No fallback without the life the code has now, nor when not a day fits.
+  answer.fee = 450n * XLM;
+  await assert.rejects(lib.extendCode(state, "keeper", code, { fromDays: null, toDays: 119 }), /above the 400\.00 XLM/);
+  answer.fee = 20_000n * XLM;
+  await assert.rejects(lib.extendCode(state, "keeper", code, { fromDays: 89, toDays: 90 }), /above the 400\.00 XLM/);
+  assert.equal(sent.length, 2);
 });
 
 test("the source's own authority asked as a standalone signature is refused before anything is signed (TOOL-1)", async () => {

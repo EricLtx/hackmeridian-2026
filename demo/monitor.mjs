@@ -52,6 +52,7 @@ import {
   saveState,
   REFLECTOR_FX_TESTNET as REFLECTOR_FX,
   explorer,
+  extendCode,
   extendTtl,
   CODE_SLICE_MAX_FEE,
   invoke,
@@ -397,7 +398,7 @@ async function snapshot(monitor) {
   const [first] = funds;
   const { config, fundState, nav, held, stewardBackup, priceError, fxLeg, fx, currency } = first;
   const { outstanding, cap } = caps[currency] ?? {};
-  // The keeper pays the rent: its float must cover the coming month. A host
+  // The keeper pays the rent: its float must cover two code slices. A host
   // without the keeper's key (a witness) reports it unreadable.
   const keeperPub = publicKeyOf(state, keeperRole());
   const keeperKey = keeperPub ? xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.fromPublicKey(keeperPub).xdrAccountId() })) : null;
@@ -696,10 +697,11 @@ async function perform(action, s) {
       return "extend";
     }
     case "extend_code": {
-      // Its rent is the largest fee the monitor pays: capped at one slice (lib.mjs).
-      const r = await extendTtl(state, keeperRole(), [action.key], Math.floor(action.targetDays * 17_280), { maxResourceFee: CODE_SLICE_MAX_FEE });
+      // Its rent is the largest fee the monitor pays: capped at one slice,
+      // and a shorter slice when the rent has risen past the cap (lib.mjs).
+      const r = await extendCode(state, keeperRole(), action.key, { fromDays: action.days, toDays: action.targetDays, maxResourceFee: CODE_SLICE_MAX_FEE });
       const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
-      console.log(`  ACTION   extended the contract code to about ${action.targetDays.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
+      console.log(`  ACTION   extended the contract code to about ${r.days.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
       return "extend code";
     }
     case "refresh_reference": {
@@ -1036,7 +1038,7 @@ async function rehearse() {
   }
 
   if (runStep(15)) {
-    console.log("\n15. Keeper float (DoS.2): the rent-paying account falls below a month of rent");
+    console.log("\n15. Keeper float (DoS.2): the rent-paying account falls below two slices of code rent");
     monitor.keeperMinXlmOverride = Number.POSITIVE_INFINITY;
     const { alerts } = await pass(monitor);
     delete monitor.keeperMinXlmOverride;

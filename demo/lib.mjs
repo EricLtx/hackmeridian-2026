@@ -509,13 +509,16 @@ const INCLUSION_FEE = "2000000";
  */
 export const MAX_RESOURCE_FEE = 250_000_000n;
 /**
- * One 30-day slice of the contract code entry: about 215 XLM of rent at the
- * testnet rate measured on 20 October 2026 (7.15 XLM a day for the 1.88 MB
- * the network counts for the code). 300 XLM leaves 40 % for the rate to
- * rise and stays under the 429 XLM a transaction fee can carry.
+ * One 30-day slice of the contract code entry. The testnet rent moves: 7.15
+ * XLM a day in the morning of 20 October 2026, 8.35 to 8.40 XLM a day in
+ * the afternoon, so about 250 XLM a slice for the rc4 code and 257 XLM for
+ * rc5's, about 2 % larger (review finding TOOL-6). 400 XLM leaves about half
+ * as much again for the rate to rise, and stays under the 429.49 XLM a
+ * transaction fee can carry (a uint32 in stroops) with the inclusion bid on
+ * top. Beyond it, `extendCode` falls back to a shorter slice.
  */
-export const CODE_SLICE_MAX_FEE = 3_000_000_000n;
-/** An upload creates the code entry with the network's minimum time to live: about 50 XLM for night_window.wasm on testnet. */
+export const CODE_SLICE_MAX_FEE = 4_000_000_000n;
+/** An upload creates the code entry with the network's minimum time to live: about 60 XLM for night_window.wasm on testnet (20 October 2026). */
 export const UPLOAD_MAX_FEE = 1_000_000_000n;
 
 async function build(sourcePublicKey, operation) {
@@ -786,15 +789,33 @@ export function checkExtendFootprint(ready, keys, label) {
 /**
  * Refuses a transaction whose resource fee is above `cap`, or whose total fee
  * is anything but the inclusion bid plus that resource fee: the fee signed is
- * the fee checked.
+ * the fee checked. A consistent fee that is only too high carries `feeAsked`
+ * (stroops), so that a caller may size a cheaper call (`extendCode`).
  */
 export function checkFee(ready, cap, label, tail = NOTHING_SIGNED) {
   const resourceFee = BigInt(sorobanDataOf(ready).resourceFee.toString());
   const beyondInclusion = BigInt(ready.fee) - BigInt(INCLUSION_FEE);
   if (resourceFee > cap || beyondInclusion > cap || beyondInclusion !== resourceFee) {
-    const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
-    throw new Error(`${label}: the simulation asks ${xlm(beyondInclusion > resourceFee ? beyondInclusion : resourceFee)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; ${tail} (rpc-1)`);
+    throw feeAboveCap(beyondInclusion > resourceFee ? beyondInclusion : resourceFee, cap, label, tail, beyondInclusion === resourceFee);
   }
+}
+
+/** The refusal of a fee above `cap`; `sized` when the fee is consistent and only too high, which `feeAsked` then carries. */
+function feeAboveCap(asked, cap, label, tail, sized = true) {
+  const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
+  const error = new Error(`${label}: the simulation asks ${xlm(asked)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; ${tail} (rpc-1)`);
+  if (sized) error.feeAsked = asked;
+  return error;
+}
+
+/**
+ * Refuses a simulation whose resource fee is above `cap` before the SDK
+ * assembles it: a fee beyond the 429.49 XLM a transaction can carry would
+ * not even assemble, and the refusal must still say what was asked.
+ */
+function checkSimulatedFee(sim, cap, label, tail = NOTHING_SIGNED) {
+  const asked = BigInt(sim.minResourceFee ?? "0");
+  if (asked > cap) throw feeAboveCap(asked, cap, label, tail);
 }
 
 /** Ledgers an authorization signature stays valid: about 8 minutes. */
@@ -877,6 +898,7 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
     if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
   }
 
+  checkSimulatedFee(sim, maxResourceFee, label, tail);
   const ready = rpc.assembleTransaction(tx, sim).build();
   // The assembled transaction keeps our entries when we signed some, else it
   // takes the simulation's: check what is actually there.
@@ -1055,12 +1077,39 @@ export async function extendTtl(state, sourceRole, keys, ledgers, { maxResourceF
     .build();
   const sim = await net(() => server.simulateTransaction(tx), "simulate");
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+  checkSimulatedFee(sim, maxResourceFee, label);
   const ready = rpc.assembleTransaction(tx, sim).build();
   checkExtendFootprint(ready, keys, label);
   checkFee(ready, maxResourceFee, label);
   signTx(state, sourceRole, ready);
   const { hash: txHash, seconds, fee } = await submit(ready, label);
   return { hash: txHash, seconds, fee };
+}
+
+/** Ledgers in a day, at five seconds a ledger. */
+export const LEDGERS_PER_DAY = 17_280;
+
+/**
+ * Extends the contract code entry `key` to `toDays` of life, from about
+ * `fromDays` now, paying at most `maxResourceFee` (one slice). The rent is
+ * the network's and moves: when the slice asks more than the cap, a shorter
+ * one is tried once, sized on the rate per day that simulation showed, with
+ * a tenth to spare (review finding TOOL-6, 20 October 2026). Returns the
+ * extension's `{ hash, seconds, fee }` and `days`, the life it asked for.
+ */
+export async function extendCode(state, sourceRole, key, { fromDays, toDays, maxResourceFee = CODE_SLICE_MAX_FEE }) {
+  const extend = async (days) => ({ ...(await extendTtl(state, sourceRole, [key], Math.floor(days * LEDGERS_PER_DAY), { maxResourceFee })), days });
+  try {
+    return await extend(toDays);
+  } catch (error) {
+    const added = toDays - fromDays;
+    if (error.feeAsked === undefined || !Number.isFinite(fromDays) || !(added > 0)) throw error;
+    // Rent is proportional to the days added: the slice that fits, nine tenths of the cap.
+    const days = Math.floor((added * Number(maxResourceFee) * 9) / (10 * Number(error.feeAsked)));
+    if (days < 1) throw error;
+    process.stderr.write(`  (${String(error.message).split(";")[0]}: a ${days}-day slice instead)\n`);
+    return extend(fromDays + days);
+  }
 }
 
 /**
