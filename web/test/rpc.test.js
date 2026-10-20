@@ -411,6 +411,120 @@ test("an HTTP 429 is back-pressure on the same endpoint, not a failover", async 
   assert.equal(back.rpcInfo().host, "fallback.example");
 });
 
+const tooManyWith = (retryAfter) =>
+  Object.assign(new Error("Request failed with status code 429"), { response: { status: 429, headers: new Headers(retryAfter === undefined ? {} : { "retry-after": retryAfter }) } });
+const refusingAsTooMany = (retryAfter) => async () => {
+  throw tooManyWith(retryAfter);
+};
+const healthAt = (height) => async () => ({ status: "healthy", latestLedger: height, latestLedgerCloseTime: String(Math.floor(Date.now() / 1000)) });
+
+test("an endpoint that answers HTTP 429 to everything is left after three in a row within one call: the reads land on the other endpoint", async () => {
+  let busyCalls = 0;
+  let healthyCalls = 0;
+  const chain = chainWith(
+    fake("busy.example", {
+      getHealth: refusingAsTooMany("0"),
+      simulateTransaction: async () => {
+        busyCalls += 1;
+        throw tooManyWith("0");
+      },
+    }),
+    fake("healthy.example", {
+      getHealth: healthAt(100),
+      simulateTransaction: async () => {
+        healthyCalls += 1;
+        return { ok: true };
+      },
+    }),
+  );
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change);
+  let ok = 0;
+  for (let pass = 0; pass < 2; pass += 1) {
+    await chain.pollHeights();
+    const results = await Promise.all(Array.from({ length: 20 }, () => chain.net(() => chain.server.simulateTransaction()).then(() => true, () => false)));
+    ok += results.filter(Boolean).length;
+  }
+  assert.equal(ok, 40, "every read of both passes lands");
+  assert.equal(healthyCalls, 40);
+  assert.equal(chain.rpcInfo().host, "healthy.example");
+  assert.deepEqual(changes, [{ from: "busy.example", to: "healthy.example", reason: "rate-limited" }], "one move, at the third 429 of one call");
+  assert.ok(busyCalls <= 20 * 3, `${busyCalls} calls sent to the busy endpoint`);
+  assert.match(rpcChangeText(changes[0]), /busy\.example keeps refusing requests as too many: switched to healthy\.example/);
+  // Two 429s then an answer is a burst, waited out on the same endpoint, as before.
+  let burst = 0;
+  const bursty = chainWith(
+    fake("bursty.example", {
+      getHealth: async () => {
+        burst += 1;
+        if (burst < 3) throw tooManyWith("0");
+        return { status: "healthy" };
+      },
+    }),
+    fake("other.example", { getHealth: healthy }),
+  );
+  assert.equal((await bursty.net(() => bursty.server.getHealth())).status, "healthy");
+  assert.equal(bursty.rpcInfo().host, "bursty.example");
+});
+
+test("a Retry-After longer than a timeout leaves the endpoint at the first 429; with every other endpoint resting, the call keeps waiting instead", async () => {
+  let busyCalls = 0;
+  const busy = (retryAfter) =>
+    fake("busy.example", {
+      getHealth: async () => {
+        busyCalls += 1;
+        throw tooManyWith(retryAfter);
+      },
+    });
+  const chain = chainWith(busy("30"), fake("other.example", { getHealth: healthy }));
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change.reason);
+  const started = Date.now();
+  assert.equal((await chain.net(() => chain.server.getHealth())).status, "healthy");
+  assert.ok(Date.now() - started < 1000, "no wait of 30 s, nor of the 5 s cap");
+  assert.equal(busyCalls, 1);
+  assert.deepEqual(changes, ["rate-limited"]);
+  assert.equal(chain.rpcInfo().host, "other.example");
+
+  // The other endpoint rests after a failure of its own: the third 429 in a row is then waited out too, and the call ends with the 429 after its attempts.
+  busyCalls = 0;
+  const alone = chainWith(busy("0"), fake("other.example", { getHealth: healthy }));
+  alone.endpoints[1].failedAt = Date.now();
+  const moves = [];
+  alone.onRpcChange = (change) => moves.push(change.reason);
+  await assert.rejects(alone.net(() => alone.server.getHealth()), /status code 429/);
+  assert.equal(busyCalls, 4, "sent there again after every wait");
+  assert.deepEqual(moves, []);
+  assert.equal(alone.rpcInfo().host, "busy.example");
+});
+
+test("three height polls in a row answered 429 by the endpoint in use move the calls; an answered poll resets the count", async () => {
+  let polls = 0;
+  const chain = chainWith(
+    fake("busy.example", {
+      getHealth: async () => {
+        polls += 1;
+        if (polls === 2) return { status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(Math.floor(Date.now() / 1000)) };
+        throw tooManyWith("0");
+      },
+    }),
+    fake("other.example", { getHealth: healthAt(100) }),
+  );
+  const changes = [];
+  chain.onRpcChange = (change) => changes.push(change.reason);
+  for (let pass = 1; pass <= 4; pass += 1) {
+    await chain.checkHeights();
+    assert.equal(chain.rpcInfo().host, "busy.example", `pass ${pass}: 429, answer, 429, 429`);
+  }
+  assert.deepEqual(changes, []);
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "other.example", "the third 429 in a row");
+  assert.deepEqual(changes, ["rate-limited"]);
+  // The busy endpoint rests: the next poll brings nothing back to it.
+  await chain.checkHeights();
+  assert.equal(chain.rpcInfo().host, "other.example");
+});
+
 test("at most 6 calls are in flight on one endpoint; calls waiting for a slot follow a move", async () => {
   assert.equal(MAX_IN_FLIGHT, 6);
   let inFlight = 0;

@@ -222,6 +222,10 @@ export function describeError(error, context = {}) {
     return { text: join(t("The transaction failed on chain. Nothing changed."), error.message), name: "TxFailed" };
   }
   const message = String(error?.message ?? error ?? "");
+  // The SDK's "Request failed with status code 429": the endpoint refused the request as one too many.
+  if (error?.response?.status === 429 || /status code 429$/.test(message)) {
+    return { text: t("The RPC endpoint refused the request as one too many. Try again in a moment."), name: "RateLimited" };
+  }
   if (/fetch|network|timeout|ECONN|Failed to fetch/i.test(message)) {
     return { text: t("The network did not answer. Check your connection and try again."), name: "Network" };
   }

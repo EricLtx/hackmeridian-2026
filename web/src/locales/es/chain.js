@@ -28,4 +28,5 @@ export default {
   "RPC {from} is {n} ledgers behind: switched to {to}.": "El RPC {from} lleva {n} ledgers de retraso: cambio a {to}.",
   "RPC {to} has caught up: switched back to it.": "El RPC {to} vuelve a estar al día: se vuelve a él.",
   "RPC {from} failed: switched to {to}.": "El RPC {from} falló: cambio a {to}.",
+  "RPC {from} keeps refusing requests as too many: switched to {to}.": "El RPC {from} sigue rechazando las solicitudes por exceso: cambio a {to}.",
 };

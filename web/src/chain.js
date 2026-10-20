@@ -119,13 +119,32 @@ function isRateLimited(error) {
 const RATE_LIMIT_WAIT_MS = 1000;
 /** The longest Retry-After honoured: an endpoint cannot hold a call longer than a timeout would. */
 const MAX_RETRY_AFTER_MS = 5000;
+/**
+ * HTTP 429 answers in a row, within one call or over the height polls, after
+ * which the endpoint in use is not slowing a burst but refusing: the calls
+ * move to another endpoint (`failover` with `exhausted`) instead of failing
+ * with the status text until the 429s stop, which on 20 October could have
+ * lasted the whole rest of the other endpoint (up to MAX_REST_MS).
+ */
+export const RATE_LIMIT_STRIKES = 3;
 
-/** The wait a 429 asks for: its Retry-After in seconds when the browser can read it (the endpoint must expose the header), else about a second. */
-function retryAfterMs(error) {
+/** The Retry-After of a 429 in seconds when the browser can read it (the endpoint must expose the header), else NaN. */
+function retryAfterSecs(error) {
   const headers = error?.response?.headers;
   const raw = typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"];
   const seconds = raw === null || raw === undefined || raw === "" ? Number.NaN : Number(raw);
-  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, MAX_RETRY_AFTER_MS) : RATE_LIMIT_WAIT_MS;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : Number.NaN;
+}
+
+/** The wait a 429 asks for: its Retry-After, capped at MAX_RETRY_AFTER_MS, else about a second. */
+function retryAfterMs(error) {
+  const seconds = retryAfterSecs(error);
+  return Number.isNaN(seconds) ? RATE_LIMIT_WAIT_MS : Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+}
+
+/** Whether the `strikes`-th 429 in a row, or one asking to wait longer than a timeout would, means the endpoint refuses rather than slows a burst. */
+function rateLimitExhausted(error, strikes) {
+  return strikes >= RATE_LIMIT_STRIKES || retryAfterSecs(error) * 1000 > MAX_RETRY_AFTER_MS;
 }
 
 /** Ledgers the endpoint in use may trail the highest one before calls move to another endpoint. */
@@ -251,6 +270,7 @@ export function rpcChangeText({ from, to, reason, behind = 0 }) {
   if (reason === "timeout") return t("RPC {from} did not answer in time: switched to {to}.", { from, to });
   if (reason === "behind") return t("RPC {from} is {n} ledgers behind: switched to {to}.", { from, to, n: behind });
   if (reason === "level") return t("RPC {to} has caught up: switched back to it.", { to });
+  if (reason === "rate-limited") return t("RPC {from} keeps refusing requests as too many: switched to {to}.", { from, to });
   return t("RPC {from} failed: switched to {to}.", { from, to });
 }
 
@@ -638,21 +658,27 @@ export class Chain {
    * after it that is not resting, or simply the next when every other one
    * rests. False when there is no other endpoint, the error is not the
    * network's, or it is an HTTP 429: back-pressure, which `net` waits out on
-   * the same endpoint.
+   * the same endpoint. A 429 the caller marks `exhausted` (RATE_LIMIT_STRIKES
+   * in a row, or a Retry-After longer than a timeout) is a failure like any
+   * other, but only when another endpoint is not resting: with every other
+   * one resting, the caller keeps waiting as the endpoint asks.
    */
-  failover(error, from = this.active) {
+  failover(error, from = this.active, { exhausted = false } = {}) {
     if (this.endpoints.length < 2) return false;
     if (!(error instanceof RpcTimeout) && !isTransient(error)) return false;
-    if (isRateLimited(error)) return false;
+    const limited = isRateLimited(error);
+    if (limited && !exhausted) return false;
     if (from !== this.active) return true;
     const now = Date.now();
+    if (limited && this.endpoints.every((endpoint, i) => i === from || resting(endpoint, now))) return false;
     const previous = this.endpoints[this.active];
     previous.failures = (previous.failures ?? 0) + 1;
     previous.restMs = restAfterFailure(previous, now);
     previous.failedAt = now;
     this.moveTo(this.nextEndpoint(this.active, now), now);
     try {
-      this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason: error instanceof RpcTimeout ? "timeout" : "error" });
+      const reason = error instanceof RpcTimeout ? "timeout" : limited ? "rate-limited" : "error";
+      this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason });
     } catch {
       // A failing listener never stops a call.
     }
@@ -687,12 +713,18 @@ export class Chain {
    */
   async heights(budgetMs = HEIGHT_BUDGET_MS) {
     return Promise.all(
-      this.endpoints.map(async (endpoint) => {
+      this.endpoints.map(async (endpoint, index) => {
         const until = Date.now() + budgetMs;
         try {
           const health = await withTimeout(endpoint.server.getHealth(), budgetMs);
+          endpoint.limitedPolls = 0;
           if (Number.isSafeInteger(health?.latestLedger)) return heightRead(health.latestLedger, health.latestLedgerCloseTime);
         } catch (error) {
+          // A 429 to the poll is no answer; RATE_LIMIT_STRIKES of them in a row from the endpoint in use leave it.
+          if (isRateLimited(error)) {
+            endpoint.limitedPolls = (endpoint.limitedPolls ?? 0) + 1;
+            if (index === this.active && rateLimitExhausted(error, endpoint.limitedPolls)) this.failover(error, index, { exhausted: true });
+          }
           if (error instanceof RpcTimeout || isTransient(error)) return null;
         }
         const left = until - Date.now();
@@ -758,12 +790,16 @@ export class Chain {
    * goes to the endpoint now in use. A timeout or a transient network
    * failure moves at once to the next endpoint when there is one, else waits
    * and retries. An HTTP 429 is back-pressure: the call waits as asked
-   * (`retryAfterMs`) and goes to the same endpoint again. At most `attempts`
+   * (`retryAfterMs`) and goes to the same endpoint again; the
+   * RATE_LIMIT_STRIKES-th in a row, or one asking to wait longer than a
+   * timeout, is a failure that moves to another endpoint when one is not
+   * resting (`failover`), else the call keeps waiting. At most `attempts`
    * calls.
    */
   async net(call, { timeoutMs = RPC_TIMEOUT_MS, attempts = 4 } = {}) {
     let delay = 800;
     let moves = 0;
+    let strikes = 0;
     for (let attempt = 1; ; ) {
       const index = this.active;
       const endpoint = this.endpoints[index];
@@ -789,7 +825,13 @@ export class Chain {
       }
       if (attempt >= attempts || !(error instanceof RpcTimeout || isTransient(error))) throw error;
       attempt += 1;
-      if (isRateLimited(error)) await sleep(retryAfterMs(error));
+      if (isRateLimited(error)) {
+        strikes += 1;
+        if (rateLimitExhausted(error, strikes) && moves < this.endpoints.length - 1 && this.failover(error, index, { exhausted: true })) {
+          moves += 1;
+          strikes = 0;
+        } else await sleep(retryAfterMs(error));
+      }
       // With every endpoint failing, a call backs off instead of bouncing back to the one it left.
       else if (moves < this.endpoints.length - 1 && this.failover(error, index)) moves += 1;
       else {

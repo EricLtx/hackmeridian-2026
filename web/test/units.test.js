@@ -240,6 +240,11 @@ test("errors read as sentences with their name", () => {
   assert.equal(describeError(new WalletError("You declined the request in your wallet.")).name, "Wallet");
   assert.match(describeError(new TransactionError("TxExpired", "x")).text, /Nothing changed/);
   assert.equal(describeError(new TypeError("Failed to fetch")).name, "Network");
+  // A final HTTP 429 reads as a sentence, not as the SDK's status text.
+  const tooMany = describeError(Object.assign(new Error("Request failed with status code 429"), { response: { status: 429 } }));
+  assert.equal(tooMany.name, "RateLimited");
+  assert.match(tooMany.text, /too many. Try again in a moment\.$/);
+  assert.doesNotMatch(tooMany.text, /status code/);
 });
 
 test("take the shares: disabled before maturity, enabled from it, never on a closed repo", () => {
