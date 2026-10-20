@@ -1496,23 +1496,33 @@ impl OpenWindow {
         Ok(())
     }
 
-    /// Names the automated key that may only pause and cancel. Guardian.
+    /// Names the automated key that may only pause and cancel. Guardian and
+    /// sentinel.
     pub fn set_sentinel(env: Env, sentinel: Address) -> Result<(), Error> {
         let guardian = storage::guardian(&env);
         guardian.require_auth();
         // The sentinel is a hot key on a monitoring host: it must hold no
         // role whose loss or theft would matter more than a pause, nor be
-        // about to take one (review finding auth-5, 20 October 2026).
+        // about to take one (review finding auth-5, 20 October 2026). An
+        // expired proposal never applies, and does not count.
         if is_governor_or_guardian(&env, &sentinel)
             || is_trustee(&env, &sentinel)
             || storage::guardian_backup(&env).is_some_and(|backup| backup == sentinel)
             || storage::sole_lender(&env).is_some_and(|lender| lender == sentinel)
-            || pending_admin_change(&env).is_some_and(|pending| pending.admin == sentinel)
+            || pending_admin_change(&env)
+                .is_some_and(|pending| pending.admin == sentinel && is_live(&env, pending.eta))
             || is_pending_guardian(&env, &DataKey::PendingGuardian, &sentinel)
             || is_pending_guardian(&env, &DataKey::PendingForcedGuardian, &sentinel)
         {
             return Err(Error::SentinelNotIndependent);
         }
+        // The named key consents: since the sentinel is refused as a forced
+        // guardian and as a trustee, a guardian naming anyone it likes could
+        // block the governor's candidate for a forced change, or the
+        // trustee's successor (review finding STATE-1, 20 October 2026).
+        // Asked after the checks, which refuse the guardian itself, so no
+        // address signs twice.
+        sentinel.require_auth();
         storage::set_sentinel(&env, Some(&sentinel));
         storage::bump_instance(&env);
         SentinelChanged {
@@ -2418,12 +2428,15 @@ fn require_trustee(env: &Env, governor: &Address) {
 /// about to take one, it is not the sole lender, and it is not the sentinel,
 /// a hot key (review finding auth-5, 20 October 2026). A guardian forced in
 /// by the governor may become trustee: naming or handing over the trustee
-/// drops that pending change.
+/// drops that pending change. An expired proposal never applies and does
+/// not count: the trustee cannot cancel one, which would otherwise hold its
+/// chosen successor out for good (review finding STATE-1, 20 October 2026).
 fn ensure_independent_trustee(env: &Env, trustee: &Address) -> Result<(), Error> {
     if is_governor_or_guardian(env, trustee)
         || storage::sole_lender(env).is_some_and(|lender| lender == *trustee)
         || storage::guardian_backup(env).is_some_and(|backup| backup == *trustee)
-        || pending_admin_change(env).is_some_and(|pending| pending.admin == *trustee)
+        || pending_admin_change(env)
+            .is_some_and(|pending| pending.admin == *trustee && is_live(env, pending.eta))
         || is_pending_guardian(env, &DataKey::PendingGuardian, trustee)
         || is_sentinel(env, trustee)
     {
@@ -2447,11 +2460,12 @@ fn ensure_not_trustee_or_sentinel(env: &Env, who: &Address) -> Result<(), Error>
     Ok(())
 }
 
-/// Whether `who` is the guardian a pending appointment would install; `key`
-/// is `PendingGuardian` or `PendingForcedGuardian`.
+/// Whether `who` is the guardian a live pending appointment would install;
+/// `key` is `PendingGuardian` or `PendingForcedGuardian`. An expired one
+/// never applies (`ensure_due`).
 fn is_pending_guardian(env: &Env, key: &DataKey, who: &Address) -> bool {
     storage::instance_value::<PendingGuardianChange>(env, key)
-        .is_some_and(|pending| pending.guardian == *who)
+        .is_some_and(|pending| pending.guardian == *who && is_live(env, pending.eta))
 }
 
 /// Records that value can be at stake. The first admission ends the

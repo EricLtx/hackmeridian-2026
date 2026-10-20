@@ -8985,6 +8985,111 @@ fn sentinel_cannot_be_given_another_role() {
     assert_eq!(f.client.sentinel(), Some(sentinel));
 }
 
+/// Review finding STATE-1 (20 October 2026): since rc5 the sentinel is
+/// refused as a forced guardian and as a trustee, and the guardian alone
+/// could put any address in that slot. A hostile guardian named the
+/// governor's candidate for a forced change, or the trustee's chosen
+/// successor, and blocked the recovery path against itself. Naming a
+/// sentinel now takes the named key's signature as well as the guardian's:
+/// the guardian alone names nobody, the forced change and the handover go
+/// through, and the guardian with the key's consent names it.
+#[test]
+fn naming_a_sentinel_takes_its_own_signature() {
+    let f = bare();
+    let guardian = appoint_guardian(&f);
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    let candidate = Address::generate(&f.env);
+    let successor = Address::generate(&f.env);
+    for named in [&candidate, &successor] {
+        let args: soroban_sdk::Vec<Val> = (named.clone(),).into_val(&f.env);
+        sign_only(&f, &[&guardian], "set_sentinel", args);
+        assert!(f.client.try_set_sentinel(named).is_err());
+        f.env.mock_all_auths();
+        assert_eq!(f.client.sentinel(), None);
+    }
+    f.client.force_guardian_change(&candidate);
+    assert_eq!(
+        f.client
+            .pending_forced_guardian_change()
+            .map(|pending| pending.guardian),
+        Some(candidate)
+    );
+    f.client.hand_over_trustee(&successor);
+    assert_eq!(f.client.trustee(), Some(successor));
+
+    let sentinel = Address::generate(&f.env);
+    let args: soroban_sdk::Vec<Val> = (sentinel.clone(),).into_val(&f.env);
+    sign_only(&f, &[&guardian, &sentinel], "set_sentinel", args);
+    f.client.set_sentinel(&sentinel);
+    assert_eq!(signers(&f), std::vec![guardian, sentinel.clone()]);
+    f.env.mock_all_auths();
+    assert_eq!(f.client.sentinel(), Some(sentinel));
+}
+
+/// Review finding STATE-1: the checks that keep the trustee and the
+/// sentinel out of other roles counted a pending appointment after it had
+/// expired, when it can never apply. A governor or guardian proposal then
+/// held the trustee's chosen successor out for good, and the trustee
+/// cannot cancel it. A live proposal still refuses the address it names;
+/// an expired one no longer does, and still never applies.
+#[test]
+fn an_expired_appointment_no_longer_blocks_the_trustee_or_the_sentinel() {
+    let f = bare();
+    let trustee = Address::generate(&f.env);
+    f.client.set_trustee(&trustee);
+    let (f, _) = ready_from(f);
+    let next_guardian = Address::generate(&f.env);
+    let next_governor = Address::generate(&f.env);
+    let forced = Address::generate(&f.env);
+    f.client.set_guardian(&next_guardian);
+    f.client.set_admin(&next_governor);
+    f.client.force_guardian_change(&forced);
+    for candidate in [&next_guardian, &next_governor] {
+        assert_eq!(
+            f.client.try_hand_over_trustee(candidate),
+            Err(Ok(Error::TrusteeNotIndependent))
+        );
+    }
+    for candidate in [&next_guardian, &next_governor, &forced] {
+        assert_eq!(
+            f.client.try_set_sentinel(candidate),
+            Err(Ok(Error::SentinelNotIndependent))
+        );
+    }
+
+    // The guardian and governor appointments expire; the forced one, with
+    // its 30-day delay, is still live.
+    advance(&f, DEFAULT_TIMELOCK_SECS + PROPOSAL_GRACE_SECS + 1);
+    assert_eq!(f.client.pending_guardian_change(), None);
+    assert_eq!(f.client.pending_admin(), None);
+    assert_eq!(
+        f.client.try_set_sentinel(&forced),
+        Err(Ok(Error::SentinelNotIndependent))
+    );
+    f.client.set_sentinel(&next_governor);
+    assert_eq!(f.client.sentinel(), Some(next_governor.clone()));
+    assert_eq!(f.client.try_accept_admin(), Err(Ok(Error::ProposalExpired)));
+
+    // Then the forced one.
+    advance(&f, MAX_TIMELOCK_SECS);
+    assert_eq!(f.client.pending_forced_guardian_change(), None);
+    f.client.set_sentinel(&forced);
+    assert_eq!(f.client.sentinel(), Some(forced));
+    assert_eq!(
+        f.client.try_apply_forced_guardian_change(),
+        Err(Ok(Error::ProposalExpired))
+    );
+
+    f.client.hand_over_trustee(&next_guardian);
+    assert_eq!(f.client.trustee(), Some(next_guardian));
+    assert_eq!(
+        f.client.try_apply_guardian_change(),
+        Err(Ok(Error::ProposalExpired))
+    );
+    assert_eq!(f.client.guardian(), f.governor);
+}
+
 /// Test 7 of the second review: the positive control of the signature
 /// requirement, with exactly the governor and the trustee signing.
 #[test]
