@@ -3015,3 +3015,5 @@ fn release_outstanding(env: &Env, repo: &Repo) -> Result<(), Error> {
 mod test;
 #[cfg(test)]
 mod test_math;
+#[cfg(test)]
+mod test_perf;
