@@ -18,6 +18,10 @@
 //   npm run monitor -- --announce-admin=<G...>         a governor handover to that address
 //   npm run monitor -- --announce-guardian=<G...>      a forced guardian change to that address
 //
+// A fund's FX leg is compared with a second FX source, by default the
+// demo's other feed (Reflector or the local feed); `--fx-fallback=<C...>`
+// names another one, quoting the same asset.
+//
 // A detector never moves funds. The only actions are the sentinel's (or the
 // guardian's) pause, which blocks new entries and never exits, and the
 // cancellation of an unannounced proposal; the guardian's and the
@@ -86,6 +90,8 @@ if (WITNESS) {
 }
 /** Rehearsal steps to run, e.g. --steps=4,5,6,7; all by default. */
 const STEPS = args.find((a) => a.startsWith("--steps="))?.slice(8).split(",").map(Number);
+/** The FX feed a fund's FX leg is compared with, when not the demo's other feed (`--fx-fallback=<C...>`). */
+const FX_FALLBACK = args.find((a) => a.startsWith("--fx-fallback="))?.slice(14);
 const runStep = (n) => !STEPS || STEPS.includes(n);
 
 // The thresholds of the monitoring plan live in detectors.mjs; a constant-NAV
@@ -253,7 +259,31 @@ async function readFund(f) {
   const fxLeg = Array.isArray(config.source) && config.source[0] === "Cross" ? config.source[1] : null;
   const fxAsset = fxLeg ? (fxLeg.asset[0] === "Other" ? asset.other(String(fxLeg.asset[1])) : asset.stellar(String(fxLeg.asset[1]))) : null;
   const fx = fxLeg ? await attempt("FX lastprice", () => read(state, fxLeg.oracle, "lastprice", [fxAsset])) : null;
-  return { ...base, nav, stewardBackup, priceError, fxLeg, fx: fx ?? null };
+  // A second FX source the leg is compared with (detector feed-flat).
+  const fallbackOracle = fxLeg ? fxFallbackOf(fxLeg) : null;
+  const fxFallback = fallbackOracle ? await readFxFallback(fallbackOracle, fxAsset) : null;
+  return { ...base, nav, stewardBackup, priceError, fxLeg, fx: fx ?? null, fxDecimals: fundState ? Number(fundState.fx_decimals) : undefined, fxFallback };
+}
+
+/**
+ * The FX source a fund's FX leg is compared with: the one `--fx-fallback=`
+ * names, else the demo's other feed (the local feed, which `setup --
+ * --fx=local` fills, for Reflector; Reflector for the local feed).
+ */
+function fxFallbackOf(leg) {
+  const primary = String(leg.oracle);
+  const other = FX_FALLBACK ?? (primary === REFLECTOR_FX ? C.navOracle : REFLECTOR_FX);
+  return other && other !== primary ? other : null;
+}
+
+/** That source's reading and decimals, or null when it has none (an empty local feed) or cannot be read. */
+async function readFxFallback(oracle, fxAsset) {
+  try {
+    const [reading, decimals] = await Promise.all([read(state, oracle, "lastprice", [fxAsset]), read(state, oracle, "decimals")]);
+    return reading ? { label: oracle === REFLECTOR_FX ? "Reflector" : `feed ${oracle.slice(0, 6)}…`, reading, decimals: Number(decimals) } : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

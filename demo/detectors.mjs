@@ -36,6 +36,11 @@ export const LIMITS = {
   // entries' extensions and the fees.
   keeperMinXlm: 250,
   rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
+  // A re-stamped frozen feed is bounded neither by the corridor nor by the
+  // band (residual risk of Tamper.6 and Tamper.7). A variable NAV moves every
+  // business day; an FX rate moves within hours while its market is open.
+  navFlatBusinessDays: 2,
+  fxFlatBusinessHours: 24,
 };
 
 export const LEDGER_SECS = 5;
@@ -60,6 +65,24 @@ export const EXPECTED_SCHEMA = 2;
 export const PROPOSALS = /_proposed$|_change_proposed$/;
 /** The Open Window refusals of a price that pause new entries. */
 export const PRICE_REFUSALS = ["PriceOutOfBand", "StalePrice", "NoPrice", "InvalidPrice", "PriceDivergence"];
+
+// ---------------------------------------------------------------------------
+// Business time and price scales
+// ---------------------------------------------------------------------------
+
+/** Seconds of the span [from, to) (Unix seconds) that fall on a business day, Monday to Friday, UTC. */
+export function businessSeconds(from, to) {
+  let total = 0;
+  for (let day = Math.floor(from / 86_400) * 86_400; day < to; day += 86_400) {
+    const weekday = new Date(day * 1000).getUTCDay();
+    if (weekday === 0 || weekday === 6) continue;
+    total += Math.max(0, Math.min(to, day + 86_400) - Math.max(from, day));
+  }
+  return total;
+}
+
+/** A price with `from` decimals at `to` decimals. */
+export const rescale = (price, from, to) => (to >= from ? BigInt(price) * 10n ** BigInt(to - from) : BigInt(price) / 10n ** BigInt(from - to));
 
 // ---------------------------------------------------------------------------
 // Small helpers, shared with monitor.mjs
@@ -445,6 +468,56 @@ export const DETECTORS = {
       });
     }
     return out;
+  },
+  "feed-flat"(s, monitor, { limits }) {
+    // Residual risk of Tamper.6 and Tamper.7: a feed that keeps re-stamping
+    // the same value passes the age check, and neither the NAV corridor nor
+    // the FX band bounds it once the market has moved. Time is counted on
+    // business days only, between publications that do advance the
+    // timestamp: a NAV flat over two business days, or an FX rate flat over
+    // 24 business hours of publications, warns. A constant-NAV fund is flat
+    // by design (`--nav-frozen-hours=Infinity` silences its NAV here too).
+    // A second FX source, when one is readable and fresh, must agree with
+    // the fund's FX leg within half its band.
+    const out = [];
+    monitor.flat ??= { nav: {}, fx: {} };
+    const track = (book, key, reading) => {
+      const price = String(reading.price);
+      const at = Number(reading.timestamp);
+      const seen = book[key];
+      if (!seen || seen.price !== price) book[key] = { price, at, business: 0, publications: 1 };
+      else if (at > seen.at) book[key] = { price, at, business: seen.business + businessSeconds(seen.at, at), publications: seen.publications + 1 };
+      return book[key];
+    };
+    for (const f of s.funds) {
+      if (f.nav && Number.isFinite(limits.navFrozenHours)) {
+        const flat = track(monitor.flat.nav, f.shares, f.nav);
+        if (flat.business >= limits.navFlatBusinessDays * 86_400) {
+          out.push({ level: "warning", message: `NAV unchanged over ${(flat.business / 86_400).toFixed(1)} business days of publications (${flat.publications} with this value): a variable NAV moves every business day, and nothing on chain bounds a re-stamped one${tag(s, f)}`, action: "verify with the NAV operator; a constant-NAV fund is flat by design (--nav-frozen-hours=Infinity)" });
+        }
+      }
+      if (!f.fx || !f.fxLeg) continue;
+      const flat = track(monitor.flat.fx, f.shares, f.fx);
+      if (flat.business >= limits.fxFlatBusinessHours * 3600) {
+        out.push({ level: "warning", message: `FX rate unchanged over ${(flat.business / 3600).toFixed(1)} business hours of publications: the band bounds a frozen rate only while the market stays inside it${tag(s, f)}`, action: "compare with another FX source; re-anchor or move the FX leg if the feed is frozen" });
+      }
+      // The second FX source: both readings fresh, compared at one scale.
+      const other = f.fxFallback;
+      const maxAge = Number(f.fxLeg.max_age_secs);
+      const fresh = (reading) => reading && s.now - Number(reading.timestamp) <= maxAge;
+      if (!other?.reading || !fresh(f.fx) || !fresh(other.reading) || other.decimals === undefined || f.fxDecimals === undefined) continue;
+      const scale = Math.max(other.decimals, f.fxDecimals);
+      const ours = rescale(f.fx.price, f.fxDecimals, scale);
+      const theirs = rescale(other.reading.price, other.decimals, scale);
+      if (theirs <= 0n) continue;
+      const gap = ours > theirs ? ours - theirs : theirs - ours;
+      const gapBps = Number((gap * 10_000n) / theirs);
+      const band = Number(f.fxLeg.band_bps);
+      if (gapBps * 2 > band) {
+        out.push({ level: "warning", message: `the fund's FX feed and ${other.label} differ by ${gapBps} bps, beyond half the ${band} bps band${tag(s, f)}`, action: "find which source is wrong; re-anchor or move the FX leg if it is the fund's feed" });
+      }
+    }
+    return out.map((a) => ({ detector: "feed-flat", threat: "Tamper.1", ...a }));
   },
   keeper(s, monitor, { limits }) {
     // DoS.2: the keeper's float pays the rent extensions; an empty keeper means no extension.

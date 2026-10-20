@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DETECTORS, LIMITS, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement } from "../detectors.mjs";
+import { DETECTORS, LIMITS, businessSeconds, compareFacts, confirmation, decideActions, detect, proposalFacts, recordAnnouncement } from "../detectors.mjs";
 
 const H = 3600;
 const DAY = 86_400;
@@ -306,6 +306,50 @@ test("fx and nav: a value unchanged past the threshold warns, a move resets it",
   assert.equal(run("nav", withFx(5n, NOW + 73 * H), monitor).length, 1);
   assert.equal(run("fx", withFx(6n, NOW + 74 * H), monitor).length, 0);
   assert.equal(run("nav", withFx(6n, NOW + 74 * H), monitor).length, 0);
+});
+
+test("businessSeconds counts Monday to Friday, UTC, only", () => {
+  const at = (day, hour = 0) => Date.UTC(2027, 0, day, hour) / 1000; // January 2027: the 11th is a Monday
+  assert.equal(businessSeconds(at(11), at(12)), DAY);
+  assert.equal(businessSeconds(at(15, 12), at(18, 12)), DAY); // Friday noon to Monday noon
+  assert.equal(businessSeconds(at(16), at(18)), 0); // the weekend
+  assert.equal(businessSeconds(at(13, 12), at(13, 18)), 6 * H);
+});
+
+test("feed-flat: a NAV re-stamped over two business days warns; a weekend counts for nothing", () => {
+  const at = (day, hour) => Date.UTC(2027, 0, day, hour) / 1000;
+  const nav = (price, time) => snap({ now: time + 60, funds: [fund("fund 1", "CF1", { nav: { price, timestamp: BigInt(time) } })] });
+  let monitor = {};
+  const flat = (price, time, limits) => run("feed-flat", nav(price, time), monitor, ctx(limits));
+  assert.deepEqual(flat(5n, at(13, 12)), []); // Wednesday noon
+  assert.deepEqual(flat(5n, at(14, 12)), []); // one business day
+  assert.deepEqual(flat(5n, at(14, 12)), []); // the timestamp did not move: nothing counted
+  const [alert] = flat(5n, at(15, 12)); // Friday noon: two business days
+  assert.match(alert.message, /^NAV unchanged over 2\.0 business days of publications \(3 with this value\)/);
+  assert.deepEqual(flat(6n, at(18, 12)), []); // it moved: counting starts again
+  // Friday noon to Monday noon is one business day, whatever the publications.
+  monitor = {};
+  for (const [day, hour] of [[15, 12], [16, 12], [17, 12], [18, 12]]) assert.deepEqual(flat(7n, at(day, hour)), []);
+  assert.equal(flat(7n, at(19, 12)).length, 1);
+  // A constant-NAV fund is flat by design.
+  monitor = {};
+  for (const day of [11, 12, 13, 14, 15]) assert.deepEqual(flat(8n, at(day, 12), { navFrozenHours: Infinity }), []);
+});
+
+test("feed-flat: an FX rate flat over 24 business hours warns; a second FX source must agree within half the band", () => {
+  const leg = { oracle: "CREFLECTOR", asset: ["Other", "EUR"], haircut_bps: 200, max_age_secs: 3n * 86_400n, band_bps: 200 };
+  const fx = (price, time, fallback) => snap({ now: time + 60, funds: [fund("fund 1", "CF1", { nav: null, fxLeg: leg, fxDecimals: 14, fx: { price, timestamp: BigInt(time) }, fxFallback: fallback })] });
+  const monitor = {};
+  const start = Date.UTC(2027, 0, 13, 0) / 1000;
+  for (let hour = 0; hour < 24; hour += 6) assert.deepEqual(run("feed-flat", fx(110_000_000_000_000n, start + hour * H), monitor), []);
+  assert.match(run("feed-flat", fx(110_000_000_000_000n, start + 24 * H), monitor)[0].message, /^FX rate unchanged over 24\.0 business hours/);
+  // 1.1000 against 1.1120 (7 decimals): 107 bps apart, beyond half of 200.
+  const other = (price, decimals = 7, age = 60) => ({ label: "Reflector", decimals, reading: { price, timestamp: BigInt(start - age) } });
+  const compare = (fallback) => run("feed-flat", fx(110_000_000_000_000n, start, fallback), {}).filter((a) => /differ by/.test(a.message));
+  assert.match(compare(other(11_120_000n))[0].message, /^the fund's FX feed and Reflector differ by 107 bps, beyond half the 200 bps band$/);
+  assert.deepEqual(compare(other(11_050_000n)), []);
+  assert.deepEqual(compare(other(11_120_000n, 7, 4 * DAY)), []); // a stale second source is not compared
+  assert.deepEqual(compare(null), []);
 });
 
 test("keeper: the float must cover one 30-day slice of the code, about 215 XLM on testnet", () => {
