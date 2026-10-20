@@ -2,7 +2,7 @@
 // network, moves to the next endpoint and stays there; a request the RPC
 // refuses does not. No network: the endpoints are stand-ins.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
@@ -353,19 +353,68 @@ test("an endpoint that fails soon after each return rests longer each time, up t
   }
 });
 
-test("a failing call skips an endpoint that is resting, unless every other one is too", () => {
+test("a failing call skips an endpoint that is resting; with every other one resting, the calls stay where they are until a rest is over", () => {
   const chain = chainWith(fake("a.example", {}), fake("b.example", {}), fake("c.example", {}));
   chain.endpoints[1].failedAt = Date.now(); // b failed a moment ago
   assert.ok(chain.failover(new RpcTimeout(7000), 0));
   assert.equal(chain.rpcInfo().host, "c.example", "b rests: c takes the calls");
-  // a just failed and b rests: when c fails too, every other endpoint rests, and calls go to the next one.
-  assert.ok(chain.failover(new RpcTimeout(7000), 2));
-  assert.equal(chain.rpcInfo().host, "a.example");
-  // With two endpoints the other one takes the calls, resting or not.
+  // a just failed and b rests: when c fails too, there is nowhere to go; the calls stay on c, which rests too now.
+  assert.equal(chain.failover(new RpcTimeout(7000), 2), false);
+  assert.equal(chain.rpcInfo().host, "c.example");
+  assert.ok(Date.now() - chain.endpoints[2].failedAt < 1000, "c's failure is recorded");
+  assert.equal(chain.moveCount, 1);
+  // With two endpoints: the other one resting, the calls stay; once its rest is over, the next failure moves there.
   const two = chainWith(fake("a.example", {}), fake("b.example", {}));
   two.endpoints[1].failedAt = Date.now();
+  assert.equal(two.failover(new RpcTimeout(7000), 0), false);
+  assert.equal(two.rpcInfo().host, "a.example");
+  two.endpoints[1].failedAt = Date.now() - 2 * RETURN_QUIET_MS;
   assert.ok(two.failover(new RpcTimeout(7000), 0));
   assert.equal(two.rpcInfo().host, "b.example");
+});
+
+test("an outage of every endpoint: at most two moves in a minute, the reads come back at the first pass after it, and the first endpoint takes them back", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_792_500_000_000 });
+  try {
+    let outage = true;
+    const at = () => Math.floor(Date.now() / 1000);
+    const failing = () => {
+      throw new TypeError("Failed to fetch");
+    };
+    const server = () => ({
+      getHealth: async () => (outage ? failing() : { status: "healthy", latestLedger: 100 + Math.floor(at() / 5), latestLedgerCloseTime: String(at() - 2) }),
+      simulateTransaction: async () => (outage ? failing() : { ok: true }),
+    });
+    const chain = chainWith(fake("sdf.example", server()), fake("gfm.example", server()));
+    const start = Date.now();
+    const seconds = () => Math.round((Date.now() - start) / 1000);
+    const moves = [];
+    chain.onRpcChange = (c) => moves.push(`${seconds()}s:${c.reason}:${c.to}`);
+    const passes = [];
+    const pass = async () => {
+      await chain.pollHeights();
+      const results = await Promise.all(Array.from({ length: 10 }, () => chain.net(() => chain.server.simulateTransaction()).then(() => true, () => false)));
+      passes.push({ at: seconds(), ok: results.filter(Boolean).length, host: chain.rpcInfo().host });
+    };
+    const flush = async () => {
+      for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    };
+    // A pass every 15 s, as the page does; the outage lasts 60 s, then both endpoints answer again.
+    for (let t = 0; t <= 135_000; t += 50) {
+      if (t === 60_000) outage = false;
+      if (t % 15_000 === 0) pass();
+      mock.timers.tick(50);
+      await flush();
+    }
+    console.log(`outage: moves ${moves.join(" ")}; passes ${JSON.stringify(passes)}`);
+    const during = moves.filter((m) => Number.parseInt(m, 10) < 60);
+    assert.ok(during.length <= 2, `moves during the outage: ${moves.join(" ")}`);
+    const first = passes.find((p) => p.at >= 60);
+    assert.equal(first?.ok, 10, `the first pass after the recovery: ${JSON.stringify(passes)}`);
+    assert.equal(passes.at(-1).host, "sdf.example", `back on the first endpoint: ${moves.join(" ")}`);
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("an HTTP 429 is back-pressure on the same endpoint, not a failover", async () => {
@@ -486,7 +535,8 @@ test("calls that come back to an endpoint start its count of 429 polls again: on
   assert.equal(chain.rpcInfo().host, "a.example");
   await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
   assert.equal(chain.rpcInfo().host, "b.example");
-  // b fails too while a rests: the calls come back to a by net()'s own return.
+  // b fails too once a's rest is over: the calls come back to a by net()'s own return.
+  a.failedAt = Date.now() - 2 * RETURN_QUIET_MS;
   await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
   assert.equal(chain.rpcInfo().host, "a.example");
   assert.deepEqual(changes, ["timeout:b.example", "timeout:a.example"]);

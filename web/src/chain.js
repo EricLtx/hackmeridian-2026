@@ -699,13 +699,18 @@ export class Chain {
    * on the endpoint in use switches; the others find the switch done and
    * retry on the new endpoint, so the interface never bounces between them.
    * The endpoint left rests (`restAfterFailure`); the next one is the first
-   * after it that is not resting, or simply the next when every other one
-   * rests. False when there is no other endpoint, the error is not the
-   * network's, or it is an HTTP 429: back-pressure, which `net` waits out on
-   * the same endpoint. A 429 the caller marks `exhausted` (RATE_LIMIT_STRIKES
-   * in a row, or a Retry-After longer than a timeout) is a failure like any
-   * other, but only when another endpoint is not resting: with every other
-   * one resting, the caller keeps waiting as the endpoint asks. `since` is
+   * after it that is not resting. With every other one resting (an outage
+   * of them all), the calls stay where they are, the failure is recorded
+   * so that the endpoint in use rests too, and the caller retries at its
+   * own pace: a move waits for the shortest remaining rest, instead of one
+   * at every failure, back and forth ("failed" both ways, 11 times a
+   * minute). When the outage ends, the first endpoint takes the calls back
+   * on the usual level rule (`checkHeights`). False when there is no other
+   * endpoint, the error is not the network's, or it is an HTTP 429:
+   * back-pressure, which `net` waits out on the same endpoint. A 429 the
+   * caller marks `exhausted` (RATE_LIMIT_STRIKES in a row, or a Retry-After
+   * longer than a timeout) is a failure like any other, but its stay is not
+   * recorded as a failure: the caller keeps waiting as the endpoint asks. `since` is
    * the `moveCount` when the call started: a call that started before the
    * last move, such as a 12 s scan of events launched before a round trip
    * away and back, reports a failure of the past, so it follows the calls
@@ -718,12 +723,14 @@ export class Chain {
     if (limited && !exhausted) return false;
     if (from !== this.active || (since !== undefined && since !== this.moveCount)) return true;
     const now = Date.now();
-    if (limited && this.endpoints.every((endpoint, i) => i === from || resting(endpoint, now))) return false;
+    const next = this.nextEndpoint(this.active, now);
+    if (limited && next === null) return false;
     const previous = this.endpoints[this.active];
     previous.failures = (previous.failures ?? 0) + 1;
     previous.restMs = restAfterFailure(previous, now);
     previous.failedAt = now;
-    this.moveTo(this.nextEndpoint(this.active, now), now);
+    if (next === null) return false;
+    this.moveTo(next, now);
     try {
       const reason = error instanceof RpcTimeout ? "timeout" : limited ? "rate-limited" : "error";
       this.onRpcChange?.({ from: previous.host, to: this.endpoints[this.active].host, reason });
@@ -733,14 +740,14 @@ export class Chain {
     return true;
   }
 
-  /** The first endpoint after `from` that is not resting at `now`; the next one when every other one rests. */
+  /** The first endpoint after `from` that is not resting at `now`; null when every other one rests. */
   nextEndpoint(from, now = Date.now()) {
     const count = this.endpoints.length;
     for (let step = 1; step < count; step += 1) {
       const index = (from + step) % count;
       if (!resting(this.endpoints[index], now)) return index;
     }
-    return (from + 1) % count;
+    return null;
   }
 
   /**
