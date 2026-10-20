@@ -991,18 +991,29 @@ async function rehearse() {
       C.backupFeed = await deploy(state, "operator", "nav_oracle.wasm", [sv.address(pub("operator")), asset.other("USD"), sv.u32(14), sv.u32(300)]);
       saveState(state);
     }
-    const primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
+    let primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
     let t = await ledgerTime();
     await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t - 1)]);
     let active = await read(state, C.openWindow, "get_fallback", [fund]);
     if (!active) {
+      // Since rc5 a backup is checked against a fresh primary when it is
+      // proposed and when it is applied (oracle-5). On a fresh deployment
+      // the primary may be older than that allows by then: the operator
+      // republishes it, same price, fresh timestamp, and the backup that
+      // same price, before each of the two calls.
+      const alignFeeds = async () => {
+        primary = await read(state, C.navOracle, "lastprice", [fundAsset]);
+        const at = Math.max((await ledgerTime()) - 1, Number(primary.timestamp));
+        await invoke(state, "operator", C.navOracle, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(at)]);
+        await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(at)]);
+      };
       const feed = sv.struct({ oracle: sv.address(C.backupFeed), asset: fundAsset, max_age_secs: sv.u64(26 * 3600), max_divergence_bps: sv.u32(20) });
+      await alignFeeds();
       await invoke(state, "governor", C.openWindow, "propose_fallback", [fund, feed], { cosigners: ["steward"] });
       const pending = await read(state, C.openWindow, "pending_fallback", [fund]);
       console.log(`  backup feed proposed by governor and steward; applies after the delay (${Number(pending.eta) - (await ledgerTime())} s)`);
       while ((await ledgerTime()) < Number(pending.eta)) await sleep(10_000);
-      t = await ledgerTime();
-      await invoke(state, "operator", C.backupFeed, "publish", [fundAsset, sv.i128(BigInt(primary.price)), sv.u64(t - 1)]);
+      await alignFeeds();
       await invoke(state, "operator", C.openWindow, "apply_fallback", [fund]);
       active = await read(state, C.openWindow, "get_fallback", [fund]);
     }
