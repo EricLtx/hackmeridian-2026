@@ -8,13 +8,22 @@
 //   npm run upgrade -- --expect=<sha256>             propose, wait for the delay, upgrade, migrate
 //   npm run upgrade -- --propose --expect=<sha256>   propose and announce only
 //   npm run upgrade -- --apply --expect=<sha256>     upgrade and migrate a proposal whose delay has elapsed
+//   npm run upgrade -- --restore-code                restore the instance's own code if archived, then extend it
 //
 // `--expect` is the sha256 of night_window.wasm as `stellar contract build`
 // produces it at the release tag, in a clean shell. The built WASM must be
 // exactly that build, linked with the shipped 64 KiB stack, before anything
 // is uploaded, proposed or installed; and the script refuses to run while
 // NIGHT_WINDOW_STACK_SIZE or CARGO_TARGET_DIR is set (review finding
-// STATE-2, 20 October 2026).
+// STATE-2, 20 October 2026). `--restore-code` reads no build and needs none.
+//
+// The code entry is kept alive (review finding TOOL-4): the upload leaves it
+// at the network's minimum time to live (7 days on testnet), so it is
+// extended by one 30-day slice right after the upload, and after the
+// upgrade in 30-day slices until it has the 90 days the monitor keeps. Once
+// archived, every invocation would need a restore of the code, which the
+// footprint rule of the tooling refuses: `--restore-code` restores exactly
+// that entry, under its own cap. The keeper pays (the operator without one).
 //
 // Exits never wait for the migration: the contract keeps repurchase, seizure
 // and release open between `upgrade` and `migrate` (decision S6). New offers
@@ -25,22 +34,28 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CODE_RESTORE_MAX_FEE,
+  CODE_SLICE_MAX_FEE,
   Operation,
   STATE_DIR,
   UPLOAD_MAX_FEE,
   WASM_DIR,
   checkUpgradeWasm,
+  codeKey,
   explorer,
+  extendCode,
   invoke,
   ledgerEntries,
   ledgerTime,
   loadState,
   read,
+  restoreEntries,
   send,
   sleep,
   storageKey,
   sv,
 } from "./lib.mjs";
+import { CODE_MAX_DAYS, CODE_STEP_DAYS, LEDGER_SECS, LIMITS } from "./detectors.mjs";
 import { acknowledgeUpgrade, announceUpgrade } from "./monitor-state.mjs";
 
 const MONITOR_FILE = path.join(STATE_DIR, "monitor.json");
@@ -66,9 +81,21 @@ function expectedSchema() {
  */
 export function chainIo(state) {
   const ow = state.contracts.openWindow;
+  // Rent is paid by the keeper, an account with no role; older states fall back to the operator.
+  const payer = state.keys?.keeper ? "keeper" : "operator";
   return {
     // The upload needs a funded account, not a role: the operator pays it.
     upload: (wasm) => send(state, "operator", Operation.uploadContractWasm({ wasm }), "upload night_window.wasm", { maxResourceFee: UPLOAD_MAX_FEE }),
+    /** Days the code entry `hex` has to live, or null when it is archived or missing. */
+    codeLife: async (hex) => {
+      const read1 = await ledgerEntries([codeKey(hex)]);
+      const entry = read1.entries[0];
+      const days = entry ? ((entry.liveUntil - read1.latest) * LEDGER_SECS) / 86_400 : null;
+      return days === null || days <= 0 ? null : days;
+    },
+    // One slice at most, a shorter one when the rent has risen (TOOL-6).
+    extendCode: (hex, fromDays, toDays) => extendCode(state, payer, codeKey(hex), { fromDays, toDays, maxResourceFee: CODE_SLICE_MAX_FEE }),
+    restoreCode: (hex) => restoreEntries(state, payer, [codeKey(hex)], { maxResourceFee: CODE_RESTORE_MAX_FEE }),
     invoke: (role, fn, args = [], options = {}) => invoke(state, role, ow, fn, args, options),
     read: (fn, args = []) => read(state, ow, fn, args),
     ledgerTime,
@@ -96,7 +123,17 @@ export async function propose(state, { wasm, expect, env = process.env, io = cha
     io.log("the instance already runs this code; nothing to propose");
     return null;
   }
-  await io.upload(wasm);
+  const uploaded = await io.codeLife(built.hex);
+  if (uploaded === null) await io.upload(wasm);
+  else io.log(`the code is already uploaded, ${uploaded.toFixed(1)} days to live: upload skipped`);
+  // An upload leaves the entry at the network's minimum time to live (7
+  // days on testnet): one 30-day slice at once, before anything depends on
+  // it (TOOL-4); the rest after the upgrade.
+  const life = await io.codeLife(built.hex);
+  if (life === null || life < CODE_STEP_DAYS) {
+    const r = await io.extendCode(built.hex, life ?? 0, CODE_STEP_DAYS);
+    io.log(`new code extended to about ${r.days.toFixed(0)} days${r.fee == null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`}`);
+  }
   // Announced before it is proposed: a running watch must never read the
   // proposal before the announcement and cancel it (TOOL-3).
   io.announce(built.hex);
@@ -155,6 +192,44 @@ export async function apply(state, { wasm, expect, env = process.env, io = chain
   } else {
     io.log(`schema ${version}: nothing to migrate`);
   }
+  await keepCodeAlive(io, built.hex);
+}
+
+/**
+ * Extends the code entry `hex` in 30-day slices until it has at least
+ * `LIMITS.codeTtlDays` (90) to live, the policy the monitor keeps, then
+ * prints its time to live and returns it in days (TOOL-4).
+ */
+export async function keepCodeAlive(io, hex) {
+  let life = await io.codeLife(hex);
+  if (life === null) throw new Error(`the code ${hex.slice(0, 12)}… is archived or missing: npm run upgrade -- --restore-code`);
+  while (life < LIMITS.codeTtlDays) {
+    const r = await io.extendCode(hex, life, Math.min(life + CODE_STEP_DAYS, CODE_MAX_DAYS));
+    const before = life;
+    life = await io.codeLife(hex);
+    if (life === null || life <= before) throw new Error(`the code ${hex.slice(0, 12)}… did not gain a day of life from its extension; extend it by hand`);
+    io.log(`  code extended to ${life.toFixed(1)} days${r.fee == null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`}`);
+  }
+  io.log(`code ${hex.slice(0, 12)}… has ${life.toFixed(1)} days to live (at least ${LIMITS.codeTtlDays}: the monitor's keeper extends it from there)`);
+  return life;
+}
+
+/**
+ * Restores the instance's own code entry when it is archived, a
+ * RestoreFootprint on exactly that key under its own cap, then extends it to
+ * the 90-day policy (TOOL-4). A live entry is only extended.
+ */
+export async function restoreCode(state, { io = chainIo(state) } = {}) {
+  const hex = await io.executableHash();
+  if (!hex) throw new Error("the instance's executable is unreadable: nothing restored");
+  const life = await io.codeLife(hex);
+  if (life === null) {
+    const r = await io.restoreCode(hex);
+    io.log(`code ${hex.slice(0, 12)}… restored${r.fee == null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`}  ${explorer(r.hash)}`);
+  } else {
+    io.log(`code ${hex.slice(0, 12)}… is live, ${life.toFixed(1)} days to live: nothing to restore`);
+  }
+  return keepCodeAlive(io, hex);
 }
 
 async function main(args) {
@@ -163,6 +238,7 @@ async function main(args) {
     console.error("No deployment found: run `npm run setup` first.");
     process.exit(1);
   }
+  if (args.includes("--restore-code")) return restoreCode(state);
   const expect = args.find((a) => a.startsWith("--expect="))?.slice("--expect=".length);
   const wasm = fs.readFileSync(path.join(WASM_DIR, "night_window.wasm"));
   if (args.includes("--apply")) return apply(state, { wasm, expect });

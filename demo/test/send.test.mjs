@@ -337,3 +337,26 @@ test("a release writes the trustline of a holder it does not name only once the 
   await assert.rejects(lib.invoke(deployment, "keeper", OW, "release", release, { extraAddresses: [holder.publicKey()] }), /to authorize this call, which does not expect it; nothing signed/);
   assert.equal(sent.length, 1);
 });
+
+test("a restore of the instance's own code restores exactly that entry, under its own cap (TOOL-4)", async () => {
+  const code = lib.codeKey(Buffer.alloc(32, 3));
+  answer.readOnly = [];
+  answer.readWrite = [code];
+  // About what an upload costs: the entry rented again for the network's minimum time to live.
+  answer.fee = 60n * XLM;
+  await assert.rejects(lib.restoreEntries(state, "keeper", [code]), /above the 25\.00 XLM/);
+  await lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE });
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].operations[0].type, "restoreFootprint");
+  // Another code, a second entry, or anything read-only: refused before a signature.
+  for (const [readOnly, readWrite] of [[[], [lib.codeKey(Buffer.alloc(32, 4))]], [[], [code, dataKey(OW, 1)]], [[instanceKey(OW)], [code]]]) {
+    answer.readOnly = readOnly;
+    answer.readWrite = readWrite;
+    await assert.rejects(lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE }), /restores other entries than the 1 asked; nothing signed \(rpc-1\)$/);
+  }
+  answer.readOnly = [];
+  answer.readWrite = [code];
+  answer.fee = lib.CODE_RESTORE_MAX_FEE + 1n;
+  await assert.rejects(lib.restoreEntries(state, "keeper", [code], { maxResourceFee: lib.CODE_RESTORE_MAX_FEE }), /above the 100\.00 XLM/);
+  assert.equal(sent.length, 1);
+});

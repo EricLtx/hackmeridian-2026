@@ -1203,6 +1203,56 @@ export async function extendCode(state, sourceRole, key, { fromDays, toDays, max
 }
 
 /**
+ * The most a restore of the contract code may cost: it rents the entry
+ * again for the network's minimum time to live and writes it back, about
+ * what an upload costs (60 XLM for night_window.wasm on testnet, 20 October
+ * 2026).
+ */
+export const CODE_RESTORE_MAX_FEE = 1_000_000_000n;
+
+/**
+ * Refuses a restore whose footprint is not exactly the requested keys,
+ * read-write, with nothing read-only: the payer restores what it was asked
+ * to, never a stranger's entry (rpc-1).
+ */
+export function checkRestoreFootprint(ready, keys, label) {
+  const { readOnly, readWrite } = sorobanDataOf(ready).resources.footprint;
+  const asked = new Set(keys.map((k) => k.toXDR("base64")));
+  const got = new Set(readWrite.map((k) => k.toXDR("base64")));
+  if (readOnly.length || got.size !== asked.size || [...got].some((k) => !asked.has(k))) {
+    throw new Error(`${label}: the simulation restores other entries than the ${keys.length} asked; ${NOTHING_SIGNED} (rpc-1)`);
+  }
+}
+
+/**
+ * Restores archived persistent entries: a RestoreFootprint on exactly
+ * `keys`, paid by `sourceRole`, at most `maxResourceFee`. `send` refuses the
+ * automatic restore of a contract's code that an invocation's simulation
+ * asks for (a footprint that writes code); this is the explicit restore of
+ * the instance's own code, under its own cap (review finding TOOL-4,
+ * 20 October 2026). Returns `{ hash, seconds, fee }`.
+ */
+export async function restoreEntries(state, sourceRole, keys, { maxResourceFee = MAX_RESOURCE_FEE } = {}) {
+  const label = `${sourceRole} restore`;
+  const source = keypair(state, sourceRole);
+  const account = await net(() => server.getAccount(source.publicKey()), "account");
+  const tx = new TransactionBuilder(account, { fee: INCLUSION_FEE, networkPassphrase: PASSPHRASE })
+    .addOperation(Operation.restoreFootprint({}))
+    .setSorobanData(new SorobanDataBuilder().setReadWrite(keys).build())
+    .setTimeout(TX_VALIDITY_SECS)
+    .build();
+  const sim = await net(() => server.simulateTransaction(tx), "simulate");
+  if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
+  checkSimulatedFee(sim, maxResourceFee, label);
+  const ready = rpc.assembleTransaction(tx, sim).build();
+  checkRestoreFootprint(ready, keys, label);
+  checkFee(ready, maxResourceFee, label);
+  signTx(state, sourceRole, ready);
+  const { hash: txHash, seconds, fee } = await submit(ready, label);
+  return { hash: txHash, seconds, fee };
+}
+
+/**
  * The latest ledger of every configured endpoint, asked in parallel: one
  * `{ url, sequence }` or `{ url, error }` per endpoint, in `RPC_URLS` order.
  * Bypasses the failover proxy on purpose: a cross-check needs every answer.

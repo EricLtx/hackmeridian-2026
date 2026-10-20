@@ -41,13 +41,32 @@ const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const SHIPPED = wasmWith(65_536);
 const CANARY = wasmWith(8_192);
 
-/** The chain and the monitor's file as a recorder: every call, in order. */
-function recorder({ executable = null, pending = null, now = 1_000, held = null } = {}) {
+/**
+ * The chain and the monitor's file as a recorder: every call, in order.
+ * `life` is the days the code entry has to live (null: not uploaded, or
+ * archived); an upload leaves 7, as on testnet, and an extension what it asked.
+ */
+function recorder({ executable = null, pending = null, now = 1_000, held = null, life = null } = {}) {
   const calls = [];
   const reads = { pending_upgrade: pending, schema_version: 2 };
+  let days = life;
   return {
     calls,
-    upload: async () => calls.push(["upload"]),
+    upload: async () => {
+      calls.push(["upload"]);
+      days = 7;
+    },
+    codeLife: async () => days,
+    extendCode: async (hex, fromDays, toDays) => {
+      calls.push(["extend", hex, Number(fromDays.toFixed(1)), Number(toDays.toFixed(1))]);
+      days = toDays;
+      return { days: toDays, fee: 2_570_000_000n, seconds: 1, hash: "cd".repeat(32) };
+    },
+    restoreCode: async (hex) => {
+      calls.push(["restore", hex]);
+      days = 7;
+      return { fee: 600_000_000n, seconds: 1, hash: "ef".repeat(32) };
+    },
     invoke: async (role, fn, args = []) => {
       calls.push(["invoke", role, fn, ...args.map((a) => (a.type === "scvBytes" ? Buffer.from(scValToNative(a)).toString("hex") : a.type))]);
       if (fn === "propose_upgrade") reads.pending_upgrade = { wasm_hash: Buffer.from(scValToNative(args[0])), eta: BigInt(now + 300) };
@@ -103,7 +122,7 @@ test("propose and apply refuse before any chain call, and propose uploads, annou
   const io = recorder({ executable: "f5".repeat(32) });
   const proposed = await upgrade.propose(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io });
   assert.equal(proposed.hex, sha(SHIPPED));
-  assert.deepEqual(io.calls, [["executable"], ["upload"], ["announce", sha(SHIPPED)], ["invoke", "governor", "propose_upgrade", sha(SHIPPED)], ["read", "pending_upgrade"]]);
+  assert.deepEqual(io.calls.filter(([kind]) => kind !== "extend"), [["executable"], ["upload"], ["announce", sha(SHIPPED)], ["invoke", "governor", "propose_upgrade", sha(SHIPPED)], ["read", "pending_upgrade"]]);
   // Already running that code: nothing to propose.
   const same = recorder({ executable: sha(SHIPPED) });
   assert.equal(await upgrade.propose(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: same }), null);
@@ -130,8 +149,37 @@ test("apply installs only the built and expected code: a pending upgrade to othe
   await assert.rejects(upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: swapped }), /nothing signed/);
   assert.equal(swapped.calls.some(([kind]) => kind === "invoke"), false);
   // Once the expected code is the one pending, it is installed, and the monitor's baseline follows.
-  const ours = recorder({ pending: { wasm_hash: Buffer.from(sha(SHIPPED), "hex"), eta: 1_000n }, held: sha(SHIPPED) });
+  const ours = recorder({ pending: { wasm_hash: Buffer.from(sha(SHIPPED), "hex"), eta: 1_000n }, held: sha(SHIPPED), life: 95 });
   await upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: ours });
   assert.deepEqual(ours.calls.filter(([kind]) => kind === "invoke"), [["invoke", "governor", "upgrade", sha(SHIPPED)]]);
   assert.ok(ours.calls.some(([kind, hex]) => kind === "acknowledge" && hex === sha(SHIPPED)));
+});
+
+test("the new code gets one 30-day slice right after the upload, and slices to 90 days after the upgrade (TOOL-4)", async () => {
+  // Propose: upload (the network's 7 days), then one slice, before the announcement and the proposal.
+  const io = recorder({ executable: "f5".repeat(32) });
+  await upgrade.propose(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io });
+  assert.deepEqual(io.calls.slice(0, 4), [["executable"], ["upload"], ["extend", sha(SHIPPED), 7, 30], ["announce", sha(SHIPPED)]]);
+  // Code uploaded earlier and still alive: no second upload, and no slice it does not need.
+  const again = recorder({ executable: "f5".repeat(32), life: 45 });
+  await upgrade.propose(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: again });
+  assert.equal(again.calls.some(([kind]) => kind === "upload" || kind === "extend"), false);
+  // Apply: after the upgrade, 30-day slices until 90 days or more, never past 120.
+  const applied = recorder({ pending: { wasm_hash: Buffer.from(sha(SHIPPED), "hex"), eta: 1_000n }, held: sha(SHIPPED), life: 29.9 });
+  const lines = [];
+  applied.log = (line) => lines.push(line);
+  await upgrade.apply(state, { wasm: SHIPPED, expect: sha(SHIPPED), env: CLEAN, io: applied });
+  assert.deepEqual(applied.calls.filter(([kind]) => kind === "extend"), [["extend", sha(SHIPPED), 29.9, 59.9], ["extend", sha(SHIPPED), 59.9, 89.9], ["extend", sha(SHIPPED), 89.9, 119.9]]);
+  const extendedAfter = applied.calls.findIndex(([kind]) => kind === "extend");
+  assert.ok(extendedAfter > applied.calls.findIndex(([kind, , fn]) => kind === "invoke" && fn === "upgrade"), "extended once installed");
+  assert.ok(lines.at(-1).startsWith(`code ${sha(SHIPPED).slice(0, 12)}… has 119.9 days to live (at least 90`), lines.at(-1));
+});
+
+test("--restore-code restores exactly the instance's own archived code, then extends it; a live code is only extended (TOOL-4)", async () => {
+  const archived = recorder({ executable: sha(SHIPPED), life: null });
+  assert.ok((await upgrade.restoreCode(state, { io: archived })) >= 90);
+  assert.deepEqual(archived.calls, [["executable"], ["restore", sha(SHIPPED)], ["extend", sha(SHIPPED), 7, 37], ["extend", sha(SHIPPED), 37, 67], ["extend", sha(SHIPPED), 67, 97]]);
+  const live = recorder({ executable: sha(SHIPPED), life: 100 });
+  assert.equal(await upgrade.restoreCode(state, { io: live }), 100);
+  assert.deepEqual(live.calls, [["executable"]]);
 });
