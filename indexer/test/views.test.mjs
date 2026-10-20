@@ -116,6 +116,24 @@ test("the SFTR view carries only what the chain holds and names its sources", ()
   assert.match(r3.source, /haircut:fund_set\/fund_limits_set/);
 });
 
+test("the SFTR haircut is the one the opening applied, from repo_valued, when the journal has it (arith-6)", () => {
+  // Repo 3 is priced through an exchange rate: the opening applied 300 bps on the fund plus 150 on the rate.
+  const valued = chainLine(FIXTURE[FIXTURE.length - 1], at(109, "2026-10-15T22:11:00Z", "repo_valued", ["3", FUND], {
+    fx: "111880000000000", fx_applied: "111980000000000", fx_time: "1792199000", haircut_bps: 450, nav: "108500000000000", nav_time: "1792198000", price: "96892302196820",
+  }));
+  const rows = sftr([...FIXTURE, valued]);
+  const r3 = rows.find((r) => r.uti === "3");
+  assert.equal(r3.collateral_haircut_bps, "450");
+  assert.match(r3.source, /haircut:repo_valued/);
+  assert.doesNotMatch(r3.source, /fund_set/);
+  // A repo opened before rc5 has no valuation event: the fund's haircut, and the source says so.
+  const r1 = rows.find((r) => r.uti === "1");
+  assert.equal(r1.collateral_haircut_bps, "200");
+  assert.match(r1.source, /haircut:fund_set\/fund_limits_set/);
+  // The registry is the same with or without the valuation.
+  assert.deepEqual(registry([...FIXTURE, valued]), registry(FIXTURE));
+});
+
 test("CSV quotes fields with commas or quotes and keeps a header", () => {
   const text = toCsv(["a", "b"], [{ a: "x,y", b: 'say "hi"' }, { a: null, b: 1 }]);
   assert.equal(text, 'a,b\n"x,y","say ""hi"""\n,1\n');

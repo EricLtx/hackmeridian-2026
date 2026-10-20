@@ -102,15 +102,20 @@ export const SFTR_COLUMNS = [
  * An SFTR-shaped line per repo (Regulation (EU) 2015/2365, RTS Annex I,
  * tables 1 and 2), from what the chain carries. `uti` is the repo id;
  * both legs settle in one transaction (DVP), so the value date is the
- * execution timestamp. The haircut is the fund's `haircut_bps` from the
- * latest `fund_set` or `fund_limits_set` before the opening, when journaled.
+ * execution timestamp. The haircut is the one the opening applied, fund
+ * plus exchange rate, from the repo's `repo_valued` event (rc5) when the
+ * journal has it; otherwise the fund's `haircut_bps` from the latest
+ * `fund_set` or `fund_limits_set` before the opening, which leaves out the
+ * exchange-rate haircut of a cross-priced fund. `source` says which.
  */
 export function sftr(lines) {
   const rows = registry(lines);
   const haircuts = []; // { fund, at (ISO), bps }
+  const applied = new Map(); // repo_id -> haircut_bps of its repo_valued event
   for (const line of lines) {
     const name = eventName(line);
     if (name === "fund_set" || name === "fund_limits_set") haircuts.push({ fund: str(line.topics?.[1]), at: line.closedAt, bps: str(line.data?.haircut_bps) });
+    else if (name === "repo_valued" && str(line.data?.haircut_bps) !== "") applied.set(str(line.topics?.[1]), str(line.data.haircut_bps));
   }
   const haircutAt = (fund, at) => {
     const known = haircuts.filter((h) => h.fund === fund && h.at <= at);
@@ -119,9 +124,11 @@ export function sftr(lines) {
   return rows.map((r) => {
     const closed = r.closure !== "";
     const repaid = r.closure === STATUS.REPURCHASED && r.principal !== "" && r.interest !== "";
-    const haircut = r.fund && r.opened_at ? haircutAt(r.fund, r.opened_at) : "";
+    const valued = applied.get(r.repo_id);
+    const haircut = valued ?? (r.fund && r.opened_at ? haircutAt(r.fund, r.opened_at) : "");
     const notes = [r.source];
-    if (r.fund && r.opened_at) notes.push(haircut ? "haircut:fund_set/fund_limits_set" : "haircut:not in chain");
+    if (valued !== undefined) notes.push("haircut:repo_valued");
+    else if (r.fund && r.opened_at) notes.push(haircut ? "haircut:fund_set/fund_limits_set" : "haircut:not in chain");
     const values = {
       uti: r.repo_id,
       sft_type: "REPO",
