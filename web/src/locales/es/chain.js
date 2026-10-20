@@ -15,4 +15,5 @@ export default {
   "Submitted. Waiting for the next ledger.": "Enviada. Esperando el próximo ledger.",
   "Still waiting. It can land until {until}; it is not failed before then.":
     "Seguimos esperando. Puede registrarse hasta las {until}; no ha fallado antes de esa hora.",
+  "The network asked for an unusually high fee ({fee} XLM). Nothing was signed.": "La red pidió una comisión inusualmente alta ({fee} XLM). No se firmó nada.",
 };

@@ -127,7 +127,76 @@ function cursorLedger(cursor) {
   }
 }
 
-const normalizeRepo = (id, repo) => ({ id, ...repo, status: Array.isArray(repo.status) ? repo.status[0] : repo.status });
+// Decoded values come from an RPC and from contracts the page does not
+// control (an exchange-rate feed): their shape is checked here, at the
+// boundary, so that nothing but integers and Stellar addresses reaches the
+// markup where a number or an address is expected.
+const STRKEY = /^[GC][A-Z2-7]{55}$/;
+const isInt = (v) => typeof v === "bigint" || Number.isSafeInteger(v);
+
+/** Throws unless every listed field of `value` is an integer or, for `addresses`, a Stellar address. */
+export function checkShape(value, { ints = [], addresses = [], what = "value" } = {}) {
+  if (!value || typeof value !== "object") throw new TypeError(`unexpected ${what} from the chain`);
+  for (const k of ints) if (k in value && !isInt(value[k])) throw new TypeError(`unexpected ${what}.${k} from the chain`);
+  for (const k of addresses) if (k in value && !(typeof value[k] === "string" && STRKEY.test(value[k]))) throw new TypeError(`unexpected ${what}.${k} from the chain`);
+  return value;
+}
+
+/** A SEP-40 price as `lastprice` returns it: `{ price, timestamp }`, both integers, or the error to show. */
+export function checkPrice(settled) {
+  if (!settled || settled.error || settled.value === null || settled.value === undefined) return settled;
+  try {
+    checkShape(settled.value, { ints: ["price", "timestamp"], what: "price" });
+    if (!("price" in settled.value) || !("timestamp" in settled.value)) throw new TypeError("unexpected price from the chain");
+    return settled;
+  } catch (error) {
+    return { error };
+  }
+}
+
+/** Decimals read on chain stay between 0 and 38: a larger one would freeze the page in a power of ten. */
+const DECIMAL_KEYS = ["nav_decimals", "fx_decimals", "price_decimals", "decimals"];
+export function checkDecimals(value, what = "value") {
+  for (const k of DECIMAL_KEYS) {
+    if (value && typeof value === "object" && k in value) {
+      const d = Number(value[k]);
+      if (!Number.isSafeInteger(d) || d < 0 || d > 38) throw new TypeError(`unexpected ${what}.${k} from the chain`);
+    }
+  }
+  return value;
+}
+const settledDecimals = (what) => (settled) => {
+  if (!settled || settled.error || !settled.value) return settled;
+  try {
+    checkDecimals(settled.value, what);
+    return settled;
+  } catch (error) {
+    return { error };
+  }
+};
+
+/** The most a simulation may ask in resource fees before anything is signed: legitimate calls cost about 1 XLM on testnet. */
+export const MAX_RESOURCE_FEE = 250_000_000n;
+
+const REPO_INTS = ["offer_id", "shares", "principal", "rate_bps", "opened_at", "maturity"];
+const REPO_ADDRESSES = ["borrower", "lender", "fund", "stablecoin"];
+const OFFER_INTS = ["available", "rate_bps", "max_term"];
+const OFFER_ADDRESSES = ["lender", "stablecoin"];
+const STATUSES = new Set(["Open", "Repurchased", "Defaulted"]);
+
+const normalizeRepo = (id, repo) => {
+  checkShape(repo, { ints: REPO_INTS, addresses: REPO_ADDRESSES, what: "repo" });
+  const status = Array.isArray(repo.status) ? repo.status[0] : repo.status;
+  if (!STATUSES.has(status)) throw new TypeError("unexpected repo.status from the chain");
+  // The scanned id comes last: a decoded field named id cannot replace it.
+  return { ...repo, id, status };
+};
+
+const normalizeOffer = (id, offer) => {
+  checkShape(offer, { ints: OFFER_INTS, addresses: OFFER_ADDRESSES, what: "offer" });
+  if (!Array.isArray(offer.funds) || !offer.funds.every((f) => typeof f === "string" && STRKEY.test(f))) throw new TypeError("unexpected offer.funds from the chain");
+  return { ...offer, id, sponsor: offer.sponsor === true };
+};
 
 /** Decoded Soroban values as plain JSON, as the indexer writes them: big integers as strings, bytes as hex. */
 export function plain(value) {
@@ -295,11 +364,13 @@ export class Chain {
 
   /** What `shares` of `fund` (default: the interface's fund) secure now, fully checked by the contract. */
   quote(shares, fund = this.fund) {
-    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]);
+    return this.read(this.contracts.openWindow, "quote", [sv.address(fund), sv.i128(shares), sv.address(this.contracts.stablecoin)]).then((q) =>
+      checkDecimals(checkShape(q, { ints: ["max_principal", "price", "price_decimals", "haircut_bps"], what: "quote" }), "quote"),
+    );
   }
 
   async offers() {
-    return (await this.scan("get_offer")).map(({ id, value }) => ({ id, ...value }));
+    return (await this.scan("get_offer")).map(({ id, value }) => normalizeOffer(id, value));
   }
 
   /** Repos from `from` on, until the first id with no repo. */
@@ -330,7 +401,7 @@ export class Chain {
     const fund = sv.address(this.fund);
     const [config, state, paused, maxTerm, nav, quote, offers, cap, outstanding, now] = await Promise.all([
       this.settle(ow, "get_fund", [fund]),
-      this.settle(ow, "get_fund_state", [fund]),
+      this.settle(ow, "get_fund_state", [fund]).then(settledDecimals("fund state")),
       this.settle(ow, "is_paused"),
       this.settle(ow, "max_term"),
       this.settle(ow, "fund_price", [fund]),
@@ -343,12 +414,15 @@ export class Chain {
     let fx = { value: null };
     const source = config.value?.source;
     if (Array.isArray(source) && source[0] === "Cross") {
-      fx = await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]);
+      fx = checkPrice(await this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]));
     }
     // Every admitted fund the deployment lists (one, or two after `setup -- --second-fund`): settings and state.
     const funds = await Promise.all(
       (this.deployment.funds ?? []).map(async (f) => {
-        const [cfg, st] = await Promise.all([this.settle(ow, "get_fund", [sv.address(f.shares)]), this.settle(ow, "get_fund_state", [sv.address(f.shares)])]);
+        const [cfg, st] = await Promise.all([
+          this.settle(ow, "get_fund", [sv.address(f.shares)]),
+          this.settle(ow, "get_fund_state", [sv.address(f.shares)]).then(settledDecimals("fund state")),
+        ]);
         return { ...f, config: cfg, state: st };
       }),
     );
@@ -416,7 +490,7 @@ export class Chain {
     const source = config?.source;
     const [nav, fx] = await Promise.all([
       this.settle(this.contracts.openWindow, "fund_price", [sv.address(fund)]),
-      Array.isArray(source) && source[0] === "Cross" ? this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]) : { value: null },
+      Array.isArray(source) && source[0] === "Cross" ? this.settle(source[1].oracle, "lastprice", [assetScVal(source[1].asset)]).then(checkPrice) : { value: null },
     ]);
     return { nav, fx };
   }
@@ -520,6 +594,11 @@ export class Chain {
       .build();
     const sim = await this.net(() => this.server.simulateTransaction(tx));
     if (rpc.Api.isSimulationError(sim)) throw decodeSimulationError(sim.error, this.kinds);
+    // The simulation sets the resource fee the wallet is asked to sign: an RPC that inflates it is refused here.
+    const asked = BigInt(sim.minResourceFee ?? 0);
+    if (asked > MAX_RESOURCE_FEE) {
+      throw new TransactionError("TxRefused", t("The network asked for an unusually high fee ({fee} XLM). Nothing was signed.", { fee: formatUnits(asked, 7, { digits: 2 }) }));
+    }
     const ready = rpc.assembleTransaction(tx, sim).build();
     const signed = await this.signWith(signer, ready, onStatus);
     const { result, hash, seconds, fee } = await this.submit(signed, onStatus);

@@ -281,7 +281,7 @@ function renderBoard() {
   const tiles = [];
   const navCurrency = S.dep.fund.navCurrency;
   const tooOld = `${esc(t("Too old to lend against."))} `;
-  const since = (timestamp) => `<span data-since="${timestamp}"></span>`;
+  const since = (timestamp) => `<span data-since="${esc(String(timestamp))}"></span>`;
   if (b.nav.value && state) {
     const old = config && ts - Number(b.nav.value.timestamp) > Number(config.nav_max_age_secs);
     tiles.push(

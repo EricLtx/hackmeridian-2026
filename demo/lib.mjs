@@ -48,6 +48,10 @@ export const WASM_DIR = path.join(ROOT, "target", "wasm32v1-none", "release");
 export const RPC_URLS = (process.env.STELLAR_RPC_URLS ?? process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org,https://soroban-rpc.testnet.stellar.gateway.fm")
   .split(",").map((u) => u.trim()).filter(Boolean);
 export const RPC_URL = RPC_URLS[0];
+/** Endpoints written into the public web deployment file: keyless public RPCs only. */
+const WEB_RPC_URL = process.env.WEB_RPC_URL ?? "https://soroban-testnet.stellar.org";
+const WEB_RPC_FALLBACKS = (process.env.WEB_RPC_FALLBACKS ?? "https://soroban-rpc.testnet.stellar.gateway.fm")
+  .split(",").map((u) => u.trim()).filter((u) => u.startsWith("https://") && u !== WEB_RPC_URL);
 export const PASSPHRASE = Networks.TESTNET;
 export const FRIENDBOT = "https://friendbot.stellar.org";
 const servers = RPC_URLS.map((url) => new rpc.Server(url));
@@ -693,9 +697,10 @@ export function writeDeployment(state) {
   const pub = (role) => keypair(state, role).publicKey();
   const deployment = {
     network: "testnet",
-    rpcUrl: RPC_URL,
-    // The web interface moves to these when the first RPC is slow or down.
-    rpcFallbacks: RPC_URLS.slice(1).filter((url) => url.startsWith("https://")),
+    // The web endpoints are public by construction: the operator's own list (STELLAR_RPC_URLS) may
+    // carry an API key and never reaches the published file. WEB_RPC_URL and WEB_RPC_FALLBACKS override.
+    rpcUrl: WEB_RPC_URL,
+    rpcFallbacks: WEB_RPC_FALLBACKS,
     networkPassphrase: PASSPHRASE,
     explorer: "https://stellar.expert/explorer/testnet",
     contracts: {
