@@ -187,7 +187,7 @@ function simulationError(sim) {
 // Network resilience
 // ---------------------------------------------------------------------------
 //
-// Testnet RPC drops a request now and then, and a hackathon room shares one
+// Testnet RPC drops a request now and then, and a crowded room shares one
 // uplink. Reads go through `net`, which retries transient failures with
 // exponential backoff. Submissions go through `submit`, which never gives up
 // before the transaction's validity window has closed.

@@ -26,7 +26,7 @@ flowchart LR
     BK[Backup NAV feed<br/>SEP-40, optional]
   end
   subgraph Tooling["Tooling (demo/, indexer/, web/)"]
-    W[Web interface<br/>Freighter; guided view and terminal view;<br/>positions, history]
+    W[Web interface on GitHub Pages<br/>Freighter; guided view and terminal view;<br/>EN, FR, ES; two public RPCs]
     D[setup / run / upgrade / inventory]
     M[monitor: 13 detectors per fund<br/>actor with the sentinel, witness elsewhere]
     X[indexer: append-only journal,<br/>hash chain anchored on chain,<br/>register and SFTR views]
@@ -65,8 +65,8 @@ Three facts shape everything else. The issuer never lends against its own fund (
 | Stellar Asset Contract | Stellar's own token contract for classic assets | the third demo fund's share: a token this repository did not write, with the issuer's native flags | testnet |
 | `demo/` | Node 20, `@stellar/stellar-sdk` 17 | `setup` (deployment, roles, admissions, offers), `run` (scenes), `upgrade` (governed upgrade and migration), `inventory`, `monitor`, `keys` (ceremonies), `measure`, `fxlog`, `onboard` | the operator's host |
 | `indexer/` | Node 20 | event journal beyond the RPC's retention, SHA-256 hash chain, on-chain anchor, CSV, register and SFTR exports, `history.json` for the web | the operator's host |
-| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page; English, French and Spanish | static files |
-| CI | GitHub Actions | `cargo fmt --check`, `stellar contract build`, size budget, `clippy -D warnings`, `cargo test`, web tests and build, `cargo deny`, RustSec audit, link check | GitHub |
+| `web/` | Vite, plain JavaScript, Freighter | two views of one state: a guided page (guide per party with live terms, market board, borrow, positions with timelines, lend) and a terminal view for desk users (command line, offer book, tickets, blotter, funds, tape); a history page; English, French and Spanish; two public RPCs with failover; every value read from the chain checked before display, a content security policy, simulated fees capped before signing | static files, published on GitHub Pages by `pages.yml` |
+| CI | GitHub Actions | `cargo fmt --check`, `stellar contract build`, size budget, `clippy -D warnings`, `cargo test`, web tests and build, `cargo deny`, RustSec audit, link check; Pages deployment of `web/` | GitHub |
 
 ## 3. The contract's components
 
@@ -223,6 +223,8 @@ flowchart TB
 
 Persistent entries are extended at every write and, for the entries an exit reads (lender approvals, attestations, steward backups), at every read; the monitor alerts when an open entry nears archival. The schema version (S29) names the stored layout: after an upgrade, `migrate` (governor and trustee) transforms it; entries refuse to open while the layout is behind the code, exits never check.
 
+Cost per call, measured on the testnet instance from the validators' own metrics of executed rc4 transactions (20 October 2026): the heaviest opening (a cross-currency fund, three price reads) used 6,645,361 instructions, 1.66 % of the 400 million a transaction may use, and about 1.9 ms of execution; an opening on a share held through the Stellar Asset Contract used 3,611,825. Every path is bounded by constants (at most eight funds per offer, no loop over positions), so the cost does not grow with usage, and the time a user waits is the ledger close (about five seconds) and the RPC, not the contract. Fees are dominated by rent: an opening was charged about 0.74 to 0.76 XLM of resource fees, most of it for the new repo entry, which receives a lifetime of 120 days at once.
+
 ## 8. Several funds and stablecoins as data
 
 ```mermaid
@@ -280,6 +282,8 @@ flowchart LR
 ```
 
 Nineteen drills, one per detector with a real trigger, were rehearsed on the testnet instance on 18 October 2026 ([incident-procedure.md](incident-procedure.md), section 5).
+
+The web interface sits on its own trust boundary (F7 in [threat-model-stride.md](threat-model-stride.md)). It reads the chain through public RPCs, SDF's first and Gateway.fm's when the first is slow or down, each call with its own time limit. Every value it decodes is checked before it reaches the page; the content security policy of its pages limits connections to those endpoints and Friendbot; a simulation that asks more than 25 XLM of fees is refused before the wallet is asked to sign. The published deployment file lists only keyless public endpoints.
 
 ## 11. Build and audit chain
 

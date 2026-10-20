@@ -22,7 +22,7 @@ This page shows two things. First, what the minimum viable product already prove
 | The lender is paid principal and interest, or gets the shares at maturity | Tests `repurchase_after_a_weekend_pays_interest_to_the_lender`, `seizure_waits_for_maturity_and_goes_to_an_approved_address`; demo scenes `repurchase` and `seize` |
 | The fund issuer keeps control of who holds its shares | Tests `issuer_must_whitelist_the_contract_before_any_repo`, `seizure_delivers_permissioned_shares_to_the_whitelisted_lender` |
 | Accounting stays exact under any sequence of operations | Test `invariants_hold_over_random_sequences`: invariants checked after 300 random operations |
-| Cost per operation does not grow with usage | Tests `opening_a_repo_touches_a_constant_number_of_entries` and `many_repos_keep_a_constant_footprint_per_operation`: 16 entries read and 9 written by every `open_repo` over 200 repos |
+| Cost per operation does not grow with usage | Tests `opening_a_repo_touches_a_constant_number_of_entries` and `many_repos_keep_a_constant_footprint_per_operation`: 16 entries read and 9 written by every `open_repo` over 200 repos; on the testnet instance the heaviest opening used 1.66 % of the instructions a transaction may use (validators' metrics, 20 October 2026) |
 | The code meets its own security rules | CI on every push: format, WASM build, clippy with warnings as errors, 210 contract tests, web build and tests, RustSec advisories; internal reviews of versions 2, 3 and 4 with every finding fixed and tested |
 
 The value for a holder is shown in the demo's last scene. It compares the measured latency with the earliest cash through a fund redemption, at four moments of the week. On a weekday after the cut-off, the redemption route takes about 42 hours. From a Friday evening it takes about 89 hours. Open Window answers within one ledger at any of those moments.
@@ -58,11 +58,11 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **What it retires:** the operating risk. The team can see, explain and stop what happens on chain.
 
-**Status on 18 October 2026:**
+**Status on 20 October 2026:**
 
 | Item | State | Evidence |
 |---|---|---|
-| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; since 18 October 2026 an in-page guide per party with the instance's terms read from the chain, a timeline per position fed by the indexer's export, and a phone-width layout; since 19 October 2026 a terminal view for desk users (command line, offer book, tickets with every check before signing, positions blotter, funds, tape of contract events); since 20 October 2026 both views and the History page in English, French and Spanish; a manual run with Freighter by a real user is still to record |
+| Web interface | Built | `web/`: the full borrower and lender cycles pass on testnet through the interface's own chain module, signed by a test key; since 18 October 2026 an in-page guide per party with the instance's terms read from the chain, a timeline per position fed by the indexer's export, and a phone-width layout; since 19 October 2026 a terminal view for desk users (command line, offer book, tickets with every check before signing, positions blotter, funds, tape of contract events); since 20 October 2026 both views and the History page in English, French and Spanish, published on GitHub Pages with a fallback RPC, and hardened by the security pass of that day (values read from the chain checked before display, content security policy, fees capped before signing); a manual run with Freighter by a real user is still to record |
 | Indexer | Done, first version (17 October 2026) | `indexer/` keeps every contract event in an append-only journal under a SHA-256 hash chain (`verify` recomputes it), behind a persistent cursor, and exports CSV, a per-repo register and the SFTR columns the chain can fill; the web interface's History page reads its export. Not yet consulted by the monitor; runs on the operator's machine |
 | Monitoring | Done | Thirteen detectors per admitted fund; nineteen drills replayed on testnet on 18 October 2026 against the upgraded instance, including a key-compromise, an issuer-freeze, a frozen-NAV and an unannounced-stablecoin drill, with the automatic actions signed by the sentinel key ([incident-procedure.md](incident-procedure.md)) |
 | Incident procedure | Done | [incident-procedure.md](incident-procedure.md) |
@@ -87,7 +87,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **What it retires:** the governance risk and the residual code risk.
 
-**Status on 15 October 2026:**
+**Status on 20 October 2026:**
 
 | Item | State | Evidence |
 |---|---|---|
@@ -100,6 +100,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one |
 | Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 6 seconds later, with 295 of the 300 seconds of the testnet delay left |
 | Internal reviews | Done | Three passes on version 3 and two on version 4, every finding fixed with a test |
+| Security pass of 20 October 2026 | Done; contract findings open | Over rc4, its RPC path, the web interface and the tooling: the web and the tooling hardened the same day; the contract's findings, with their planned fixes, wait for the next audit candidate (rc5); the restore of an archived code entry on mainnet is to check before any mainnet deployment ([threat-model-stride.md](threat-model-stride.md#32-security-pass-of-20-october-2026)) |
 | Lenders independent of the fund | Done, version 4 | The issuer can never lend against its fund; lenders attested before approval; an instance can be fixed to a single regulated lender (mode D3); shown live in the demo |
 | Custody safeguards in the contract | Done, version 4 | Governor handover behind the delay with a guardian veto; guardian handover only to a registered backup; lost steward key recovered only to the issuer's own backup, after 30 days, with governor and guardian. Devices and signers are still to set up |
 | Audit package | Ready | [audit-scope.md](audit-scope.md) |
@@ -156,7 +157,7 @@ Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. 
 - A fixed-repurchase-date offer mode; an irrevocable-commitment event at opening; a holding address per lender, if legal review asks for them.
 - Formal verification of the interest and haircut arithmetic; instruction measurements on the real WASM.
 - Partial repurchase and rollover; a second loan currency; a confidentiality track for amounts.
-- A read-only risk assistant that proposes bounded parameter changes and applies none.
+- A read-only risk assistant, off chain, that suggests bounded parameter changes and applies none: it needs no contract change, and each suggestion goes through a human proposal and the time delay like any other change.
 
 **Won't** (this cycle)
 - A multi-lender instance operated by the project: one regulated lender per instance, by design.

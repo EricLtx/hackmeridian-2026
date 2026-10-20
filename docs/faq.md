@@ -139,7 +139,7 @@ Every write of a persistent entry extends its TTL: when fewer than 30 days remai
 
 ### Does its cost grow with usage?
 
-No. Each fund, offer and repo is one storage entry, and no function loops over positions. A test opens repos repeatedly and checks that the number of entries read and written stays the same over 200 repos: 16 read and 9 written for `open_repo` (18 read with a backup feed), 12 read and 9 written for `repurchase`.
+No. Each fund, offer and repo is one storage entry, and no function loops over positions. A test opens repos repeatedly and checks that the number of entries read and written stays the same over 200 repos: 16 read and 9 written for `open_repo` (18 read with a backup feed), 12 read and 9 written for `repurchase`. On the testnet instance, the heaviest opening used 6.6 million instructions, 1.66 % of what a transaction may use, and ran in about 2 ms: a user waits for the ledger to close, about five seconds, not for the contract.
 
 ### What does it emit?
 
@@ -233,7 +233,7 @@ The demo runner is described in [demo/README.md](../demo/README.md). It never re
 ### Where is the threat model?
 
 - **[security.md](security.md)** holds assets, actors and trust, invariants I1 to I9, vulnerability classes, decisions S1 to S29, maximum loss per scenario and the DORA mapping.
-- **[threat-model-stride.md](threat-model-stride.md)** holds 21 STRIDE problems, the treatment of each and a first monitoring plan.
+- **[threat-model-stride.md](threat-model-stride.md)** holds 36 STRIDE problems (21 at the start, 15 added by the security pass of 20 October 2026), the treatment of each and the monitoring plan.
 
 
 ### How do I report a vulnerability?
@@ -286,6 +286,7 @@ Open Window is designed to be operated as an ICT service a regulated entity can 
 - **Monitoring in production:** the plan is implemented and was rehearsed on testnet, where every detector with a possible real trigger fired on one ([incident-procedure.md](incident-procedure.md)); it is not yet run continuously on dedicated infrastructure.
 - **Static analysis:** Scout has run, with every alert justified in [security.md](security.md), section 7; the OpenZeppelin detectors have not run yet.
 - **Multisig governor in production:** in place on testnet as a 2-of-2 account; the outside signer's organisation is a decision for launch.
+- **Contract findings of the security pass of 20 October 2026:** recorded in the [threat model](threat-model-stride.md#32-security-pass-of-20-october-2026) with their planned fix (seizure after a steward revocation, an FX band that follows the market, a NAV corridor bounded by the haircut, units normalised across stablecoins of one currency, a valuation event at opening). They need a new audit candidate and are not fixed in the deployed code.
 
 Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 
@@ -294,7 +295,7 @@ Each item has a place in the [roadmap](roadmap.md), before any real deposit.
 ## Status and limits
 
 - **Testnet only.** Nothing is deployed on mainnet, and no real asset is at stake.
-- **A web interface** in `web/` covers the market board, borrowing, positions, repurchase, lending and seizure at maturity, with the Freighter wallet on testnet, in two views: a guided page for a first visit and a terminal view for desk users. The scripted demo runs in a console, and every transaction can be checked on the testnet explorer.
+- **A web interface** in `web/`, published at [ericltx.github.io/hackmeridian-2026](https://ericltx.github.io/hackmeridian-2026/) in English, French and Spanish, covers the market board, borrowing, positions, repurchase, lending and seizure at maturity, with the Freighter wallet on testnet, in two views: a guided page for a first visit and a terminal view for desk users. The scripted demo runs in a console, and every transaction can be checked on the testnet explorer.
 - **Version 1 scope:**
   - whole repurchase only, no partial repayment and no rollover;
   - one NAV feed per fund, plus an optional backup feed;

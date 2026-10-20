@@ -66,6 +66,12 @@ The product contract is `night-window` (`contracts/night-window/`): the Open Win
 
 Version 4 is implemented and tested (audit candidate rc4, tag `audit-v4-rc4`, interface frozen on 18 October 2026): the full lifecycle, roles (governor, guardian, steward per fund, optional trustee, sentinel), price checks with a backup feed, deferred share delivery, lenders independent of the fund, a time delay on every upgrade, feed change and loosening (propose, wait, apply by anyone, cancel), a stablecoin registry behind that delay after the first admission, and a stored schema version with a governed `migrate`. Any change to `contracts/` after the tag means a new tag and a new rehearsal. Scripts that change an admitted fund, the guardian, the term ceiling, the envelope, fund limits or a currency cap must handle the proposal: these calls queue the change after bootstrap. Operations extend the contract instance, never its code (decision S20). `contracts/fund-token/` (allowlisted SEP-41 share token) and `contracts/nav-oracle/` (operator-fed SEP-40 feed) exist for the tests and the testnet demo in `demo/`; they are not part of the product. Error codes are public ABI: add new ones, never renumber; `NotImplemented` (code 1) stays reserved.
 
+## Web interface
+
+`web/` is the interface (Vite, plain JavaScript); `.github/workflows/pages.yml` publishes it on GitHub Pages on every push that touches `web/`. Before finishing a change there, run `npm test` and `npm run build` in `web/`. Every visible text is written in English, marked with `t()` and translated in `web/src/locales/fr/` and `web/src/locales/es/`; `npm run check:i18n` and the tests fail on a missing translation.
+
+`web/public/deployment.testnet.json` (written by `demo/` `setup`) and `web/public/history.json` (the indexer's export) are committed and published: public facts only, never a secret or an RPC URL that carries a key. Values read from the chain are untrusted: check them at the boundary in `web/src/chain.js` before they reach the markup. Both pages carry a content security policy; an RPC endpoint added to the deployment file must be added to `connect-src` in `web/index.html` and `web/history.html`.
+
 ## Public repository: what stays out
 
 This repository is public. The market study, the business proposal and third-party reference material are working documents kept in `private/` and `references/`, both git-ignored.

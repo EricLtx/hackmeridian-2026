@@ -54,11 +54,12 @@ Admission checklist, to tick before step 3 for every fund:
 | Task | Tool | Rule |
 |---|---|---|
 | Watch and act | `npm run monitor -- --watch --act` on a dedicated host, `--witness` on a second host | thirteen detectors per fund; a critical alert pauses new entries through the sentinel; exits are never blocked (S6) |
-| Rent | the keeper, alerted by the monitor | the contract code and every open entry are extended before archival; the operator pays the code's rent (S20) |
+| Rent | the keeper, alerted by the monitor | the contract code and every open entry are extended before archival; the operator pays the code's rent (S20); on mainnet the code entry must never near archival, since its restore may not fit in one transaction (threat model DoS.9) |
 | Feeds | the monitor | a stale or frozen NAV stops new repos on that fund and never forces a liquidation |
 | Keys | ceremony tool | rotation through the two-step handovers; readback after every change (`npm run keys -- --readback`) |
 | Reporting | the indexer's register and SFTR views ([indexer/README.md](../indexer/README.md)) | one row per repo with the fields the chain carries; the lender's reporting team adds the LEI, the agreement and the ISIN |
 | Incidents | [incident-procedure.md](incident-procedure.md) | who acts on each alert and within what time |
+| Web interface | `.github/workflows/pages.yml` publishes `web/` on every push that touches it | the published deployment file lists keyless public RPCs only (`WEB_RPC_URL`, `WEB_RPC_FALLBACKS` at `setup`); an endpoint added there is added to the content security policy of both pages; `web/public/history.json` is refreshed from the indexer and committed when the journal moves |
 
 ## 5. Upgrading the code
 

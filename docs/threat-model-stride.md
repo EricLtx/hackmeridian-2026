@@ -57,7 +57,7 @@ The contract's functions: `__constructor`, `set_admin`, `upgrade`, `set_max_term
 - **F3, contract ↔ oracle**: the data is external; freshness, model-based corridor, FX band, refusal in case of doubt.
 - **F4, admin ↔ contract**: the strongest authority; multisig, timelock, narrow emergency powers.
 - **F5, issuer ↔ shares**: the issuer can freeze or claw back; rule S9 sets the consequences.
-- **F6, on-chain ↔ off-chain**: monitoring, indexer, web interface; no contract decision depends on them, but the incident response does.
+- **F6, on-chain ↔ off-chain**: monitoring, indexer, web interface; no contract decision depends on them, but the incident response does. A read-only risk assistant (roadmap, Could) would sit on this boundary: its output would be an input to governance, never a signature, and each change it suggests would go through a human proposal and the delay.
 - **F7, interface ↔ RPC endpoints and hosting** (added on 20 October 2026): the web interface reads the chain through public RPCs (SDF's, then Gateway.fm's as a fallback) and reads an outside exchange-rate feed directly; it is served from GitHub Pages and signs through the visitor's wallet. Every value decoded from the chain is untrusted input to the page: it is checked at the boundary before it reaches the markup, and the pages carry a content security policy. The RPC providers see the visitor's address and IP.
 
 ## 2. What can go wrong?
@@ -171,7 +171,7 @@ A zero-day hunt over the contract (rc4, unchanged since the tag), its RPC path, 
 
 - **Findings**: 50 reported. The 11 of the arithmetic and token lenses were confirmed by their verifier; the others were triaged by hand, and the most serious were checked against the code.
 - **Fixed the same day** (web and tooling, no contract change): Spoof.4, Tamper.5 (partly), Disc.4.
-- **Open in the contract**: DoS.7, DoS.8, Tamper.6, Tamper.7, Tamper.8, Tamper.9, Repud.3, Elev.5. None can be fixed without a new tag; the fixes are grouped as rc5 candidates, to be decided after the hackathon and reviewed by the auditor. The rows above describe each class and the planned fix, not a way to exploit it: the instance runs on testnet and holds nothing of value.
+- **Open in the contract**: DoS.7, DoS.8, Tamper.6, Tamper.7, Tamper.8, Tamper.9, Repud.3, Elev.5. None can be fixed without a new tag; the fixes are grouped as rc5 candidates, to be decided with the auditor. The rows above describe each class and the planned fix, not a way to exploit it: the instance runs on testnet and holds nothing of value.
 - **Before mainnet**: DoS.9.
 - **Off-chain backlog**: DoS.10, DoS.11, Disc.3, Infra.2 and Infra.3 below.
 

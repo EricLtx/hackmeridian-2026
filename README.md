@@ -8,7 +8,7 @@ An on-chain repo contract on Stellar. Holders of tokenized money market funds bo
 
 **Try it on testnet:** [ericltx.github.io/hackmeridian-2026](https://ericltx.github.io/hackmeridian-2026/), the guided view, the terminal view ([`?view=terminal`](https://ericltx.github.io/hackmeridian-2026/?view=terminal)) and the History page, in English, French and Spanish. Reading needs nothing; signing needs Freighter set to Testnet and an onboarded address (see [web/README.md](web/README.md#use-it-with-a-wallet)).
 
-> **Status:** early development (October 2026). Version 4 (audit candidate rc4, tag `audit-v4-rc4`, interface frozen since 18 October 2026) is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed, deferred share delivery, lenders independent of the fund (an instance can be fixed to a single regulated lender), the custody safeguards (delayed governor handover, guardian and steward backups) and, as an option fixed at deployment, a trustee whose consent every upgrade needs; since rc4, a stored schema version with a governed `migrate`, a sentinel that can only pause and cancel, and a stablecoin registry that waits for the time delay after the first admission. The testnet instance was upgraded and migrated under governance on 18 October 2026; it serves three funds (one of them a classic Stellar asset held through the Stellar Asset Contract) and two euro stablecoins, with 210 host tests behind it and nineteen incident drills rehearsed against it. It runs on testnet; nothing is deployed on mainnet, and no external audit has been done yet. The critical path to any deployment that holds value is key custody: the governor, guardian and steward keys must sit with separate people on hardware devices, which the testnet demo does not do. The legal form of the transaction and the operator's status are being qualified with counsel. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
+> **Status:** early development (October 2026). Version 4 (audit candidate rc4, tag `audit-v4-rc4`, interface frozen since 18 October 2026) is implemented, tested and reviewed internally: the full lifecycle, time-delayed governance, a backup price feed, deferred share delivery, lenders independent of the fund (an instance can be fixed to a single regulated lender), the custody safeguards (delayed governor handover, guardian and steward backups) and, as an option fixed at deployment, a trustee whose consent every upgrade needs; since rc4, a stored schema version with a governed `migrate`, a sentinel that can only pause and cancel, and a stablecoin registry that waits for the time delay after the first admission. The testnet instance was upgraded and migrated under governance on 18 October 2026; it serves three funds (one of them a classic Stellar asset held through the Stellar Asset Contract) and two euro stablecoins, with 210 host tests behind it and nineteen incident drills rehearsed against it. It runs on testnet; nothing is deployed on mainnet, and no external audit has been done yet. A security pass on 20 October 2026 hardened the web interface and recorded the contract's open findings, with their planned fixes, in the threat model. The critical path to any deployment that holds value is key custody: the governor, guardian and steward keys must sit with separate people on hardware devices, which the testnet demo does not do. The legal form of the transaction and the operator's status are being qualified with counsel. "Open Window" (French: *guichet ouvert*) is the working name; it replaced "Night Window" when the contract became an issuer-agnostic liquidity facility rather than a night-time counter for treasurers. The crate, the paths and the WASM file keep the original name `night-window`.
 
 ## Why
 
@@ -118,6 +118,9 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Minimal web interface with Freighter: market board, borrow, positions, repurchase, lend, withdraw, take the shares at maturity ([web/](web/README.md))
 - [x] Two views of the web interface (19 October 2026): a guided page with a guide per party, the instance's terms read from the chain and a timeline per position; and a terminal view for desk users, keyboard-first, with an offer book, tickets that show every number and check before signing, a positions blotter, the funds and a tape of contract events ([web/README.md](web/README.md#terminal-view))
 - [x] English, French and Spanish in both views and on the History page (20 October 2026): a switch in the header or `LANG FR` in the terminal, numbers and dates in each language's own form, inputs read in that form, and a check that fails the tests when a visible text lacks a translation ([web/README.md](web/README.md#languages))
+- [x] Web interface published on GitHub Pages (20 October 2026): a second public RPC takes over when the first is slow or down, a cleaner visual system with motion that honours the system's reduced-motion setting, flags on the language switch ([web/README.md](web/README.md))
+- [x] Security pass of 20 October 2026 over the contract, its RPC path, the web interface and the tooling: the web hardened the same day (values read from the chain checked before display, a content security policy, a cap on simulated fees, only keyless public endpoints in the published deployment file); the contract's findings recorded with their planned fixes ([docs/threat-model-stride.md](docs/threat-model-stride.md#32-security-pass-of-20-october-2026))
+- [x] Cost measured on the testnet instance: the heaviest opening used 1.66 % of the instructions a transaction may use and about 2 ms of execution ([docs/architecture.md](docs/architecture.md#7-storage-and-rent))
 - [x] Treasurer's return priced in the live demo with the contract's own interest rule
 - [ ] Key custody, the critical path: governor signers on separate hardware devices with one outside the team, a guardian restricted to pause and cancel, issuer stewards held in multisig
 - [x] Version 4 (October 2026): lenders independent of the fund (the issuer can never lend, attestation before approval, optional single-lender instance); custody safeguards found by the custody study (governor handover behind the delay with a guardian veto, guardian handover only to a registered backup, steward recovery only to the issuer's backup); two internal review passes, every finding fixed with a test
@@ -127,6 +130,7 @@ How a price is checked before any loan: the NAV must be fresh, inside a corridor
 - [x] Governed upgrade and migration executed on the testnet instance; sentinel named; nineteen drills rehearsed, thirteen detectors per fund ([demo/](demo/README.md))
 - [x] Several funds and stablecoins as data: a euro money market share, a share held through the Stellar Asset Contract with the issuer's native flags (freeze handled live), two euro stablecoins under one currency cap (18 October 2026)
 - [x] Operator kit: [docs/operations.md](docs/operations.md) and `npm run inventory`, the off-chain instance register
+- [ ] Next audit candidate (rc5): the contract fixes of the security pass of 20 October 2026, decided with the auditor, then a governed upgrade and a new rehearsal
 - [ ] OpenZeppelin detectors for Soroban (blocked on Windows; to run on Linux)
 - [ ] Legal qualification of the transaction and of the operator, with counsel
 - [ ] Third-party audit before any mainnet deployment, and a bug bounty sized to the value at stake
@@ -142,6 +146,7 @@ The enforced part of the baseline:
 - Overflow checks stay on in release and test profiles.
 - CI runs `cargo fmt --check`, `stellar contract build`, `cargo clippy --all-targets -D warnings`, `cargo test` (the upgrade test uploads the built WASM), the web interface's build and unit tests, and a RustSec advisory check on `Cargo.lock`. Every third-party action is pinned to a commit SHA and kept current by Dependabot. `make lint`, `make audit` and `make scout` in `contracts/night-window/` reproduce the checks locally.
 - Maintenance rule: the workspace stays within the two latest major versions of `soroban-sdk`, the ones that receive security fixes, and is rebuilt and retested at every Stellar protocol upgrade. Deadlines are stored as timestamps, never derived from storage TTLs, so changes in ledger timing do not affect them.
+- The web interface treats every value it reads from the chain as untrusted: shapes are checked at the boundary before display, both pages carry a content security policy, and a simulation that asks more than 25 XLM of fees is refused before the wallet is asked to sign.
 
 ## Repository layout
 
@@ -155,15 +160,20 @@ The enforced part of the baseline:
 ├── indexer/                 # append-only event journal under a hash chain; register and SFTR views
 ├── web/                     # web interface (Vite, plain JavaScript, Freighter): guided view, terminal view, history page; English, French, Spanish
 ├── docs/
+│   ├── architecture.md      # the map: context, units, components, lifecycle, prices, governance, storage, cost
 │   ├── security.md          # security baseline: threat model, invariants, framing decisions S1-S29
 │   ├── threat-model-stride.md # STRIDE threat model and monitoring plan
 │   ├── incident-procedure.md # incident procedure and monitoring rehearsal
+│   ├── operations.md        # running an instance: keys, deployment, admission, daily tasks, upgrades
+│   ├── audit-scope.md       # package for external auditors
+│   ├── interface-reference.md # every entry point, type and error, in long form
 │   ├── faq.md               # questions and answers for five audiences
 │   ├── roadmap.md           # from MVP to a product in operation
 │   ├── stellar-platform.md  # overview of the Stellar platform
 │   └── claude-tooling.md    # AI tooling: plugins, skills, MCP
 ├── .github/
 │   ├── workflows/ci.yml     # format, lint, test, WASM build and size budget, cargo-deny, RustSec audit, link check
+│   ├── workflows/pages.yml  # tests, builds and publishes web/ on GitHub Pages
 │   └── dependabot.yml       # weekly bumps of pinned actions and crates
 ├── .claude/                 # Stellar plugin shared through the repo; hook refusing to stage private folders
 ├── .mcp.json                # Raven MCP server (Stellar docs and live data)

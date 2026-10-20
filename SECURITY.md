@@ -19,7 +19,8 @@ In scope:
 
 - the contract code under `contracts/`;
 - the build and CI configuration (`Cargo.toml`, `rust-toolchain.toml`, `.github/`);
-- any contract address this repository publishes as an official testnet deployment.
+- any contract address this repository publishes as an official testnet deployment;
+- the web interface published from `web/` on GitHub Pages, for example a script injected into the page or a transaction other than the one the page shows.
 
 Out of scope:
 
@@ -38,6 +39,7 @@ Out of scope:
 - Arithmetic must be checked, and failure paths return typed errors; the lints that enforce this are denied at the workspace level.
 - Deadlines are stored values compared to the ledger timestamp, never inferred from storage TTLs.
 - CI runs formatting, Clippy with the security lints, the tests, the WASM build and a RustSec advisory check, with every third-party action pinned to a commit.
+- The web interface checks every value it reads from the chain before display, carries a content security policy, and refuses a simulation that asks more than 25 XLM of fees before the wallet is asked to sign.
 
 ## Bug bounty
 

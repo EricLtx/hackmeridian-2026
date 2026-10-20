@@ -37,7 +37,7 @@ What each panel reads:
 - **Funds**: each admitted fund's NAV, age, exchange rate, total haircut, capacity used and state, the share token's kind (a SEP-41 token or a classic asset through the Stellar Asset Contract).
 - **Tape**: every contract event the RPC still keeps (about a week), merged with the indexer's export when present, newest first, each with its transaction.
 
-The view uses no animation, keeps numbers in a monospaced font aligned right, and stays usable at phone width, where the panels stack and the GO and CANCEL keys replace Enter and Esc.
+The view keeps motion to brief cues (see below), keeps numbers in a monospaced font aligned right, and stays usable at phone width, where the panels stack and the GO and CANCEL keys replace Enter and Esc.
 
 ## Design and motion
 
@@ -78,6 +78,7 @@ npm run preview    # serves dist/
 ## How it works
 
 - `src/chain.js` holds every network call. Each call has a time bound (7 s; 12 s for a scan of events, 10 s for a submission). A call that does not answer in time, or fails on the network, moves at once to the next RPC endpoint of the deployment file (`rpcUrl`, then `rpcFallbacks`: the testnet file lists Gateway.fm's public RPC after SDF's), which then stays in use; a request an RPC refuses is not retried elsewhere. A signed transaction sent again through the other endpoint cannot apply twice, since it keeps its hash. The terminal's status line shows the endpoint in use and its last answer time and the console says when it switches; the footer of the guided page names it. Reads are simulations from a null account, so the board needs no wallet. Writes are simulated first: a contract refusal is shown before the wallet is asked to sign. A transaction is reported failed only when that is definitive: it failed on chain, or the ledger closed past its validity window without it.
+- Every value decoded from the chain is untrusted input. `src/chain.js` checks its shape at the boundary (integers, Stellar addresses, repo statuses, SEP-40 prices, decimals between 0 and 38) before it reaches the markup, and refuses a simulation that asks more than 25 XLM of resource fees before the wallet is asked to sign. Both pages carry a content security policy: scripts, styles, fonts and images from the site only, connections only to the RPC endpoints of the deployment file and Friendbot. A deployment that adds an RPC endpoint adds it to `connect-src` in `index.html` and `history.html`.
 - Positions come from scanning `get_repo` from id 1 until the first empty id. The `repo_opened` events (filtered on the borrower topic) add the opening transaction of each repo still inside the RPC's event retention window.
 - `src/terms.js` mirrors the contract's interest rule (every started hour, at least one, rounded up to the unit), so previews match what the contract charges.
 - `src/errors.js` names a contract error after the contract that raised it and turns it into a sentence; when a contract caught another contract's error, the error it returned is the one shown.
@@ -87,7 +88,7 @@ npm run preview    # serves dist/
 ## Test
 
 ```sh
-npm test                                   # formatting, interest, error mapping, guide, timelines, terminal commands and tickets, languages
+npm test                                   # formatting, interest, error mapping, guide, timelines, terminal commands and tickets, languages, RPC failover, motion, boundary checks
 npm run check:i18n                         # every marked text translated in French and Spanish
 OW_TESTNET=1 npm test                      # plus the full cycle on testnet
 OW_TESTNET=1 OW_DEMO_DIR=/path/to/demo npm test
