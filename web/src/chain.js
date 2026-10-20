@@ -122,26 +122,51 @@ export const LEVEL_LEDGERS = 1;
  */
 export const RETURN_QUIET_MS = 60_000;
 const HEIGHT_TIMEOUT_MS = 4000;
+/**
+ * Seconds the endpoint in use may go without closing a ledger, by its own
+ * close time against the local clock, before another endpoint's greater
+ * height may take its calls: a height is only what an endpoint claims.
+ */
+export const STALE_SECS = 60;
+/** Seconds within which the first endpoint's own latest close time counts as current: calls return to it, whatever another endpoint claims. */
+export const FRESH_SECS = 15;
+
+/** A height read: `{ height, closeTime }`, the close time in Unix seconds or null when the endpoint gave none; null for no usable height. */
+function heightRead(height, closeTime) {
+  if (!Number.isSafeInteger(height)) return null;
+  const at = Number(closeTime);
+  return { height, closeTime: Number.isFinite(at) && at > 0 ? at : null };
+}
 
 /**
  * Which endpoint calls should use, from the latest ledger each one reports
- * (null for one that did not answer): the first endpoint whenever it is
- * level with the highest; else the one in use, unless it trails the highest
- * by more than STALE_LEDGERS, in which case the first endpoint that is
- * level. An endpoint that did not answer is no reason to move: a failing
- * call moves on its own (`failover`). Returns `{ index, reason, behind }`,
- * reason "behind" or "level" when calls should move, else null.
+ * and its close time (`{ height, closeTime }`, null for one that did not
+ * answer), against the local clock `now` in seconds. The first endpoint
+ * whenever it is level with the highest or current by its own close time
+ * (FRESH_SECS); else the one in use, unless it trails the highest by more
+ * than STALE_LEDGERS and its own latest close time is older than
+ * STALE_SECS, in which case the first endpoint that is level. Another
+ * endpoint's height alone thus neither takes the calls nor keeps them: an
+ * endpoint that over-reports cannot capture them. An endpoint that did not
+ * answer is no reason to move: a failing call moves on its own
+ * (`failover`). Returns `{ index, reason, behind }`, reason "behind" or
+ * "level" when calls should move, else null.
  */
-export function pickEndpoint(heights, active) {
-  const known = heights.filter((h) => Number.isSafeInteger(h));
+export function pickEndpoint(reads, active, now = Date.now() / 1000) {
+  const height = (i) => (Number.isSafeInteger(reads[i]?.height) ? reads[i].height : null);
+  const age = (i) => (Number.isFinite(reads[i]?.closeTime) ? now - reads[i].closeTime : null);
+  const known = reads.map((_, i) => height(i)).filter((h) => h !== null);
   const stay = { index: active, reason: null, behind: 0 };
   if (!known.length) return stay;
   const highest = Math.max(...known);
-  const level = (i) => Number.isSafeInteger(heights[i]) && highest - heights[i] <= LEVEL_LEDGERS;
-  if (active !== 0 && level(0)) return { index: 0, reason: "level", behind: 0 };
-  const mine = heights[active];
-  if (!Number.isSafeInteger(mine) || highest - mine <= STALE_LEDGERS) return stay;
-  const best = heights.findIndex((_, i) => level(i));
+  const level = (i) => height(i) !== null && highest - height(i) <= LEVEL_LEDGERS;
+  const current = (i) => age(i) !== null && age(i) <= FRESH_SECS;
+  if (active !== 0 && (level(0) || current(0))) return { index: 0, reason: "level", behind: 0 };
+  const mine = height(active);
+  if (mine === null || highest - mine <= STALE_LEDGERS) return stay;
+  // Old by its own clock too, or no proof that it lags: a close time is checked against the local clock, not another endpoint's word.
+  if (!(age(active) > STALE_SECS)) return stay;
+  const best = reads.findIndex((_, i) => level(i));
   return best >= 0 && best !== active ? { index: best, reason: "behind", behind: highest - mine } : stay;
 }
 
@@ -540,25 +565,26 @@ export class Chain {
   }
 
   /**
-   * The latest ledger of every endpoint, read at once within a short bound:
-   * a sequence per endpoint, null for one that did not answer. `getHealth`
-   * carries it in about 200 bytes, where `getLatestLedger` now ships the
-   * whole ledger's metadata (about 330 KB on testnet); an endpoint that calls
-   * itself unhealthy (its last ledger is old) is asked `getLatestLedger`,
-   * since a lagging endpoint is what the comparison looks for.
+   * The latest ledger of every endpoint and its close time, read at once
+   * within a short bound: `{ height, closeTime }` per endpoint, null for one
+   * that did not answer. `getHealth` carries both in about 200 bytes, where
+   * `getLatestLedger` now ships the whole ledger's metadata (about 330 KB on
+   * testnet); an endpoint that calls itself unhealthy (its last ledger is
+   * old) is asked `getLatestLedger`, since a lagging endpoint is what the
+   * comparison looks for.
    */
   async heights() {
     return Promise.all(
       this.endpoints.map(async (endpoint) => {
         try {
           const health = await withTimeout(endpoint.server.getHealth(), HEIGHT_TIMEOUT_MS);
-          if (Number.isSafeInteger(health?.latestLedger)) return health.latestLedger;
+          if (Number.isSafeInteger(health?.latestLedger)) return heightRead(health.latestLedger, health.latestLedgerCloseTime);
         } catch (error) {
           if (error instanceof RpcTimeout || isTransient(error)) return null;
         }
         try {
           const latest = await withTimeout(endpoint.server.getLatestLedger(), HEIGHT_TIMEOUT_MS);
-          return Number.isSafeInteger(latest?.sequence) ? latest.sequence : null;
+          return heightRead(latest?.sequence, latest?.closeTime);
         } catch {
           return null;
         }
@@ -568,19 +594,20 @@ export class Chain {
 
   /**
    * Moves calls away from an endpoint that answers but lags: compares every
-   * endpoint's latest ledger and applies `pickEndpoint`, so a fallback is
-   * left for the first endpoint once that one is level again, and, when it
-   * was left after a failed call, has rested RETURN_QUIET_MS. The page runs
-   * it before each refresh: the pass, its clock included, then reads an
-   * endpoint that is current. Never throws; returns the heights read.
+   * endpoint's latest ledger and close time and applies `pickEndpoint`, so a
+   * fallback is left for the first endpoint once that one is level or
+   * current again, and, when it was left after a failed call, has rested
+   * RETURN_QUIET_MS. The page runs it before each refresh: the pass, its
+   * clock included, then reads an endpoint that is current. Never throws;
+   * returns the reads.
    */
   async checkHeights() {
     if (this.endpoints.length < 2) return [];
-    const heights = await this.heights();
+    const reads = await this.heights();
     // An endpoint that just failed a call is no target yet, however level it is (RETURN_QUIET_MS).
     const now = Date.now();
-    const candidates = heights.map((height, i) => (now - (this.endpoints[i].failedAt ?? -Infinity) < RETURN_QUIET_MS ? null : height));
-    const { index, reason, behind } = pickEndpoint(candidates, this.active);
+    const candidates = reads.map((read, i) => (now - (this.endpoints[i].failedAt ?? -Infinity) < RETURN_QUIET_MS ? null : read));
+    const { index, reason, behind } = pickEndpoint(candidates, this.active, now / 1000);
     if (reason && index !== this.active) {
       const previous = this.endpoints[this.active];
       this.active = index;
@@ -590,7 +617,7 @@ export class Chain {
         // A failing listener never stops a refresh.
       }
     }
-    return heights;
+    return reads;
   }
 
   /**

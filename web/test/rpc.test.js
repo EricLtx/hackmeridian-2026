@@ -141,40 +141,68 @@ test("RPC clients send only Content-Type, so a strict CORS preflight passes", as
   assert.deepEqual(sent, [["content-type"]]);
 });
 
-test("staleness: calls leave an endpoint more than 10 ledgers behind, and return to the first once it is level", () => {
-  const move = (heights, active) => {
-    const { index, reason, behind } = pickEndpoint(heights, active);
-    return [index, reason, behind];
-  };
-  assert.deepEqual(move([100, 100], 0), [0, null, 0], "level: stay");
-  assert.deepEqual(move([90, 100], 0), [0, null, 0], "10 behind is still tolerated");
-  assert.deepEqual(move([89, 100], 0), [1, "behind", 11]);
-  assert.deepEqual(move([100, 100], 1), [0, "level", 0], "back to the first once level");
-  assert.deepEqual(move([99, 100], 1), [0, "level", 0], "one ledger apart counts as level");
-  assert.deepEqual(move([98, 100], 1), [1, null, 0], "the first is still catching up: stay on the fallback");
-  assert.deepEqual(move([100, 80], 1), [0, "level", 0]);
-  assert.deepEqual(move([null, 100], 1), [1, null, 0], "an endpoint that did not answer is not a target");
-  assert.deepEqual(move([100, null], 0), [0, null, 0], "nor a reason to move");
+/** A height as an endpoint reports it, its latest ledger closed `age` seconds before `NOW` (null: no close time given). */
+const NOW = 1_792_500_000;
+const r = (height, age) => ({ height, closeTime: age === null ? null : NOW - age });
+const move = (reads, active) => {
+  const { index, reason, behind } = pickEndpoint(reads, active, NOW);
+  return [index, reason, behind];
+};
+
+test("staleness: calls leave an endpoint more than 10 ledgers behind and a minute old by its own clock, and return to the first once it is level or current", () => {
+  assert.deepEqual(move([r(100, 2), r(100, 2)], 0), [0, null, 0], "level: stay");
+  assert.deepEqual(move([r(90, 70), r(100, 2)], 0), [0, null, 0], "10 behind is still tolerated");
+  assert.deepEqual(move([r(89, 70), r(100, 2)], 0), [1, "behind", 11]);
+  assert.deepEqual(move([r(100, 2), r(100, 2)], 1), [0, "level", 0], "back to the first once level");
+  assert.deepEqual(move([r(99, 30), r(100, 2)], 1), [0, "level", 0], "one ledger apart counts as level");
+  assert.deepEqual(move([r(98, 30), r(100, 2)], 1), [1, null, 0], "the first is still catching up: stay on the fallback");
+  assert.deepEqual(move([r(100, 2), r(80, 100)], 1), [0, "level", 0]);
+  assert.deepEqual(move([null, r(100, 2)], 1), [1, null, 0], "an endpoint that did not answer is not a target");
+  assert.deepEqual(move([r(100, 2), null], 0), [0, null, 0], "nor a reason to move");
   assert.deepEqual(move([null, null], 0), [0, null, 0]);
-  assert.deepEqual(move([80, 95, 100], 0), [2, "behind", 20], "to the first endpoint that is level, not merely closer");
-  assert.deepEqual(move([80, 100, 100], 0), [1, "behind", 20]);
+  assert.deepEqual(move([r(80, 90), r(95, 2), r(100, 2)], 0), [2, "behind", 20], "to the first endpoint that is level, not merely closer");
+  assert.deepEqual(move([r(80, 90), r(100, 2), r(100, 2)], 0), [1, "behind", 20]);
+});
+
+test("freshness: another endpoint's height alone neither takes the calls from a current first endpoint nor keeps them from it", () => {
+  const N = 5_296_165;
+  // The first endpoint closed a ledger 3 s ago; the fallback claims 11 more, or any height, stamped now.
+  for (const claim of [N + 11, N + 1_000, Number.MAX_SAFE_INTEGER]) {
+    assert.deepEqual(move([r(N, 3), r(claim, 0)], 0), [0, null, 0], `a claim of ${claim} moves nothing`);
+  }
+  assert.deepEqual(move([r(N - 11, 50), r(N, 1)], 0), [0, null, 0], "under a minute old by its own clock: not stale yet");
+  assert.deepEqual(move([r(N - 12, 70), r(N, 2)], 0), [1, "behind", 12], "a first endpoint really behind still loses the calls");
+  assert.deepEqual(move([r(N - 12, null), r(N, 2)], 0), [0, null, 0], "no close time of its own: another endpoint's height is no proof");
+  // On the fallback: the first endpoint returns when its own close time is current, whatever the fallback claims.
+  assert.deepEqual(move([r(N, 3), r(N + 50, 0)], 1), [0, "level", 0]);
+  assert.deepEqual(move([r(N - 5, 10), r(N, 0)], 1), [0, "level", 0], "current by its own clock, though not level");
+  assert.deepEqual(move([r(N - 5, 20), r(N, 0)], 1), [1, null, 0], "neither level nor current: stay");
 });
 
 test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's height, and ignores a silent one", async () => {
-  const health = (latestLedger) => async () => ({ status: "healthy", latestLedger });
+  const now = () => Math.floor(Date.now() / 1000);
+  const health = (latestLedger, age = 1) => async () => ({ status: "healthy", latestLedger, latestLedgerCloseTime: String(now() - age) });
   const changes = [];
-  const lagging = chainWith(fake("lagging.example", { getHealth: health(5_293_700) }), fake("current.example", { getHealth: health(5_293_787) }));
+  const lagging = chainWith(fake("lagging.example", { getHealth: health(5_293_700, 450) }), fake("current.example", { getHealth: health(5_293_787) }));
   lagging.onRpcChange = (change) => changes.push(change);
-  assert.deepEqual(await lagging.checkHeights(), [5_293_700, 5_293_787]);
+  assert.deepEqual(
+    (await lagging.checkHeights()).map((read) => read.height),
+    [5_293_700, 5_293_787],
+  );
   assert.equal(lagging.rpcInfo().host, "current.example");
   assert.deepEqual(changes, [{ from: "lagging.example", to: "current.example", reason: "behind", behind: 87 }]);
 
-  // getHealth refuses on an endpoint whose last ledger is old: its height comes from getLatestLedger.
+  // getHealth refuses on an endpoint whose last ledger is old: its height and close time come from getLatestLedger.
   const unhealthy = async () => {
     throw { code: -32603, message: "latency (95s) since last known ledger closed is too high (>30s)" };
   };
-  const stale = chainWith(fake("stale.example", { getHealth: unhealthy, getLatestLedger: async () => ({ sequence: 5_293_770 }) }), fake("current.example", { getHealth: health(5_293_787) }));
-  assert.deepEqual(await stale.checkHeights(), [5_293_770, 5_293_787]);
+  const stale = chainWith(
+    fake("stale.example", { getHealth: unhealthy, getLatestLedger: async () => ({ sequence: 5_293_770, closeTime: String(now() - 95) }) }),
+    fake("current.example", { getHealth: health(5_293_787) }),
+  );
+  const reads = await stale.checkHeights();
+  assert.equal(reads[0].height, 5_293_770);
+  assert.ok(Math.abs(reads[0].closeTime - (now() - 95)) <= 1, "the close time is read too");
   assert.equal(stale.rpcInfo().host, "current.example");
 
   // Back to the first endpoint once it is level again.
@@ -205,9 +233,32 @@ test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's
     throw new TypeError("Failed to fetch");
   };
   const silent = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("silent.example", { getHealth: down, getLatestLedger: down }));
-  assert.deepEqual(await silent.checkHeights(), [5_293_787, null]);
+  const silentReads = await silent.checkHeights();
+  assert.equal(silentReads[0].height, 5_293_787);
+  assert.equal(silentReads[1], null);
   assert.equal(silent.rpcInfo().host, "first.example");
   assert.deepEqual(await chainWith(fake("only.example", { getHealth: health(1) })).checkHeights(), [], "one endpoint: nothing to compare");
+});
+
+test("the height poll: a fallback that over-reports its height takes no call from a current first endpoint, and gives them back", async () => {
+  // WEB-2: Gateway.fm, say, answers getHealth with 11 ledgers more than the chain has, stamped with the current time.
+  const now = () => Math.floor(Date.now() / 1000);
+  const N = 5_295_195;
+  const health = (latestLedger, age) => async () => ({ status: "healthy", latestLedger, latestLedgerCloseTime: String(now() - age) });
+  for (const claim of [N + 11, Number.MAX_SAFE_INTEGER]) {
+    const changes = [];
+    const chain = chainWith(fake("first.example", { getHealth: health(N, 2) }), fake("fallback.example", { getHealth: health(claim, 0) }));
+    chain.onRpcChange = (change) => changes.push(change);
+    for (let pass = 0; pass < 3; pass += 1) await chain.checkHeights();
+    assert.equal(chain.rpcInfo().host, "first.example", `a claim of ${claim}`);
+    assert.deepEqual(changes, []);
+    assert.equal(chain.endpoints[0].failedAt, undefined);
+  }
+  // Already on the fallback (after a failed call and its rest): back to a current first endpoint, whatever the fallback claims.
+  const back = chainWith(fake("first.example", { getHealth: health(N, 3) }), fake("fallback.example", { getHealth: health(N + 50, 0) }));
+  back.active = 1;
+  await back.checkHeights();
+  assert.equal(back.rpcInfo().host, "first.example");
 });
 
 test("every move between endpoints is told in a sentence", () => {
