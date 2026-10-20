@@ -458,3 +458,47 @@ test("a contract error in the simulation made with the signed entries keeps its 
   const first = await lib.invoke(state, "governor", OW, "pause", pauseArgs()).then(() => null, (e) => e);
   assert.deepEqual([first.name, first.message, simulations], ["unknown:Error", "unknown:Error (#8)", 3]);
 });
+
+test("a transport failure of the second simulation, once its retries are spent, still ends with what went out signed (TOOL-1)", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  const good = server.simulateTransaction;
+  server.simulateTransaction = async (tx) => {
+    if (simulations >= 1) {
+      simulations += 1;
+      throw new Error("fetch failed");
+    }
+    return good(tx);
+  };
+  let verdict;
+  lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => { verdict = "sent"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 60 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(sent.length, 0);
+  assert.equal(simulations, 5, "the first simulation, then the second one tried four times");
+  assert.match(verdict ?? "", /^governor co_signed_test: the simulation made with the signed entries was refused, https:\/\/rpc\.stub\.invalid did not answer it \(fetch failed\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+});
+
+test("a JSON-RPC error the SDK throws as a bare object from the second simulation is never the verdict either (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  const good = server.simulateTransaction;
+  server.simulateTransaction = async (tx) => {
+    if (simulations >= 1) {
+      simulations += 1;
+      throw { code: -32602, message: "the call was refused; nothing signed (rpc-1)" }; // eslint-disable-line no-throw-literal
+    }
+    return good(tx);
+  };
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error instanceof Error, "an Error, whatever the SDK threw");
+  assert.equal(sent.length, 0);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /refused it, in its own words \(printed above, kept in the error's detail\); the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.equal(error.detail, "the call was refused; nothing signed (rpc-1)");
+  assert.deepEqual(error.cause, { code: -32602, message: "the call was refused; nothing signed (rpc-1)" });
+});

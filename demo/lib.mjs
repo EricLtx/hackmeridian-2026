@@ -243,6 +243,13 @@ function decodeSimulationError(text) {
 // exponential backoff. Submissions go through `submit`, which never gives up
 // before the transaction's validity window has closed.
 
+/** An Error for whatever was thrown: the SDK throws a JSON-RPC `{ code, message }` answer as a bare object. */
+function asError(thrown) {
+  if (thrown instanceof Error) return thrown;
+  const message = typeof thrown?.message === "string" ? thrown.message : typeof thrown === "string" ? thrown : JSON.stringify(thrown);
+  return Object.assign(new Error(message), { cause: thrown });
+}
+
 function isTransient(error) {
   const text = `${error?.message ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
   return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|\b(429|50[0-4])\b/i.test(text);
@@ -718,7 +725,9 @@ function refusedAfterSigning(error, label, tail) {
   process.stderr.write(`  (${activeRpcUrl()} answered the simulation made with the signed entries: ${said})\n`);
   const why = error instanceof ContractError
     ? `the contract refused it with ${error.name} (#${error.code})`
-    : `${activeRpcUrl()} refused it, in its own words (printed above, kept in the error's detail)`;
+    : isTransient(error)
+      ? `${activeRpcUrl()} did not answer it (${said})`
+      : `${activeRpcUrl()} refused it, in its own words (printed above, kept in the error's detail)`;
   error.detail = error.detail ?? said;
   error.message = `${label}: the simulation made with the signed entries was refused, ${why}; ${tail} (rpc-1)`;
   return error;
@@ -1010,7 +1019,14 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
     const signed = await signAuth(state, recorded, expiry);
     tail = signedForSimulation(signed.filter(isAddressCredential).length, expiry);
     tx = await build(source.publicKey(), Operation.invokeHostFunction({ func, auth: signed }));
-    sim = await net(() => server.simulateTransaction(tx), "simulate");
+    // Whatever ends this simulation ends it with the tail: a refusal in the
+    // answer, a JSON-RPC error the SDK throws as a bare object, or a
+    // transport failure once net() has retried.
+    try {
+      sim = await net(() => server.simulateTransaction(tx), "simulate");
+    } catch (error) {
+      throw refusedAfterSigning(asError(error), label, tail);
+    }
     if (rpc.Api.isSimulationError(sim)) throw refusedAfterSigning(simulationError(sim), label, tail);
   }
 

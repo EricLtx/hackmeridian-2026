@@ -171,3 +171,22 @@ test("a submission the active endpoint refuses with ERROR is read against the se
   assert.match(await verdictOf(t, () => lib.invoke(state, "governor", OW, "unpause_test", [])), /submission refused \(txBadSeq\) by https:\/\/one\.stub\.invalid; https:\/\/two\.stub\.invalid does not know the transaction either$/);
   assert.equal(sent.length, 2);
 });
+
+test("with two endpoints, a JSON-RPC error object thrown by the second simulation ends with the signed-entries tail, whichever endpoint answered (TOOL-1)", async () => {
+  auth = [stewardEntry(callOf(OW, "co_signed_test", args))];
+  for (const s of [one, two]) {
+    const good = s.simulateTransaction;
+    s.simulateTransaction = async (tx) => {
+      if (simulations >= 1) {
+        simulations += 1;
+        throw { code: -32602, message: "the call was refused; nothing signed (rpc-1)" }; // eslint-disable-line no-throw-literal
+      }
+      return good(tx);
+    };
+  }
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error instanceof Error);
+  assert.equal(sent.length, 0);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /^governor co_signed_test: the simulation made with the signed entries was refused, https:\/\/(one|two)\.stub\.invalid refused it, in its own words .*; the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+});
