@@ -37,6 +37,126 @@ export function readMonitorFile(file) {
   }
 }
 
+/** How long a writer waits for the file's lock before giving up, and the age past which a lock left by a dead process is cleared. */
+export const LOCK_WAIT_MS = 15_000;
+export const LOCK_STALE_MS = 10_000;
+
+/** Sleeps `ms` without yielding: the writers are synchronous, and the lock is held for about a millisecond. */
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** Attempts, a millisecond apart, to remove a file Windows refuses to remove while another process has it open. */
+const UNLINK_ATTEMPTS = 50;
+
+/** Removes `file`, retrying briefly when another process holds it open; false when it could not be removed. */
+function unlinkPatiently(file) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      fs.unlinkSync(file);
+      return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      if (attempt >= UNLINK_ATTEMPTS) return false;
+      pause(1);
+    }
+  }
+}
+
+/**
+ * Runs `fn` while holding the lock of `file`, a `<file>.lock` created
+ * exclusively (O_EXCL), so that two writers never interleave a read, a
+ * merge and a write: without it, what one process wrote between the other's
+ * read and write was lost for good (the TOOL-3 residual, 20 October 2026).
+ * A lock older than `LOCK_STALE_MS` was left by a process that died: it is
+ * claimed by one waiter alone, through a rename to a name of its own, then
+ * removed, so a fresh lock taken meanwhile is never removed by mistake. A
+ * writer that cannot take the lock within `LOCK_WAIT_MS` throws rather
+ * than write over the file.
+ */
+export function withMonitorLock(file, fn) {
+  const lock = `${file}.lock`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const started = Date.now();
+  for (;;) {
+    let fd = null;
+    try {
+      fd = fs.openSync(lock, "wx");
+    } catch (error) {
+      // EEXIST: held. EPERM, EBUSY, EACCES: Windows, a lock just released
+      // that stays "delete pending" while another waiter still has it open
+      // for a stat; it is gone a moment later.
+      if (!["EEXIST", "EPERM", "EBUSY", "EACCES"].includes(error.code)) throw error;
+      if (error.code === "EEXIST") {
+        let age = 0;
+        try {
+          age = Date.now() - fs.statSync(lock).mtimeMs;
+        } catch {
+          continue; // released between the open and the stat: try again
+        }
+        if (age > LOCK_STALE_MS) {
+          const claimed = `${lock}.stale-${process.pid}`;
+          try {
+            fs.renameSync(lock, claimed); // one waiter wins the rename; the others see no lock
+            unlinkPatiently(claimed);
+          } catch {
+            // another waiter claimed it first, or it was released: try again
+          }
+          continue;
+        }
+      }
+      if (Date.now() - started > LOCK_WAIT_MS) throw new Error(`${lock} is held by another process for more than ${LOCK_WAIT_MS / 1000} s: nothing written to ${file}`);
+      pause(2);
+      continue;
+    }
+    try {
+      fs.writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+      return fn();
+    } finally {
+      fs.closeSync(fd);
+      // Released at once: a lock left behind would hold every writer until LOCK_STALE_MS.
+      unlinkPatiently(lock);
+    }
+  }
+}
+
+/** Rename attempts, 2 ms apart, while a reader holds the file open (Windows refuses the rename meanwhile). */
+const RENAME_ATTEMPTS = 50;
+
+/**
+ * Replaces the file's content in one step: written to a temporary file next
+ * to it, then renamed over it, so a reader sees the old content or the new
+ * one, never a torn file. On Windows the rename is refused while another
+ * process holds the file open, which a read does for microseconds: it is
+ * retried briefly, and then the file is written in place, which the lock
+ * every writer holds keeps free of a second writer. `replacer` filters the
+ * fields written. Called under `withMonitorLock` only.
+ */
+function writeMonitorFile(file, m, replacer = null) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const content = JSON.stringify(m, replacer, 2);
+  const temporary = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(temporary, content);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      fs.renameSync(temporary, file);
+      return;
+    } catch (error) {
+      const held = ["EPERM", "EBUSY", "EACCES"].includes(error.code);
+      if (held && attempt < RENAME_ATTEMPTS) {
+        pause(2);
+        continue;
+      }
+      try {
+        fs.unlinkSync(temporary);
+      } catch {
+        // nothing to clean
+      }
+      if (!held) throw error;
+      fs.writeFileSync(file, content);
+      return;
+    }
+  }
+}
+
 /**
  * The monitoring state of the deployed contract `contract`. A new
  * deployment starts afresh and keeps only the announced code hashes.
@@ -76,34 +196,39 @@ export function refreshMonitor(file, m) {
 }
 
 /**
- * Writes `m` after merging the file once more, so that what another process
- * wrote since the last read is kept. Fields starting with "_" are this
- * process's memory, never saved.
+ * Writes `m` after merging the file once more, under the file's lock, so
+ * that what another process wrote since the last read is kept. Fields
+ * starting with "_" are this process's memory, never saved.
  */
 export function saveMonitor(file, m) {
-  refreshMonitor(file, m);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(m, (key, value) => (key.startsWith("_") ? undefined : value), 2));
+  withMonitorLock(file, () => {
+    refreshMonitor(file, m);
+    writeMonitorFile(file, m, (key, value) => (key.startsWith("_") ? undefined : value));
+  });
   m._fileWasmHash = m.wasmHash ?? null;
 }
 
-/** Adds a code hash to the announced upgrades on disk: `npm run upgrade` does it before it proposes. */
+/** Adds a code hash to the announced upgrades on disk, under the file's lock: `npm run upgrade` does it before it proposes. */
 export function announceUpgrade(file, hash) {
-  const m = readMonitorFile(file) ?? {};
-  m.announced = [...new Set([...(m.announced ?? []), hash.toLowerCase()])];
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(m, null, 2));
+  withMonitorLock(file, () => {
+    const m = readMonitorFile(file) ?? {};
+    m.announced = [...new Set([...(m.announced ?? []), hash.toLowerCase()])];
+    writeMonitorFile(file, m);
+  });
 }
 
 /**
  * Moves the code baseline on disk to the executable the ledger holds after a
- * verified upgrade; a running watch takes it up at its next pass. Without a
- * file there is no baseline yet: the first pass takes the executable it reads.
+ * verified upgrade, under the file's lock; a running watch takes it up at
+ * its next pass. Without a file there is no baseline yet: the first pass
+ * takes the executable it reads.
  */
 export function acknowledgeUpgrade(file, hash) {
-  const m = readMonitorFile(file);
-  if (!m) return false;
-  m.wasmHash = hash.toLowerCase();
-  fs.writeFileSync(file, JSON.stringify(m, null, 2));
-  return true;
+  return withMonitorLock(file, () => {
+    const m = readMonitorFile(file);
+    if (!m) return false;
+    m.wasmHash = hash.toLowerCase();
+    writeMonitorFile(file, m);
+    return true;
+  });
 }
