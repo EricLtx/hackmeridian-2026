@@ -132,6 +132,17 @@ test("a translation carries exactly the HTML tags of its source", () => {
   assert.equal(tagsOf("<kbd>O &lt;offer&gt;</kbd> prepares a loan"), "</kbd> <kbd>");
 });
 
+test("an element whose name the HTML parser accepts beyond letters, digits and dashes is a tag too (WEB-6)", () => {
+  // A parser makes '<x:y style=…>' an element and applies its style; the pages allow inline styles.
+  const source = "Last hash of the chain: <code>{hash}</code>.";
+  for (const name of ["x:y", "x.y", "x_y", "xé"]) {
+    const overlay = `Dernier hachage : <code>{hash}</code>.<${name} style="position:fixed;inset:0;z-index:99;background:#fff">Service migré : ouvrez clone.example</${name}>`;
+    assert.notEqual(tagsOf(overlay), tagsOf(source), name);
+    assert.notEqual(tagsOf(`Dernier hachage : <code>{hash}</code>.<${name}>Service migré</${name}>`), tagsOf(source), `${name}, bare but closed`);
+  }
+  assert.equal(tagsOf("Q <shares> [FUND]"), "", "usage notation is still read as words");
+});
+
 test("tc picks the entry of its context, then the plain entry, then English", async () => {
   const { tc } = await import("../src/i18n.js");
   assert.equal(tc("wallet", "none"), "none");

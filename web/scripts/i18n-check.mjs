@@ -110,12 +110,15 @@ const ALWAYS_TAGS = new Set([
  * The HTML tags of a text, attributes included, in a fixed order. Some
  * translations are inserted as markup: a translation must carry exactly the
  * tags of its source, so a translation-only change cannot add a link, an
- * image or a redirect to the page. A bare `<word>` with no closing tag is
- * usage notation ("Q <shares> [FUND]"), translated like any word, unless the
- * word names an element in ALWAYS_TAGS.
+ * image or a redirect to the page. A tag name is read as the HTML parser
+ * reads it, a letter then anything up to a space, a slash or `>`: an
+ * element such as `<x:y style="…">` is a tag too (its style would apply).
+ * A bare `<word>` with no closing tag is usage notation ("Q <shares>
+ * [FUND]"), translated like any word, unless the word names an element in
+ * ALWAYS_TAGS.
  */
 export function tagsOf(s) {
-  const found = [...String(s).matchAll(/<(\/?)([A-Za-z][A-Za-z0-9-]*)([\s/][^>]*)?>/g)];
+  const found = [...String(s).matchAll(/<(\/?)([A-Za-z][^\s/>]*)([\s/][^>]*)?>/g)];
   const closed = new Set(found.filter((m) => m[1]).map((m) => m[2].toLowerCase()));
   return found
     .filter(([, slash, name, rest]) => slash || (rest ?? "").trim() || ALWAYS_TAGS.has(name.toLowerCase()) || closed.has(name.toLowerCase()))
