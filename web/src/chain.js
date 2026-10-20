@@ -193,6 +193,16 @@ const RATE_WINDOW_MS = 1000;
  * endpoint once more; the send of a transaction still moves at once.
  */
 export const TIMEOUT_PAIR_MS = 30_000;
+/**
+ * Height polls of the first endpoint answered in a row, each within
+ * RETURN_POLL_MS, before the calls return to it once its rest is over. The
+ * public endpoint's stalls come in clusters: a return met the next stall
+ * at once, a pair of switches at every return. A poll that does not answer
+ * in time, or a failed call that moves the calls away, starts the count
+ * again.
+ */
+export const RETURN_POLLS = 2;
+export const RETURN_POLL_MS = 2000;
 
 /**
  * The rest of an endpoint that just failed a call, in milliseconds, from
@@ -742,6 +752,7 @@ export class Chain {
     previous.failures = (previous.failures ?? 0) + 1;
     previous.restMs = restAfterFailure(previous, now);
     previous.failedAt = now;
+    previous.quickPolls = 0;
     // Nowhere to go: a resting endpoint whose last height poll answered is still better than one that fails now.
     if (next === null) next = this.restedAnswering(this.active);
     if (next === null) return false;
@@ -822,9 +833,12 @@ export class Chain {
   async heights(budgetMs = HEIGHT_BUDGET_MS) {
     return Promise.all(
       this.endpoints.map(async (endpoint, index) => {
+        const started = this.clock();
         const read = await this.readHeight(endpoint, index, budgetMs);
         // Whether the endpoint's last poll answered: a resting one that does is where calls may go when every other one rests (`failover`).
         endpoint.pollOk = read !== null;
+        // Polls answered in a row within RETURN_POLL_MS: the calls return to the first endpoint after RETURN_POLLS of them.
+        endpoint.quickPolls = read !== null && this.clock() - started <= RETURN_POLL_MS ? (endpoint.quickPolls ?? 0) + 1 : 0;
         return read;
       }),
     );
@@ -866,7 +880,7 @@ export class Chain {
       timer = setTimeout(resolve, budgetMs, null);
     });
     try {
-      return await Promise.race([this.checkHeights(), bound]);
+      return await Promise.race([this.checkHeights(budgetMs), bound]);
     } finally {
       clearTimeout(timer);
     }
@@ -877,16 +891,18 @@ export class Chain {
    * endpoint's latest ledger and close time and applies `pickEndpoint`, so a
    * fallback is left for the first endpoint once that one is level or
    * current again, and, when it was left after a failed call, has rested
-   * (`restAfterFailure`). The page runs it before each refresh, within
-   * HEIGHT_BUDGET_MS (`pollHeights`): the pass, its clock included, then
-   * reads an endpoint that is current. Never throws; returns the reads.
+   * (`restAfterFailure`) and answered RETURN_POLLS polls in a row. The page
+   * runs it before each refresh, within HEIGHT_BUDGET_MS (`pollHeights`):
+   * the pass, its clock included, then reads an endpoint that is current.
+   * Never throws; returns the reads.
    */
-  async checkHeights() {
+  async checkHeights(budgetMs = HEIGHT_BUDGET_MS) {
     if (this.endpoints.length < 2) return [];
-    const reads = await this.heights();
-    // An endpoint that failed a call is no target before its rest is over, however level it is.
+    const reads = await this.heights(budgetMs);
+    // An endpoint that failed a call is no target before its rest is over, however level it is; nor is the
+    // first endpoint, for a return, before it has answered RETURN_POLLS polls in a row.
     const now = this.clock();
-    const candidates = reads.map((read, i) => (resting(this.endpoints[i], now) ? null : read));
+    const candidates = reads.map((read, i) => (resting(this.endpoints[i], now) || (i === 0 && this.active !== 0 && (this.endpoints[0].quickPolls ?? 0) < RETURN_POLLS) ? null : read));
     const { index, reason, behind } = pickEndpoint(candidates, this.active, Date.now() / 1000);
     if (reason && index !== this.active) {
       const previous = this.endpoints[this.active];

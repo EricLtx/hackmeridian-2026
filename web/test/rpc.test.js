@@ -218,11 +218,13 @@ test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's
   assert.ok(Math.abs(reads[0].closeTime - (now() - 95)) <= 1, "the close time is read too");
   assert.equal(stale.rpcInfo().host, "current.example");
 
-  // Back to the first endpoint once it is level again.
+  // Back to the first endpoint once it is level again, at its second poll answered in a row.
   const back = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
   back.active = 1;
   const returned = [];
   back.onRpcChange = (change) => returned.push(change.reason);
+  await back.checkHeights();
+  assert.equal(back.rpcInfo().host, "second.example", "one poll answered: not yet");
   await back.checkHeights();
   assert.equal(back.rpcInfo().host, "first.example");
   assert.deepEqual(returned, ["level"]);
@@ -231,6 +233,7 @@ test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's
   const rested = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
   rested.active = 1;
   rested.endpoints[0].failedAt = performance.now();
+  await rested.checkHeights();
   await rested.checkHeights();
   assert.equal(rested.rpcInfo().host, "second.example", "a minute of rest first");
   rested.endpoints[0].failedAt = performance.now() - RETURN_QUIET_MS - 1;
@@ -270,6 +273,7 @@ test("the height poll: a fallback that over-reports its height takes no call fro
   // Already on the fallback (after a failed call and its rest): back to a current first endpoint, whatever the fallback claims.
   const back = chainWith(fake("first.example", { getHealth: health(N, 3) }), fake("fallback.example", { getHealth: health(N + 50, 0) }));
   back.active = 1;
+  await back.checkHeights();
   await back.checkHeights();
   assert.equal(back.rpcInfo().host, "first.example");
 });
@@ -862,6 +866,35 @@ test("the rate window and the rests run on a monotonic clock: a wall clock stepp
   } finally {
     mock.timers.reset();
   }
+});
+
+test("the calls return to the first endpoint after two of its height polls answered in a row; a poll not answered in time, or a failure, starts the count again", async () => {
+  const at = () => Math.floor(Date.now() / 1000);
+  const level = async () => ({ status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(at() - 2) });
+  const polls = [level, never, level, level]; // answered, not in time, answered, answered
+  let n = 0;
+  const a = fake("first.example", { getHealth: () => polls[Math.min(n++, polls.length - 1)](), getLatestLedger: never });
+  const b = fake("second.example", { getHealth: level });
+  const chain = chainWith(a, b);
+  chain.active = 1;
+  const changes = [];
+  chain.onRpcChange = (c) => changes.push(c.reason);
+  const hosts = [];
+  for (let poll = 0; poll < 4; poll += 1) {
+    await chain.checkHeights(50);
+    hosts.push(chain.rpcInfo().host);
+  }
+  assert.deepEqual(hosts, ["second.example", "second.example", "second.example", "first.example"], "answered, late, answered, answered: back at the fourth");
+  assert.deepEqual(changes, ["level"]);
+  // A failed call moves the calls away and starts the count again: two polls before the next return, once the rest is over.
+  assert.ok(chain.failover(new RpcTimeout(7000), 0, { since: chain.moveCount }));
+  assert.equal(chain.endpoints[0].quickPolls, 0);
+  chain.endpoints[0].failedAt = performance.now() - 2 * RETURN_QUIET_MS;
+  await chain.checkHeights(50);
+  assert.equal(chain.rpcInfo().host, "second.example");
+  await chain.checkHeights(50);
+  assert.equal(chain.rpcInfo().host, "first.example");
+  assert.deepEqual(changes, ["level", "timeout", "level"]);
 });
 
 test("every move between endpoints is told in a sentence", () => {
