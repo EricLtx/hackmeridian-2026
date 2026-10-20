@@ -95,7 +95,24 @@ export function keypairSigner(keypair) {
 
 function isTransient(error) {
   const text = `${error?.message ?? ""} ${error?.cause?.code ?? ""} ${error?.response?.status ?? ""}`;
-  return /fetch|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network|\b(429|50[0-4])\b/i.test(text);
+  // Chrome says "Failed to fetch", Firefox "NetworkError", Safari "Load failed" (a CORS refusal included).
+  return /fetch|load failed|network|connection was lost|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|\b(429|50[0-4])\b/i.test(text);
+}
+
+/**
+ * An RPC client that sends no header but `Content-Type`. The SDK adds
+ * `X-Client-Name` and `X-Client-Version`, and a browser's CORS preflight
+ * fails on an endpoint that allows `Content-Type` alone, as Gateway.fm's
+ * public RPC does: the fallback would then refuse every call.
+ */
+export function rpcServer(url) {
+  const server = new rpc.Server(url);
+  const headers = server.httpClient?.defaults?.headers;
+  if (headers) {
+    delete headers["X-Client-Name"];
+    delete headers["X-Client-Version"];
+  }
+  return server;
 }
 
 /** Result code of a transaction result (`txFailed`, `txBadSeq`...), across SDK XDR shapes. */
@@ -231,7 +248,7 @@ export class Chain {
     this.fund = deployment.contracts.fundShares;
     // The RPC endpoints: the deployment's, then its fallbacks. A slow or failing one is left for the next.
     const urls = [deployment.rpcUrl, ...(Array.isArray(deployment.rpcFallbacks) ? deployment.rpcFallbacks : [])].filter(Boolean);
-    this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: new rpc.Server(url), lastMs: null, failures: 0 }));
+    this.endpoints = [...new Set(urls)].map((url) => ({ url, host: new URL(url).host, server: rpcServer(url), lastMs: null, failures: 0 }));
     this.active = 0;
     /** Called with `{ from, to, reason }` (reason "timeout" or "error") when calls move to another endpoint. */
     this.onRpcChange = null;

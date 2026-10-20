@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { Chain, RpcTimeout, withTimeout } from "../src/chain.js";
+import { Chain, RpcTimeout, rpcServer, withTimeout } from "../src/chain.js";
 
 const dep = JSON.parse(readFileSync(new URL("../public/deployment.testnet.json", import.meta.url), "utf8"));
 const never = () => new Promise(() => {});
@@ -107,4 +107,36 @@ test("every endpoint down: many calls switch once, then give up instead of bounc
   const outcomes = await Promise.allSettled(Array.from({ length: 12 }, () => chain.net(() => chain.server.getHealth(), { timeoutMs: 50, attempts: 2 })));
   assert.ok(outcomes.every((o) => o.status === "rejected"));
   assert.equal(changes.length, 1);
+});
+
+test("Safari's network failure, 'Load failed', moves to the next endpoint too", async () => {
+  // The case seen on an iPhone on 20 October: the page had moved to a fallback that refused
+  // every call, and Safari's message was not taken for a network failure, so it never came back.
+  const refusing = async () => {
+    throw new TypeError("Load failed");
+  };
+  const chain = chainWith(fake("fallback.example", { getHealth: refusing }), fake("primary.example", { getHealth: healthy }));
+  assert.equal((await chain.net(() => chain.server.getHealth(), { timeoutMs: 50 })).status, "healthy");
+  assert.equal(chain.rpcInfo().host, "primary.example");
+});
+
+test("RPC clients send only Content-Type, so a strict CORS preflight passes", async () => {
+  const chain = new Chain(dep);
+  for (const endpoint of chain.endpoints) {
+    const headers = Object.keys(endpoint.server.httpClient.defaults.headers).map((h) => h.toLowerCase());
+    assert.ok(!headers.includes("x-client-name") && !headers.includes("x-client-version"), endpoint.host);
+  }
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    sent.push([...new Headers(init?.headers ?? {}).keys()].sort());
+    const result = { status: "healthy", latestLedger: 1, oldestLedger: 1, ledgerRetentionWindow: 1 };
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    await rpcServer("https://rpc.example").getHealth();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(sent, [["content-type"]]);
 });
