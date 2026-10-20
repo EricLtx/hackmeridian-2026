@@ -94,6 +94,35 @@ jobs:
       - name: Test
         run: npm test
 
+  tooling:
+    # The monitor's detectors and actions, the demo library's checks before
+    # signing, and the indexer: offline tests on stubbed chain reads, no key.
+    # The testnet scripts themselves (setup, run, the rehearsal) run locally.
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            demo/package-lock.json
+            indexer/package-lock.json
+      - name: Install the demo (exact versions, no install scripts)
+        working-directory: demo
+        run: npm ci --ignore-scripts
+      - name: Test the demo
+        working-directory: demo
+        run: npm test
+      - name: Install the indexer (exact versions, no install scripts)
+        working-directory: indexer
+        run: npm ci --ignore-scripts
+      - name: Test the indexer
+        working-directory: indexer
+        run: npm test
+
   deny:
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:

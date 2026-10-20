@@ -35,7 +35,6 @@ import {
   REFLECTOR_FX_TESTNET as REFLECTOR_FX,
   explorer,
   extendTtl,
-  fmt,
   invoke,
   keypair,
   latestLedgers,
@@ -49,6 +48,7 @@ import {
   sv,
 } from "./lib.mjs";
 import { FUND_SETTINGS, navAt } from "./config.mjs";
+import { LEDGER_SECS, LIMITS, decideActions, detect, factsNeeded, labelOf, lenderPairs, statusOf } from "./detectors.mjs";
 
 const args = process.argv.slice(2);
 /** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
@@ -71,29 +71,10 @@ if (WITNESS) {
 const STEPS = args.find((a) => a.startsWith("--steps="))?.slice(8).split(",").map(Number);
 const runStep = (n) => !STEPS || STEPS.includes(n);
 
-/** Thresholds of the monitoring plan. */
-const LIMITS = {
-  ttlDays: 14, // an open entry with less time to live is extended
-  // The contract code entry is extended long before archival: on mainnet its
-  // restore may not fit in one transaction, which would block every exit
-  // (threat model DoS.9). Extended in 30-day slices up to 120 days.
-  codeTtlDays: 90,
-  navWarnHours: 24, // warn two hours before the contract refuses a 26-hour-old NAV
-  capWarnRatio: 0.8, // warn when outstanding passes 80 % of a cap
-  opensPerHour: 20, // an unusual rate of new repos
-  // The FX feed republishes a frozen rate with a fresh timestamp while the
-  // market is closed (observed on the testnet feed over a weekend): the
-  // contract's age check cannot see it, only the band and the haircut bound
-  // it. Warn when the rate has not moved for longer than a weekend.
-  fxFrozenHours: 60,
-  // A NAV that keeps its value publication after publication passes the age
-  // check too. A variable-NAV fund moves every business day; three days
-  // without a move spans a weekend. A constant-NAV fund publishes the same
-  // value by design: set the threshold to Infinity for it (`--nav-frozen-hours=`).
-  navFrozenHours: Number(args.find((a) => a.startsWith("--nav-frozen-hours="))?.slice(19) ?? 72),
-  keeperMinXlm: 20, // below this float the keeper cannot pay a month of rent
-  rpcLedgerGap: 10, // two RPC endpoints further apart than this are not reading the same chain
-};
+// The thresholds of the monitoring plan live in detectors.mjs; a constant-NAV
+// fund publishes the same value by design (`--nav-frozen-hours=Infinity`).
+const navFrozenFlag = args.find((a) => a.startsWith("--nav-frozen-hours="))?.slice(19);
+if (navFrozenFlag !== undefined) LIMITS.navFrozenHours = Number(navFrozenFlag);
 /** Heartbeat: an HTTP GET after every successful pass, when `HEARTBEAT_URL` is set (Healthchecks.io, Uptime Kuma push, ...); a witness has its own. */
 const HEARTBEAT_URL = WITNESS ? process.env.HEARTBEAT_WITNESS_URL : process.env.HEARTBEAT_URL;
 async function heartbeat() {
@@ -104,29 +85,11 @@ async function heartbeat() {
     console.error(`  (heartbeat not delivered: ${error.message})`);
   }
 }
-const LEDGER_SECS = 5;
-/** Largest extension of the code entry in one transaction, in days. */
-const CODE_STEP_DAYS = 30;
 // A witness keeps its own state and alert files: it never shares the acting instance's.
 const MONITOR_FILE = path.join(STATE_DIR, WITNESS ? "monitor-witness.json" : "monitor.json");
 const ALERT_FILE = path.join(STATE_DIR, WITNESS ? "alerts-witness.jsonl" : "alerts.jsonl");
 /** The indexer's journal (indexer/README.md): the second source for the event trail, when a copy is kept on this machine. `INDEXER_STATE_DIR` points at a copy kept elsewhere (the indexer's `--state <dir>`). */
 const JOURNAL_DIR = process.env.INDEXER_STATE_DIR ?? path.join(ROOT, "indexer", ".state");
-
-/** Privileged changes: every one of them is reported (Elev.2). */
-const PRIVILEGED = new Set([
-  "guardian_changed", "envelope_changed", "fund_set", "fund_removed",
-  "stablecoin_set", "stablecoin_removed", "currency_cap_set", "max_term_changed", "fund_limits_set",
-  "lender_approval", "fund_frozen", "sponsor_set", "timelock_delay_changed", "fund_change_cancelled",
-  "fallback_set", "fallback_cancelled", "fallback_removed", "upgrade_cancelled", "upgraded",
-  "reanchored", "reanchor_cancelled", "admin_proposal_cancelled", "release_redirected",
-  "sole_lender_set", "lender_attested", "guardian_backup_set", "steward_recovery_cancelled", "steward_recovered",
-  "stablecoin_change_cancelled", "sentinel_changed", "migrated",
-]);
-/** The stored layout version the current code expects (`SCHEMA_VERSION` in lib.rs); an rc2 instance has no `schema_version` function. */
-const EXPECTED_SCHEMA = 2;
-/** Proposals that take effect after the time delay: the window to verify and cancel (Elev.2). */
-const PROPOSALS = /_proposed$|_change_proposed$/;
 
 const state = loadState();
 const C = state.contracts;
@@ -225,19 +188,6 @@ function fundsOf() {
   if (C.shares3) list.push({ label: "fund 3", shares: C.shares3, navOracle: C.navOracle3, stablecoin: C.euro });
   return list;
 }
-const labelOf = (funds, shares) => funds.find((f) => f.shares === shares)?.label ?? `fund ${String(shares).slice(0, 6)}`;
-/** Fund label appended to a message when several funds are watched; nothing with one. */
-const tag = (s, f) => (s.funds.length > 1 ? ` [${f.label}]` : "");
-/** Every (fund, lender) pair an exit may read: the lenders of live offers on each fund they list, and of open repos. */
-function lenderPairs(liveOffers, openRepos) {
-  const pairs = new Map();
-  for (const o of liveOffers) for (const fund of o.funds ?? []) pairs.set(`${fund}:${o.lender}`, [String(fund), String(o.lender)]);
-  for (const r of openRepos) pairs.set(`${r.fund}:${r.lender}`, [String(r.fund), String(r.lender)]);
-  return [...pairs.values()];
-}
-const statusOf = (repo) => (Array.isArray(repo.status) ? repo.status[0] : repo.status);
-const hex = (bytes) => (bytes ? Buffer.from(bytes).toString("hex") : "");
-
 async function snapshot(monitor) {
   const now = await ledgerTime();
   const [paused, repos, offers] = await Promise.all([
@@ -339,275 +289,9 @@ async function snapshot(monitor) {
   return { now, latest: ledger.latest, from, funds, caps, config, fundState, paused, nav, repos, openRepos, releases, held, stewardBackup, outstanding, cap, currency, priceError, ttl, wasmHash, events, fxLeg, fx, keeperRole: keeperRole(), keeperXlm, rpcHeights, journal, schemaVersion, sentinel };
 }
 
-/** The detectors. Each returns alerts: { detector, threat, level, message, action }. */
-const DETECTORS = {
-  price(s) {
-    const out = [];
-    for (const f of s.funds) {
-      if (f.priceError && ["PriceOutOfBand", "StalePrice", "NoPrice", "InvalidPrice", "PriceDivergence"].includes(f.priceError.name)) {
-        out.push({ level: "critical", message: `the contract refuses the fund price: ${f.priceError.name}${tag(s, f)}`, action: "pause" });
-      }
-      const ageHours = f.nav ? (s.now - Number(f.nav.timestamp)) / 3600 : Infinity;
-      // Warn two hours before the fund's own bound, whatever it is.
-      const warnHours = Math.min(LIMITS.navWarnHours, Number(f.config.nav_max_age_secs) / 3600 - 2);
-      if (ageHours >= warnHours) {
-        out.push({ level: "warning", message: `NAV is ${ageHours.toFixed(1)} h old; the contract refuses it at ${Number(f.config.nav_max_age_secs) / 3600} h${tag(s, f)}`, action: "republish" });
-      }
-    }
-    return out.map((a) => ({ detector: "price", threat: "Tamper.1", ...a }));
-  },
-  nav(s, monitor) {
-    // Tamper.1, NAV feed: a value that never moves while its timestamp is
-    // refreshed passes the age check, like a frozen FX rate. A variable-NAV
-    // fund moves every business day; a constant-NAV fund does not (raise the
-    // threshold for it). The corridor floor bounds what a stale value is worth.
-    const out = [];
-    monitor.navByFund ??= {};
-    for (const f of s.funds) {
-      if (!f.nav) continue;
-      const price = String(f.nav.price);
-      const seen = monitor.navByFund[f.shares] ?? {};
-      if (seen.price !== price) monitor.navByFund[f.shares] = { price, since: Number(f.nav.timestamp), publications: 1, feedTimestamp: Number(f.nav.timestamp) };
-      else monitor.navByFund[f.shares] = { ...seen, publications: seen.publications + (seen.feedTimestamp !== Number(f.nav.timestamp) ? 1 : 0), feedTimestamp: Number(f.nav.timestamp) };
-      const tracked = monitor.navByFund[f.shares];
-      const frozenHours = (s.now - tracked.since) / 3600;
-      const limit = monitor.navFrozenHoursOverride ?? LIMITS.navFrozenHours;
-      if (frozenHours < limit) continue;
-      out.push({
-        detector: "nav", threat: "Tamper.1", level: "warning",
-        message: `NAV unchanged for ${frozenHours.toFixed(1)} h over ${tracked.publications} publication(s) while its timestamp is ${((s.now - Number(f.nav.timestamp)) / 60).toFixed(0)} min old: the age check cannot see a frozen feed${tag(s, f)}`,
-        action: "verify the fund type (a constant-NAV fund is flat by design) and that the operator publishes; the corridor floor bounds the exposure",
-      });
-    }
-    return out;
-  },
-  "reference-age"(s) {
-    // Tamper.7 (rc5): the NAV corridor grows from the fund's price reference
-    // over at most one NAV age bound. A reference older than that bound no
-    // longer follows an honest NAV, which the contract refuses once it has
-    // outgrown the floor plus that window. Only an opening or
-    // `refresh_reference`, which anyone may call, moves the reference along
-    // the model; the keeper refreshes it when the NAV is newer.
-    const out = [];
-    for (const f of s.funds) {
-      const referenceTime = Number(f.fundState.reference_time);
-      const bound = Number(f.config.nav_max_age_secs);
-      const age = s.now - referenceTime;
-      if (age <= bound) continue;
-      const newer = Boolean(f.nav) && Number(f.nav.timestamp) > referenceTime;
-      out.push({
-        detector: "reference-age", threat: "Tamper.7", level: "warning",
-        message: `price reference is ${(age / 3600).toFixed(1)} h old, beyond the ${(bound / 3600).toFixed(0)} h NAV age bound: the corridor no longer grows with the NAV, and an honest NAV that outgrows it is refused${tag(s, f)}`,
-        action: newer ? "refresh_reference" : "no NAV newer than the reference: have the operator publish, then refresh_reference",
-        fund: f.shares,
-      });
-    }
-    return out;
-  },
-  reconciliation(s) {
-    // Invariant I2 (v3), per fund: shares held = shares of open repos + shares awaiting release.
-    const out = [];
-    for (const f of s.funds) {
-      const locked = s.openRepos.filter((r) => String(r.fund) === f.shares).reduce((sum, r) => sum + BigInt(r.shares), 0n);
-      const awaiting = s.releases.filter((r) => String(r.fund) === f.shares).reduce((sum, r) => sum + BigInt(r.shares), 0n);
-      const held = BigInt(f.held);
-      for (const r of s.releases.filter((x) => String(x.fund) === f.shares)) {
-        out.push({
-          detector: "reconciliation", threat: "DoS.5", level: "critical",
-          message: `repo #${r.id}: ${fmt(r.shares, 7, 0)} shares held back, the share token refuses the transfer (issuer freeze or allowlist)${tag(s, f)}`,
-          action: "contact the issuer, then release",
-        });
-      }
-      if (held !== locked + awaiting) {
-        out.push({ detector: "reconciliation", threat: "DoS.5", level: "critical", message: `contract holds ${fmt(held, 7, 7)} shares, open repos and releases account for ${fmt(locked + awaiting, 7, 7)}: ${held - locked - awaiting} units apart (invariant I2)${tag(s, f)}`, action: "pause" });
-      }
-    }
-    return out;
-  },
-  privileged(s, monitor) {
-    const out = s.events
-      .filter((e) => PRIVILEGED.has(e.name))
-      .map((e) => ({ level: "warning", message: `privileged change ${e.name} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
-    // A lost-steward recovery takes the fund from its issuer in 30 days: the issuer must know at once.
-    for (const e of s.events.filter((ev) => ev.name === "steward_recovery_proposed")) {
-      out.push({ level: "critical", message: `steward recovery proposed at ledger ${e.ledger}`, action: "tell the issuer; its steward key cancels it if the key is not lost", tx: e.txHash });
-    }
-    // A governor handover waits for the delay since version 4; the guardian can veto it meanwhile.
-    for (const e of s.events.filter((ev) => ev.name === "admin_proposed" || ev.name === "admin_changed")) {
-      out.push({
-        level: "critical",
-        message: `${e.name === "admin_proposed" ? "governor handover proposed" : "governor changed"} at ledger ${e.ledger}`,
-        action: e.name === "admin_proposed" ? "verify with every signer; if unexpected, the guardian vetoes (veto_admin) inside the delay and keys are rotated" : "verify; if unexpected, treat as a key compromise",
-        tx: e.txHash,
-      });
-    }
-    for (const f of s.funds.filter((x) => x.stewardBackup === null)) {
-      out.push({ level: "warning", message: `the fund's steward has no registered backup: a lost key could never be replaced${tag(s, f)}`, action: "ask the issuer to call set_steward_backup" });
-    }
-    // The one change the guardian cannot veto: 30 days to react, from now.
-    for (const e of s.events.filter((ev) => ev.name === "guardian_change_forced")) {
-      out.push({
-        level: "critical",
-        message: `forced guardian change at ledger ${e.ledger}: the governor (with the trustee's consent, when one is named) replaces the guardian at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(0, 16) : "?"} UTC`,
-        action: "veto_forced",
-        tx: e.txHash,
-      });
-    }
-    for (const e of s.events.filter((ev) => PROPOSALS.test(ev.name))) {
-      // rc4: a stablecoin registration announced beforehand (`--announce-stablecoin=<address>`) is a warning; unannounced, it is cancelled.
-      if (e.name === "stablecoin_change_proposed") {
-        const token = String(e.topics?.[0] ?? "");
-        const known = (monitor.announcedStablecoins ?? []).includes(token);
-        out.push({ level: known ? "warning" : "critical", message: `stablecoin registration proposed at ledger ${e.ledger}: ${token.slice(0, 8)}… as ${e.data?.currency ?? "?"}${known ? " (announced)" : " (NOT announced)"}`, action: known ? "verify before it applies" : "cancel stablecoin", token, tx: e.txHash });
-        continue;
-      }
-      const isUpgrade = e.name === "upgrade_proposed";
-      const hash = isUpgrade ? hex(e.data?.wasm_hash) : null;
-      const announced = isUpgrade && (monitor.announced ?? []).includes(hash);
-      out.push({
-        level: isUpgrade && !announced ? "critical" : "warning",
-        message: `${e.name} at ledger ${e.ledger}${hash ? `, code ${hash.slice(0, 12)}${announced ? " (announced)" : " (NOT announced)"}` : ""}; takes effect at ${e.data?.eta ? new Date(Number(e.data.eta) * 1000).toISOString().slice(11, 19) : "?"} UTC`,
-        action: isUpgrade && !announced ? "cancel" : "verify before it applies",
-        tx: e.txHash,
-      });
-    }
-    if (monitor.wasmHash && s.wasmHash && monitor.wasmHash !== s.wasmHash) {
-      out.push({ level: "critical", message: `contract code changed: ${monitor.wasmHash.slice(0, 12)} to ${s.wasmHash.slice(0, 12)}`, action: "verify" });
-    }
-    return out.map((a) => ({ detector: "privileged", threat: "Elev.2", ...a }));
-  },
-  pause(s) {
-    const out = s.events
-      .filter((e) => e.name === "pause_changed")
-      .map((e) => ({ level: "warning", message: `pause set to ${JSON.stringify(e.data?.paused ?? e.data)} at ledger ${e.ledger}`, action: "verify", tx: e.txHash }));
-    if (s.paused) out.push({ level: "warning", message: "new entries are paused", action: "governor decides when to unpause" });
-    return out.map((a) => ({ detector: "pause", threat: "DoS.4", ...a }));
-  },
-  ttl(s) {
-    return s.ttl
-      .filter((t) => t.days === null || t.days < (t.kind === "code" ? LIMITS.codeTtlDays : LIMITS.ttlDays))
-      .map((t) => ({
-        detector: "ttl",
-        threat: "DoS.2",
-        level: t.days === null ? "critical" : "warning",
-        message: t.days === null ? `${t.label} is archived or missing` : `${t.label} has ${t.days.toFixed(1)} days to live`,
-        action: "extend",
-        key: t.key,
-        kind: t.kind,
-        days: t.days,
-      }));
-  },
-  exposure(s) {
-    const out = [];
-    const ratio = (a, b) => (BigInt(b) > 0n ? Number((BigInt(a) * 1000n) / BigInt(b)) / 1000 : 0);
-    for (const f of s.funds) {
-      const fundRatio = ratio(f.fundState.outstanding, f.config.max_outstanding);
-      if (fundRatio >= LIMITS.capWarnRatio) out.push({ level: "warning", message: `fund outstanding at ${(fundRatio * 100).toFixed(0)} % of its cap${tag(s, f)}`, action: "review limits" });
-    }
-    for (const [currency, c] of Object.entries(s.caps)) {
-      const currencyRatio = ratio(c.outstanding, c.cap);
-      if (currencyRatio >= LIMITS.capWarnRatio) out.push({ level: "warning", message: `${currency} outstanding at ${(currencyRatio * 100).toFixed(0)} % of its cap`, action: "review limits" });
-    }
-    const hours = Math.max(((s.latest - s.from) * LEDGER_SECS) / 3600, 1 / 60);
-    const opens = s.events.filter((e) => e.name === "repo_opened").length;
-    if (opens / hours > LIMITS.opensPerHour) out.push({ level: "warning", message: `${opens} repos opened in ${(hours * 60).toFixed(0)} min`, action: "pause if unexplained" });
-    return out.map((a) => ({ detector: "exposure", threat: "DoS.1", ...a }));
-  },
-  fx(s, monitor) {
-    // Tamper.1, FX leg: a rate that keeps its value while its timestamp is
-    // refreshed passes the age check. Track since when the published rate
-    // has not moved; warn past a weekend. The band and the FX haircut bound
-    // the loss meanwhile.
-    const out = [];
-    monitor.fxByFund ??= {};
-    for (const f of s.funds) {
-      if (!f.fx) continue;
-      const price = String(f.fx.price);
-      // The first fund's record predates the per-fund map: carry it over once.
-      const seen = monitor.fxByFund[f.shares] ?? (f === s.funds[0] ? monitor.fx : undefined) ?? {};
-      if (seen.price !== price) monitor.fxByFund[f.shares] = { price, since: Number(f.fx.timestamp), feedTimestamp: Number(f.fx.timestamp) };
-      else monitor.fxByFund[f.shares] = { ...seen, feedTimestamp: Number(f.fx.timestamp) };
-      if (f === s.funds[0]) monitor.fx = monitor.fxByFund[f.shares];
-      const frozenHours = (s.now - monitor.fxByFund[f.shares].since) / 3600;
-      const limit = monitor.fxFrozenHoursOverride ?? LIMITS.fxFrozenHours;
-      if (frozenHours < limit) continue;
-      out.push({
-        detector: "fx", threat: "Tamper.1", level: "warning",
-        message: `FX rate unchanged for ${frozenHours.toFixed(1)} h while its timestamp is ${((s.now - Number(f.fx.timestamp)) / 60).toFixed(0)} min old: the age check cannot see a frozen market${tag(s, f)}`,
-        action: "verify the market is closed; the FX band and haircut bound the exposure",
-      });
-    }
-    return out;
-  },
-  keeper(s, monitor) {
-    // DoS.2: the keeper's float pays the rent extensions; an empty keeper means no extension.
-    if (s.keeperXlm === null) return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} account not readable`, action: "check the account" }];
-    const min = monitor.keeperMinXlmOverride ?? LIMITS.keeperMinXlm;
-    if (s.keeperXlm >= min) return [];
-    return [{ detector: "keeper", threat: "DoS.2", level: "warning", message: `${s.keeperRole} float ${s.keeperXlm.toFixed(1)} XLM is below ${min} XLM`, action: "top up the keeper from treasury" }];
-  },
-  events(s) {
-    // Every repo opened inside the event window must have its repo_opened event (Repud.1).
-    const seen = new Set(s.events.filter((e) => e.name === "repo_opened").map((e) => Number(e.topics[0])));
-    const windowStart = s.now - (s.latest - s.from) * LEDGER_SECS;
-    return s.repos
-      .filter((r) => Number(r.opened_at) > windowStart + 60 && !seen.has(r.id))
-      .map((r) => ({ detector: "events", threat: "Repud.1", level: "warning", message: `repo #${r.id} has no repo_opened event`, action: "investigate" }));
-  },
-  rpc(s) {
-    // Infra.1: the monitor reads one RPC and trusts it. With several configured,
-    // their heads are compared every pass: a silent endpoint, or two endpoints
-    // more than `rpcLedgerGap` ledgers apart, mean one of them is lagging or
-    // not on the same chain. The threat model's STRIDE table has no row for
-    // the reading infrastructure; "Infra.1" names it until that row exists.
-    if (!s.rpcHeights) return [];
-    const out = s.rpcHeights
-      .filter((h) => h.error)
-      .map((h) => ({ level: "warning", message: `RPC ${h.url} did not answer getLatestLedger: ${h.error}`, action: "check the endpoint; the pass used another one" }));
-    const answered = s.rpcHeights.filter((h) => !h.error);
-    if (answered.length >= 2) {
-      const top = answered.reduce((a, b) => (b.sequence > a.sequence ? b : a));
-      const low = answered.reduce((a, b) => (b.sequence < a.sequence ? b : a));
-      const gap = top.sequence - low.sequence;
-      if (gap > LIMITS.rpcLedgerGap) {
-        out.push({ level: "warning", message: `RPC heads ${gap} ledgers apart: ${low.url} at ${low.sequence}, ${top.url} at ${top.sequence}`, action: "the lagging endpoint is stale or on another network; drop it from STELLAR_RPC_URLS if it persists" });
-      }
-    }
-    return out.map((a) => ({ detector: "rpc", threat: "Infra.1", ...a }));
-  },
-  schema(s) {
-    // Elev.2 / S29: code upgraded, migration not run. Entries answer SchemaOutdated
-    // meanwhile; exits go on. Nothing is raised on code without the version.
-    if (s.schemaVersion === null || s.schemaVersion >= EXPECTED_SCHEMA) return [];
-    return [{ detector: "schema", threat: "Elev.2", level: "critical", message: `stored layout at version ${s.schemaVersion}, the code expects ${EXPECTED_SCHEMA}: migrate has not run since the upgrade`, action: "governor and trustee run migrate (npm run upgrade -- --apply)" }];
-  },
-  journal(s) {
-    // Repud.2: every event the RPC served must be in the indexer's journal once
-    // the journal covers its ledger. An event the journal does not cover yet
-    // waits in `pending` and is checked on a later pass; one older than the
-    // RPC's retention is dropped unchecked.
-    if (!s.journal) return [];
-    for (const e of s.events) {
-      if (e.id) JOURNAL.pending.set(`${e.txHash}:${e.id}`, { name: e.name, ledger: e.ledger, txHash: e.txHash });
-    }
-    const out = [];
-    for (const [key, e] of JOURNAL.pending) {
-      if (s.journal.lastLedger === null || e.ledger > s.journal.lastLedger) {
-        if (e.ledger < s.latest - 17_000) JOURNAL.pending.delete(key);
-        continue;
-      }
-      JOURNAL.pending.delete(key);
-      if (!s.journal.seen.has(key)) {
-        out.push({ detector: "journal", threat: "Repud.2", level: "warning", message: `event ${e.name} at ledger ${e.ledger} missing from the indexer journal`, action: "run the indexer, then compare; a persistent gap means a tampered or stalled journal", tx: e.txHash });
-      }
-    }
-    return out;
-  },
-};
-
 async function pass(monitor, { quiet = false } = {}) {
   const s = await snapshot(monitor);
-  const alerts = Object.entries(DETECTORS).flatMap(([, detect]) => detect(s, monitor));
+  const alerts = detect(s, monitor, { limits: LIMITS, journalPending: JOURNAL.pending });
   monitor.cursor = s.latest + 1;
   if (s.wasmHash) monitor.wasmHash = monitor.wasmHash ?? s.wasmHash;
   if (!quiet) report(s, alerts);
@@ -630,74 +314,83 @@ function actorRole(s) {
   return s?.sentinel && ours && s.sentinel === ours ? "sentinel" : "guardian";
 }
 
-/** The safe automatic actions: pause on a critical alert, cancel an unannounced upgrade, extend TTLs. */
-async function act(alerts, s, monitor = {}) {
-  const done = [];
-  const actor = actorRole(s);
-  if (alerts.some((a) => /veto_admin/.test(a.action ?? ""))) {
-    const pending = await read(state, C.openWindow, "pending_admin");
-    if (pending && !(monitor.announcedAdmins ?? []).includes(pending.admin)) {
-      const r = await invoke(state, "guardian", C.openWindow, "veto_admin", [sv.address(keypair(state, "guardian").publicKey())]);
+/** The proposals the decided actions depend on, read only when an alert calls for them. */
+async function readPending(needed) {
+  const pending = {};
+  if (needed.admin) pending.admin = await read(state, C.openWindow, "pending_admin");
+  if (needed.forcedGuardian) pending.forcedGuardian = await read(state, C.openWindow, "pending_forced_guardian_change").catch(() => null);
+  if (needed.upgrade) pending.upgrade = await read(state, C.openWindow, "pending_upgrade");
+  return pending;
+}
+
+/** Sends one decided action; returns the word the rehearsal records. */
+async function perform(action, s) {
+  const me = (role) => sv.address(keypair(state, role).publicKey());
+  switch (action.kind) {
+    case "veto_admin": {
+      const r = await invoke(state, "guardian", C.openWindow, "veto_admin", [me("guardian")]);
       console.log(`  ACTION   guardian vetoed the governor handover in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-      done.push("veto handover");
+      return "veto handover";
     }
-  }
-  if (state.keys.trustee && alerts.some((a) => a.action === "veto_forced")) {
-    const pending = await read(state, C.openWindow, "pending_forced_guardian_change").catch(() => null);
-    if (pending && !(monitor.announcedGuardians ?? []).includes(pending.guardian)) {
-      const r = await invoke(state, "trustee", C.openWindow, "veto_forced_guardian_change", [sv.address(keypair(state, "trustee").publicKey())]);
+    case "veto_forced": {
+      const r = await invoke(state, "trustee", C.openWindow, "veto_forced_guardian_change", [me("trustee")]);
       console.log(`  ACTION   trustee vetoed the forced guardian change in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-      done.push("veto forced guardian change");
+      return "veto forced guardian change";
     }
-  }
-  if (alerts.some((a) => a.action === "cancel")) {
-    const pending = await read(state, C.openWindow, "pending_upgrade");
-    if (pending) {
-      const r = await invoke(state, actor, C.openWindow, "cancel_upgrade", [sv.address(keypair(state, actor).publicKey())]);
-      console.log(`  ACTION   ${actor} cancelled the upgrade proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-      done.push("cancel upgrade");
+    case "cancel_upgrade": {
+      const r = await invoke(state, action.role, C.openWindow, "cancel_upgrade", [me(action.role)]);
+      console.log(`  ACTION   ${action.role} cancelled the upgrade proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      return "cancel upgrade";
     }
-  }
-  // rc4: a stablecoin proposed without an announcement is withdrawn the same way.
-  for (const a of alerts.filter((x) => x.action === "cancel stablecoin" && x.token)) {
-    const r = await invoke(state, actor, C.openWindow, "cancel_stablecoin_change", [sv.address(a.token), sv.address(keypair(state, actor).publicKey())]);
-    console.log(`  ACTION   ${actor} cancelled the stablecoin proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-    done.push("cancel stablecoin");
-  }
-  if (!s.paused && alerts.some((a) => a.level === "critical" && a.action === "pause")) {
-    const r = await invoke(state, actor, C.openWindow, "pause", [sv.address(keypair(state, actor).publicKey())]);
-    console.log(`  ACTION   ${actor} paused new entries in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-    done.push("pause");
-  }
-  const extend = alerts.filter((a) => a.action === "extend" && a.key);
-  const small = extend.filter((a) => a.kind !== "code").map((a) => a.key);
-  if (small.length) {
-    const r = await extendTtl(state, keeperRole(), small, 2_419_200); // about 140 days
-    console.log(`  ACTION   extended ${small.length} entries to about 140 days in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-    done.push("extend");
-  }
-  // The code entry is large: extend it by 30 days at most per transaction, so
-  // its rent stays well under the largest fee a transaction may carry.
-  for (const a of extend.filter((x) => x.kind === "code")) {
-    const target = Math.min(Math.max(a.days ?? 0, 0) + CODE_STEP_DAYS, 120);
-    const r = await extendTtl(state, keeperRole(), [a.key], Math.floor(target * 17_280));
-    const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
-    console.log(`  ACTION   extended the contract code to about ${target.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
-    done.push("extend code");
-  }
-  // rc5: an old price reference is stepped along the model by the keeper
-  // (refresh_reference is open to anyone). A refusal, a NAV out of the
-  // corridor or stale, is logged and leaves the other actions alone: the
-  // price detector reports its cause.
-  for (const a of alerts.filter((x) => x.action === "refresh_reference" && x.fund)) {
-    const label = s.funds?.length > 1 ? ` of ${labelOf(s.funds, a.fund)}` : "";
-    try {
-      const r = await invoke(state, keeperRole(), C.openWindow, "refresh_reference", [sv.address(a.fund)]);
-      console.log(`  ACTION   ${keeperRole()} refreshed the price reference${label} in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
-      done.push("refresh reference");
-    } catch (error) {
-      console.log(`  ACTION   refresh_reference${label} refused: ${error.message}`);
+    case "cancel_stablecoin": {
+      const r = await invoke(state, action.role, C.openWindow, "cancel_stablecoin_change", [sv.address(action.token), me(action.role)]);
+      console.log(`  ACTION   ${action.role} cancelled the stablecoin proposal in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      return "cancel stablecoin";
     }
+    case "pause": {
+      const r = await invoke(state, action.role, C.openWindow, "pause", [me(action.role)]);
+      console.log(`  ACTION   ${action.role} paused new entries in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      return "pause";
+    }
+    case "extend": {
+      const r = await extendTtl(state, keeperRole(), action.keys, action.ledgers);
+      console.log(`  ACTION   extended ${action.keys.length} entries to about 140 days in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+      return "extend";
+    }
+    case "extend_code": {
+      const r = await extendTtl(state, keeperRole(), [action.key], Math.floor(action.targetDays * 17_280));
+      const fee = r.fee === null ? "" : `, fee ${(Number(r.fee) / 1e7).toFixed(2)} XLM`;
+      console.log(`  ACTION   extended the contract code to about ${action.targetDays.toFixed(0)} days in ${r.seconds.toFixed(1)} s${fee}  ${explorer(r.hash)}`);
+      return "extend code";
+    }
+    case "refresh_reference": {
+      // rc5: refresh_reference is open to anyone. A refusal, a NAV out of the
+      // corridor or stale, is logged and leaves the other actions alone: the
+      // price detector reports its cause.
+      const label = s.funds?.length > 1 ? ` of ${labelOf(s.funds, action.fund)}` : "";
+      try {
+        const r = await invoke(state, keeperRole(), C.openWindow, "refresh_reference", [sv.address(action.fund)]);
+        console.log(`  ACTION   ${keeperRole()} refreshed the price reference${label} in ${r.seconds.toFixed(1)} s  ${explorer(r.hash)}`);
+        return "refresh reference";
+      } catch (error) {
+        console.log(`  ACTION   refresh_reference${label} refused: ${error.message}`);
+        return null;
+      }
+    }
+    default:
+      throw new Error(`unknown action ${action.kind}`);
+  }
+}
+
+/** The safe automatic actions (detectors.mjs decides them): pause on a critical alert, cancel an unannounced upgrade, extend TTLs. */
+async function act(alerts, s, monitor = {}) {
+  const ctx = { actor: actorRole(s), keys: { trustee: Boolean(state.keys.trustee), guardian: Boolean(state.keys.guardian) } };
+  const pending = await readPending(factsNeeded(alerts, ctx));
+  const { actions } = decideActions(alerts, { ...s, pending }, monitor, ctx);
+  const done = [];
+  for (const action of actions) {
+    const word = await perform(action, s);
+    if (word) done.push(word);
   }
   return done;
 }
