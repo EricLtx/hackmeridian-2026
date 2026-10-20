@@ -6,8 +6,9 @@
 // through `read`, a simulation that never submits.
 //
 // Submission gives a definitive answer: either the transaction landed, or its
-// validity window has closed and it never will. "Timed out, maybe later" is
-// never reported, so a rerun cannot duplicate a step that landed late.
+// validity window has closed, on this machine's clock, and it never will.
+// "Timed out, maybe later" is never reported, so a rerun cannot duplicate a
+// step that landed late.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -29,6 +30,7 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
+import { LIMITS } from "./detectors.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(here, "..");
@@ -293,13 +295,21 @@ export async function ledgerTime() {
 }
 
 /** `getTransaction`, swallowing network errors: returns null when the RPC cannot answer. */
-async function lookup(hash) {
+async function lookup(hash, client = server) {
   try {
-    return await server.getTransaction(hash);
+    return await client.getTransaction(hash);
   } catch {
     return null;
   }
 }
+
+/**
+ * Seconds past a transaction's `maxTime`, on this machine's clock, before it
+ * counts as expired: room for the skew between this clock and the network's
+ * (the transaction's `maxTime` was set from this clock) and for the last
+ * ledger that may still close inside the window to reach the endpoint.
+ */
+export const EXPIRY_MARGIN_SECS = 30;
 
 /**
  * Submits a signed transaction and returns once it has landed. Throws only
@@ -307,11 +317,19 @@ async function lookup(hash) {
  * closed without it landing. A lost response, a resend refused because the
  * first copy already applied, or a congested queue are all resolved by
  * looking the transaction up by hash.
+ *
+ * The window is judged on this machine's clock, never on a close time the
+ * endpoint reports (review finding TOOL-1, 20 October 2026): an endpoint
+ * that holds the signed transaction back and claims a later ledger would
+ * otherwise have the step called expired, rerun, and then land both. Before
+ * saying that nothing changed, a second endpoint, when one is configured,
+ * must not know the transaction either.
  */
 async function submit(tx, label, started = Date.now()) {
   const hash = Buffer.from(tx.hash()).toString("hex");
   const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
   const done = (result) => ({ result, hash, seconds: (Date.now() - started) / 1000, fee: feeCharged(result) });
+  const expired = () => maxTime > 0 && Date.now() / 1000 > maxTime + EXPIRY_MARGIN_SECS;
 
   // 1. Get the transaction into the queue, or learn that it already applied.
   let delay = 1000;
@@ -327,27 +345,29 @@ async function submit(tx, label, started = Date.now()) {
     if (known?.status === "SUCCESS") return done(known);
     if (known?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(known.resultXdr)}) ${explorer(hash)}`);
     if (sent?.status === "ERROR") throw new Error(`${label}: submission refused (${resultCode(sent.errorResult)})`);
-    if (maxTime && Date.now() / 1000 > maxTime + 10) break; // expired: settle it in step 2
+    if (expired()) break; // settled in step 2
     process.stderr.write(`  (network: ${label} ${sent?.status ?? "no answer"}, resending in ${delay / 1000} s)\n`);
     await sleep(delay);
     delay = Math.min(delay * 2, 8000);
   }
 
-  // 2. Wait for the outcome until the ledger has closed past the validity window.
+  // 2. Wait for the outcome until this machine's clock is past the validity window.
   for (;;) {
     const result = await lookup(hash);
     if (result?.status === "SUCCESS") return done(result);
     if (result?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(result.resultXdr)}) ${explorer(hash)}`);
-    let closed = 0;
-    try {
-      closed = await ledgerTime();
-    } catch {
-      // RPC unreachable: keep polling.
-    }
-    if (maxTime && closed > maxTime + 5) {
+    if (expired()) {
       const last = await lookup(hash);
       if (last?.status === "SUCCESS") return done(last);
-      if (last) throw new Error(`${label}: expired before landing; nothing changed on chain, rerun the step`);
+      if (last?.status === "FAILED") throw new Error(`${label}: transaction failed (${resultCode(last.resultXdr)}) ${explorer(hash)}`);
+      if (last) {
+        const index = secondEndpoint();
+        const other = index === null ? null : await lookup(hash, servers[index]);
+        if (other?.status === "SUCCESS" || other?.status === "FAILED") {
+          throw new Error(`${label}: ${activeRpcUrl()} does not know transaction ${hash}, ${RPC_URLS[index]} says ${other.status}: the endpoints disagree; check it in the explorer before rerunning the step ${explorer(hash)}`);
+        }
+        throw new Error(`${label}: expired before landing; nothing changed on chain, rerun the step`);
+      }
     }
     await sleep(1000);
   }
@@ -616,21 +636,42 @@ export function expectedSigners(state, sourceRole, func, cosigners = []) {
   return expected;
 }
 
+/** How a refusal ends while nothing has left this machine signed. */
+export const NOTHING_SIGNED = "nothing signed";
+
+/**
+ * How a refusal ends once authorization entries were signed and sent to the
+ * RPC in the second simulation: the transaction itself was not signed, but
+ * those signatures are out, until their expiry ledger.
+ */
+const signedForSimulation = (count, expiry) =>
+  `the transaction was not signed or sent, but ${count} authorization ${count === 1 ? "entry" : "entries"} signed for its simulation reached the RPC, valid until ledger ${expiry}`;
+
 /**
  * Refuses an authorization entry that is not for the operation's own call,
  * or an address-credential entry for an address the operation does not
  * expect. A signature over another call could be replayed in a transaction
  * the RPC builds (rpc-1); one from an unexpected role is never needed.
+ *
+ * The transaction's source never signs an entry of its own (review finding
+ * TOOL-1, 20 October 2026): an honest endpoint records the source's
+ * authority as source-account credentials, which only this transaction
+ * carries. An address credential for the source would be a signature that
+ * any transaction, from any fee payer, could carry until its expiry.
+ * `source` is the source's G-address; `tail` ends the message.
  */
-export function checkAuthEntries(state, entries, func, expected, label) {
+export function checkAuthEntries(state, entries, func, expected, label, source = null, tail = NOTHING_SIGNED) {
   for (const entry of entries) {
     const root = entry.rootInvocation.function;
     if (!isOwnCall(root, func)) {
-      throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; nothing signed (rpc-1)`);
+      throw new Error(`${label}: the simulation asks to authorize ${describeCall(root)}, not this call; ${tail} (rpc-1)`);
     }
     if (isAddressCredential(entry)) {
       const address = credentialAddress(entry);
-      if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; nothing signed (rpc-1)`);
+      if (source && address === source) {
+        throw new Error(`${label}: the simulation asks the transaction's source, ${roleOf(state, address)}, to sign this call apart from the transaction, which an honest endpoint never does and which another transaction could replay; ${tail} (rpc-1)`);
+      }
+      if (!expected.has(address)) throw new Error(`${label}: the simulation asks ${roleOf(state, address)} to authorize this call, which does not expect it; ${tail} (rpc-1)`);
     }
   }
 }
@@ -665,7 +706,7 @@ function foreignWrite(key, known) {
  * writes only the code it uploads. Restoring a stranger's archived entry is
  * how a simulation makes the payer buy rent it never needed.
  */
-export function checkFootprint(state, ready, func, expected, label) {
+export function checkFootprint(state, ready, func, expected, label, tail = NOTHING_SIGNED) {
   const known = { addresses: new Set(expected) };
   for (const id of Object.values(state.contracts ?? {})) if (typeof id === "string" && id.startsWith("C")) known.addresses.add(id);
   for (const role of Object.keys(state.keys ?? {})) known.addresses.add(publicKeyOf(state, role));
@@ -673,7 +714,7 @@ export function checkFootprint(state, ready, func, expected, label) {
   if (func.type === "hostFunctionTypeUploadContractWasm") known.code = new Set([Buffer.from(hash(Buffer.from(func.wasm))).toString("hex")]);
   for (const key of sorobanDataOf(ready).resources.footprint.readWrite) {
     const why = foreignWrite(key, known);
-    if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; nothing signed (rpc-1)`);
+    if (why) throw new Error(`${label}: the simulation writes ${why}, which this call does not touch; ${tail} (rpc-1)`);
   }
 }
 
@@ -699,26 +740,54 @@ export function checkExtendFootprint(ready, keys, label) {
  * is anything but the inclusion bid plus that resource fee: the fee signed is
  * the fee checked.
  */
-export function checkFee(ready, cap, label) {
+export function checkFee(ready, cap, label, tail = NOTHING_SIGNED) {
   const resourceFee = BigInt(sorobanDataOf(ready).resourceFee.toString());
   const beyondInclusion = BigInt(ready.fee) - BigInt(INCLUSION_FEE);
   if (resourceFee > cap || beyondInclusion > cap || beyondInclusion !== resourceFee) {
     const xlm = (stroops) => (Number(stroops) / 1e7).toFixed(2);
-    throw new Error(`${label}: the simulation asks ${xlm(beyondInclusion > resourceFee ? beyondInclusion : resourceFee)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; nothing signed (rpc-1)`);
+    throw new Error(`${label}: the simulation asks ${xlm(beyondInclusion > resourceFee ? beyondInclusion : resourceFee)} XLM in resource fees, above the ${xlm(cap)} XLM this call may pay; ${tail} (rpc-1)`);
   }
 }
 
-/** Signs every address-credential entry with the matching local key. */
-async function signAuth(state, entries) {
-  const { sequence } = await net(() => server.getLatestLedger(), "ledger");
+/** Ledgers an authorization signature stays valid: about 8 minutes. */
+const AUTH_VALIDITY_LEDGERS = 100;
+
+/**
+ * The ledger the authorization signatures expire at: 100 ledgers past the
+ * lower of the latest ledgers of the active endpoint and of a second one
+ * (review finding TOOL-1, 20 October 2026). The expiry is part of what is
+ * signed, and one endpoint alone could announce a ledger far ahead to
+ * stretch a signature's life. Two endpoints further apart than
+ * `LIMITS.rpcLedgerGap`, or a second endpoint that does not answer, refuse
+ * the signature. With a single endpoint configured, its word is taken.
+ */
+export async function signatureExpiry(label) {
+  const active = Number((await net(() => server.getLatestLedger(), "ledger")).sequence);
+  if (!Number.isSafeInteger(active) || active <= 0) throw new Error(`${label}: ${activeRpcUrl()} gave no latest ledger; ${NOTHING_SIGNED} (rpc-1)`);
+  const index = secondEndpoint();
+  if (index === null) return active + AUTH_VALIDITY_LEDGERS;
+  let second;
+  try {
+    second = Number((await net(() => servers[index].getLatestLedger(), "ledger")).sequence);
+  } catch (error) {
+    throw new Error(`${label}: ${RPC_URLS[index]} did not give its latest ledger (${String(error?.message ?? error).split("\n")[0].slice(0, 80)}), so the expiry of the signatures cannot be checked; ${NOTHING_SIGNED} (rpc-1); retry, or list one endpoint in STELLAR_RPC_URLS to sign on its word alone`);
+  }
+  if (!Number.isSafeInteger(second) || Math.abs(active - second) > LIMITS.rpcLedgerGap) {
+    throw new Error(`${label}: ${activeRpcUrl()} is at ledger ${active} and ${RPC_URLS[index]} at ${second}, more than ${LIMITS.rpcLedgerGap} apart: the expiry of the signatures cannot be trusted; ${NOTHING_SIGNED} (rpc-1)`);
+  }
+  return Math.min(active, second) + AUTH_VALIDITY_LEDGERS;
+}
+
+/** Signs every address-credential entry with the matching local key, valid until ledger `expiry`. */
+async function signAuth(state, entries, expiry) {
   return Promise.all(
     entries.map(async (entry) => {
       if (!isAddressCredential(entry)) return entry;
       const address = credentialAddress(entry);
       const keys = signersForAddress(state, address);
-      if (keys.length === 1) return authorizeEntry(entry, keys[0], sequence + 100, PASSPHRASE);
+      if (keys.length === 1) return authorizeEntry(entry, keys[0], expiry, PASSPHRASE);
       const signer = async (_preimage, payload) => ({ signatureScVal: multisigSignature(keys, payload), address });
-      return authorizeEntry(entry, signer, sequence + 100, PASSPHRASE);
+      return authorizeEntry(entry, signer, expiry, PASSPHRASE);
     }),
   );
 }
@@ -732,7 +801,9 @@ async function signAuth(state, entries) {
  * Before anything is signed, the simulation must authorize only this call,
  * by its source, the addresses it names and the declared `cosigners`; write
  * only entries the call touches; and ask at most `maxResourceFee` (25 XLM by
- * default). Otherwise it throws and nothing leaves this machine.
+ * default). Otherwise it throws and nothing leaves this machine. The
+ * entries of the co-signers are signed before the second simulation, which
+ * checks them: a refusal after that point says what went out.
  */
 export async function send(state, sourceRole, operation, label = sourceRole, { cosigners = [], maxResourceFee = MAX_RESOURCE_FEE } = {}) {
   const begun = Date.now();
@@ -744,9 +815,12 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
   if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
 
   const recorded = normalizeAuth(sim.result?.auth);
-  checkAuthEntries(state, recorded, func, expected, label);
+  checkAuthEntries(state, recorded, func, expected, label, source.publicKey());
+  let tail = NOTHING_SIGNED;
   if (recorded.some(isAddressCredential)) {
-    const signed = await signAuth(state, recorded);
+    const expiry = await signatureExpiry(label);
+    const signed = await signAuth(state, recorded, expiry);
+    tail = signedForSimulation(signed.filter(isAddressCredential).length, expiry);
     tx = await build(source.publicKey(), Operation.invokeHostFunction({ func, auth: signed }));
     sim = await net(() => server.simulateTransaction(tx), "simulate");
     if (rpc.Api.isSimulationError(sim)) throw simulationError(sim);
@@ -755,9 +829,9 @@ export async function send(state, sourceRole, operation, label = sourceRole, { c
   const ready = rpc.assembleTransaction(tx, sim).build();
   // The assembled transaction keeps our entries when we signed some, else it
   // takes the simulation's: check what is actually there.
-  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label);
-  checkFootprint(state, ready, func, expected, label);
-  checkFee(ready, maxResourceFee, label);
+  checkAuthEntries(state, ready.operations[0].auth ?? [], func, expected, label, source.publicKey(), tail);
+  checkFootprint(state, ready, func, expected, label, tail);
+  checkFee(ready, maxResourceFee, label, tail);
   signTx(state, sourceRole, ready);
   const { result, hash: txHash, seconds, fee } = await submit(ready, label);
   return {

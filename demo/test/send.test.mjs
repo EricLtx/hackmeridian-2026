@@ -186,3 +186,52 @@ test("the code extension pays one slice at most: refused at 25 XLM, sent under i
   answer.fee = lib.CODE_SLICE_MAX_FEE + 1n;
   await assert.rejects(lib.extendTtl(state, "keeper", [code], 518_400, { maxResourceFee: lib.CODE_SLICE_MAX_FEE }), /above the 300\.00 XLM/);
 });
+
+test("the source's own authority asked as a standalone signature is refused before anything is signed (TOOL-1)", async () => {
+  // An honest endpoint records the source's authority as source-account
+  // credentials. A hostile one asks for an address credential of the
+  // governor over its own unpause, and claims a ledger far ahead so that the
+  // signature would live long: another transaction could replay it.
+  server.getLatestLedger = async () => ({ sequence: 4_000_000_000, closeTime: "1800000000" });
+  answer.auth = [entryFor(roles.governor.publicKey(), callOf(OW, "unpause", []))];
+  await assert.rejects(
+    lib.invoke(state, "governor", OW, "unpause", []),
+    /asks the transaction's source, governor \(G.{5}…\), to sign this call apart from the transaction.*; nothing signed \(rpc-1\)$/,
+  );
+  assert.equal(simulations, 1, "no second simulation: no signed entry reached the endpoint");
+  assert.equal(sent.length, 0);
+});
+
+test("a refusal after the co-signers' entries went out with the simulation says so, never 'nothing signed' (TOOL-1)", async () => {
+  const args = [lib.sv.address(FOREIGN)];
+  answer.auth = [entryFor(roles.steward.publicKey(), callOf(OW, "co_signed_test", args))];
+  // The second simulation, made with the signed entry, writes a stranger's account.
+  answer.readWrite = [xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: Keypair.random().xdrAccountId() }))];
+  const error = await lib.invoke(state, "governor", OW, "co_signed_test", args, { cosigners: ["steward"] }).then(() => null, (e) => e);
+  assert.ok(error, "the footprint is refused");
+  assert.match(error.message, /writes the account of G/);
+  assert.doesNotMatch(error.message, /nothing signed/);
+  assert.match(error.message, /the transaction was not signed or sent, but 1 authorization entry signed for its simulation reached the RPC, valid until ledger 1100 \(rpc-1\)$/);
+  assert.equal(simulations, 2);
+  assert.equal(sent.length, 0);
+});
+
+test("an endpoint that holds the transaction back cannot have it called expired while it is still valid (TOOL-1)", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 1_800_000_000_000 });
+  // The endpoint claims a ledger closed 1,000 s from now, keeps the signed
+  // transaction and never forwards it: the verdict waits for this machine's
+  // clock to pass the transaction's own limit, plus the margin.
+  server.getLatestLedger = async () => ({ sequence: 1_000, closeTime: String(Math.floor(Date.now() / 1000) + 1_000) });
+  server.getTransaction = async () => ({ status: "NOT_FOUND" });
+  let verdict;
+  lib.invoke(state, "steward", OW, "mint_test", []).then(() => { verdict = "landed"; }, (error) => { verdict = error.message; });
+  for (let second = 0; second < 300 && verdict === undefined; second += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    t.mock.timers.tick(1_000);
+  }
+  assert.equal(sent.length, 1);
+  const maxTime = Number(sent[0].timeBounds.maxTime);
+  assert.match(verdict ?? "", /expired before landing; nothing changed on chain, rerun the step$/);
+  assert.ok(Date.now() / 1000 > maxTime + lib.EXPIRY_MARGIN_SECS, `called expired ${(maxTime - Date.now() / 1000).toFixed(0)} s before the transaction's own limit`);
+});
