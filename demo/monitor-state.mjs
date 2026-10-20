@@ -76,6 +76,7 @@ export function withMonitorLock(file, fn) {
   const lock = `${file}.lock`;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const started = Date.now();
+  let waits = 0;
   for (;;) {
     let fd = null;
     try {
@@ -104,7 +105,10 @@ export function withMonitorLock(file, fn) {
         }
       }
       if (Date.now() - started > LOCK_WAIT_MS) throw new Error(`${lock} is held by another process for more than ${LOCK_WAIT_MS / 1000} s: nothing written to ${file}`);
-      pause(2);
+      // A randomized back-off, 5 to 50 ms and growing: waiters that wake
+      // together would otherwise contend again together.
+      pause(5 + Math.random() * Math.min(45, 5 * 2 ** waits));
+      waits += 1;
       continue;
     }
     try {
@@ -113,9 +117,25 @@ export function withMonitorLock(file, fn) {
     } finally {
       fs.closeSync(fd);
       // Released at once: a lock left behind would hold every writer until LOCK_STALE_MS.
-      unlinkPatiently(lock);
+      releaseMonitorLock(lock);
     }
   }
+}
+
+/**
+ * Removes this process's lock, and only its own: a holder stalled past
+ * `LOCK_STALE_MS` has lost its lock to a waiter, and the lock at that path
+ * may now be another process's, which must stay.
+ */
+function releaseMonitorLock(lock) {
+  let content = "";
+  try {
+    content = fs.readFileSync(lock, "utf8");
+  } catch {
+    return; // already claimed as stale and removed
+  }
+  if (!content.startsWith(`${process.pid} `)) return;
+  unlinkPatiently(lock);
 }
 
 /** Rename attempts, 2 ms apart, while a reader holds the file open (Windows refuses the rename meanwhile). */

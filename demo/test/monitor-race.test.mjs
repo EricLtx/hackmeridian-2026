@@ -14,7 +14,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { saveMonitor } from "../monitor-state.mjs";
+import { announceUpgrade, saveMonitor } from "../monitor-state.mjs";
 
 const DEMO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OW = "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL";
@@ -63,4 +63,53 @@ test("an acknowledged code baseline survives a watch saving at the same time", a
     assert.deepEqual([r.disk.wasmHash, r.watch.wasmHash], [RC5, RC5], `round ${round + 1}: the old baseline came back on disk or in the watch`);
     assert.deepEqual(r.lostOnDisk, []);
   }
+});
+
+test("three paced writers (a watch, an announcer, an acknowledger, 20 ms apart) are never refused the lock, and nothing is lost", async () => {
+  // The lock is held for about a millisecond; waiters back off 5 to 50 ms at random, so none ever waits out LOCK_WAIT_MS (15 s).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ow-paced-"));
+  const file = path.join(dir, "monitor.json");
+  const result = path.join(dir, "watch.json");
+  saveMonitor(file, { contract: OW, announced: [], wasmHash: RC4 });
+  const begun = Date.now();
+  const [watch, announcer, acknowledger] = await Promise.all([
+    runWriter(["watch", file, OW, "120", result, "20"]),
+    runWriter(["announce", file, "p", "120", "-", "20"]),
+    runWriter(["acknowledge", file, RC5, "60", "-", "20"]),
+  ]);
+  const elapsed = Date.now() - begun;
+  const disk = JSON.parse(fs.readFileSync(file, "utf8"));
+  const memory = JSON.parse(fs.readFileSync(result, "utf8"));
+  const leftovers = fs.readdirSync(dir).filter((name) => name !== "monitor.json" && name !== "watch.json");
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.deepEqual([watch.code, announcer.code, acknowledger.code], [0, 0, 0]);
+  assert.deepEqual([memory.errors, announcer.err.trim(), acknowledger.err.trim()], [[], "", ""], "no refusal of the lock, no other error");
+  assert.equal(disk.announced.length, 120);
+  assert.equal(memory.announced.length, 120);
+  assert.equal(disk.wasmHash, RC5);
+  assert.deepEqual(leftovers, []);
+  assert.ok(elapsed < 15_000, `${elapsed} ms: no writer waited out the lock`);
+});
+
+test("a holder stalled past LOCK_STALE_MS loses its lock to a waiter, and its own release leaves a lock taken since by another process alone", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ow-stall-"));
+  const file = path.join(dir, "monitor.json");
+  const lock = `${file}.lock`;
+  saveMonitor(file, { contract: OW, announced: [], wasmHash: RC4 });
+  const holder = runWriter(["hold", file, "-", "12", path.join(dir, "holder.json")]);
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  assert.ok(fs.existsSync(lock), "the holder has the lock");
+  // The waiter claims the lock once it is LOCK_STALE_MS old (about 9 s from now), writes, and releases it.
+  const begun = Date.now();
+  announceUpgrade(file, "bb");
+  const waited = Date.now() - begun;
+  assert.ok(waited > 8_000 && waited < 11_000, `waited ${waited} ms for the stale lock`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).announced, ["bb"]);
+  // A third process takes the lock at that path while the holder still runs.
+  fs.writeFileSync(lock, "424242 another process\n");
+  const h = await holder;
+  assert.equal(h.code, 0, h.err);
+  assert.ok(fs.existsSync(lock), "the stalled holder's release left the other process's lock alone");
+  assert.equal(fs.readFileSync(lock, "utf8"), "424242 another process\n");
+  fs.rmSync(dir, { recursive: true, force: true });
 });
