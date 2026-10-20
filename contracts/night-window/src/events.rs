@@ -347,7 +347,7 @@ pub struct FallbackRemoved {
     pub by: Address,
 }
 
-// -- Deferred share release (decision S9) ---------------------------------------
+// -- Deferred share release (decisions S9 and S8) -------------------------------
 
 #[contractevent]
 pub struct ReleaseDeferred {

@@ -763,9 +763,10 @@ pub fn set_pending_currency_caps(env: &Env, pending: &Map<Symbol, PendingCurrenc
     }
 }
 
-/// Extends the TTL of a pending release whose delivery was refused, and of
-/// its repo, which `redirect_release` reads: the record may wait a long time
-/// for the issuer.
+/// Extends the TTL of a pending release whose delivery was refused, or is
+/// withheld until its recipient is approved, and of its repo, which
+/// `redirect_release` reads: the record may wait a long time for the issuer
+/// or for an approval.
 pub fn bump_pending_release(env: &Env, repo_id: u64) {
     bump(env, &DataKey::PendingRelease(repo_id));
     bump(env, &DataKey::Repo(repo_id));

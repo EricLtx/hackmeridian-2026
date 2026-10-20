@@ -68,8 +68,9 @@ pub enum DataKey {
     /// Persistent: replacement of an admitted fund's configuration, waiting
     /// for its time delay.
     PendingFundChange(Address),
-    /// Persistent: shares owed by a closed repo that the share token refused
-    /// to deliver, by repo identifier.
+    /// Persistent: shares owed by a closed repo, by repo identifier, while
+    /// the share token refuses the delivery or, for seized shares, while the
+    /// recipient is not approved for the fund.
     PendingRelease(u64),
     /// Persistent: fallback NAV feed of a fund.
     Fallback(Address),
@@ -339,7 +340,7 @@ pub struct AnchorRate {
     pub decimals: u32,
 }
 
-/// Shares owed; delivery refused by the token.
+/// Shares owed: refused by the token, or seized for an unapproved recipient.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRelease {
