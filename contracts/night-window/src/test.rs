@@ -3467,6 +3467,80 @@ fn a_new_nav_feed_must_lie_on_the_funds_path() {
     assert_eq!((state.reference_nav, state.reference_time), (NAV_EUR_8, T0));
 }
 
+/// Verification of review finding arith-2, same root on another path (20
+/// October 2026): the new NAV feed of a replacement or a re-admission must
+/// read inside the corridor around the fund's reference, and that corridor
+/// grew with the time since the reference. After sixty quiet days, or sixty
+/// days of removal, a feed reading 0.9 % above the reference passed. The
+/// growth counts over at most the NAV age bound there too, at the proposal
+/// and at the apply: the bound is that of a reference 26 hours old.
+#[test]
+fn a_new_nav_feed_after_a_quiet_spell_gets_one_nav_age_of_growth() {
+    // Tops of the corridor around `reference` (published at T0) now, with
+    // the growth counted over the NAV age bound, and as rc4 counted it.
+    let tops = |f: &Fixture, reference: i128| {
+        let config = fund_config(f);
+        let now = f.env.ledger().timestamp();
+        (
+            corridor_top(&config, reference, T0, now, config.nav_max_age_secs),
+            corridor_top(&config, reference, T0, now, u64::MAX),
+        )
+    };
+
+    // Replacement of an admitted fund's NAV feed.
+    let (f, _) = ready();
+    let (oracle, feed) = second_feed(&f, eur(&f.env));
+    let next = FundConfig {
+        oracle,
+        ..fund_config(&f)
+    };
+    advance(&f, 60 * DAY);
+    let (top, rc4_top) = tops(&f, NAV_EUR_8);
+    assert_eq!(
+        top,
+        corridor_top(&next, NAV_EUR_8, T0, T0 + 26 * HOUR, u64::MAX)
+    );
+    assert!(rc4_top > NAV_EUR_8 * 10_090 / 10_000);
+    for refused in [rc4_top, top + 1] {
+        publish_on(&f, &feed, refused);
+        assert_eq!(
+            f.client.try_set_fund(&f.shares, &next),
+            Err(Ok(Error::PriceOutOfBand))
+        );
+    }
+    publish_on(&f, &feed, top);
+    f.client.set_fund(&f.shares, &next);
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let (top, rc4_top) = tops(&f, NAV_EUR_8);
+    publish_on(&f, &feed, rc4_top);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish_on(&f, &feed, top);
+    f.client.apply_fund_change(&f.shares);
+    let state = f.client.get_fund_state(&f.shares).unwrap();
+    assert_eq!((state.reference_nav, state.reference_time), (NAV_EUR_8, T0));
+
+    // Re-admission after sixty days of removal: the proposal defers the
+    // check, the apply makes it with the same bound.
+    let (f, _) = ready();
+    f.client.remove_fund(&f.shares);
+    advance(&f, 60 * DAY);
+    publish_nav(&f, NAV_EUR);
+    f.client.set_fund(&f.shares, &fund_config(&f));
+    advance(&f, DEFAULT_TIMELOCK_SECS);
+    let (top, rc4_top) = tops(&f, NAV_EUR);
+    publish_nav(&f, rc4_top);
+    assert_eq!(
+        f.client.try_apply_fund_change(&f.shares),
+        Err(Ok(Error::PriceOutOfBand))
+    );
+    publish_nav(&f, top);
+    f.client.apply_fund_change(&f.shares);
+    assert_eq!(f.client.get_fund(&f.shares), Some(fund_config(&f)));
+}
+
 /// Review finding H1, FX leg: a new FX feed must lie within the current band
 /// around the current reference rate, which carries over.
 #[test]

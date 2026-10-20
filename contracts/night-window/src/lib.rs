@@ -2911,6 +2911,11 @@ fn prepare_fund(
 /// must lie in the corridor around that reference, with the current
 /// corridor settings when there are any: a feed that disagrees with the path
 /// the fund has followed is refused, whoever picks the moment of the apply.
+/// As for any valuation, the corridor grows over at most the NAV age bound
+/// (`oracle::check_corridor`): after a long quiet spell or a long removal
+/// the check is no wider than one NAV age after the reference (verification
+/// of review finding arith-2, 20 October 2026). A fund whose NAV outgrew it
+/// is refreshed or re-anchored first.
 fn carry_nav_reference(
     current: Option<&FundConfig>,
     next: &FundConfig,
