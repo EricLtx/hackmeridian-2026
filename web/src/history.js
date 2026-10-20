@@ -196,8 +196,9 @@ function wireLanguage() {
   });
 }
 
+/** A file next to the page, revalidated with the host ("no-cache": a 304 while it is unchanged). */
 async function loadJson(name) {
-  const response = await fetch(`./${name}`, { cache: "no-store" });
+  const response = await fetch(`./${name}`, { cache: "no-cache" });
   if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
   return response.json();
 }

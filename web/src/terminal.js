@@ -1011,7 +1011,7 @@ export function createTerminal(ctx) {
         return wallet() ? say("ok", t("Connected {address}.", { address: shortAddress(wallet()) })) : say("err", S.walletProblem ?? t("Freighter did not connect."));
       case "refresh":
         say("out", t("Reading the chain…"));
-        await ctx.refreshAll();
+        await ctx.refreshAll({ history: true });
         await refresh({ force: true });
         return say("ok", t("Up to date."));
       case "clear":

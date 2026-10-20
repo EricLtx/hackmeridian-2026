@@ -67,6 +67,7 @@ const S = {
   openings: new Map(), // repo id -> opening tx, from events
   releases: new Map(), // closed repo id -> shares the token refused to deliver
   history: null, // the indexer's export (history.json) when the page can read it: events by repo, for the timelines
+  historyDue: false, // fetch the export again on the next pass (REF, the page back in view)
   delay: null, // the contract's time delay, seconds
   version: null, // contract version
   guideRole: "borrower",
@@ -103,7 +104,7 @@ const terminal = createTerminal({
   setHTML: (el, html) => setHTML(el, html),
   runTx: (el, context, action, message) => runTx(el, context, action, message),
   connect: () => connect(),
-  refreshAll: () => refreshAll(),
+  refreshAll: (options) => refreshAll(options),
   setFace: (face) => setFace(face),
   fundLimits: () => fundLimits(),
   onboardCommand,
@@ -1225,7 +1226,14 @@ async function refreshWallet() {
   if (S.face !== "terminal") await refreshPositions();
 }
 
-async function refreshAll() {
+/**
+ * One pass over every view. `history` also fetches the indexer's export
+ * again: on REF and when the page comes back into view, not on every 15 s
+ * pass, since it changes only when the export is published. A request made
+ * while a pass runs is kept for the next one.
+ */
+async function refreshAll({ history = false } = {}) {
+  if (history) S.historyDue = true;
   if (S.refreshing || !S.chain) return;
   S.refreshing = true;
   const updated = $("board-updated");
@@ -1233,7 +1241,10 @@ async function refreshAll() {
     // An endpoint that answers but lags is left first, so the pass and its clock read a current ledger.
     await S.chain.checkHeights();
     await refreshBoard();
-    await loadHistory();
+    if (S.historyDue) {
+      S.historyDue = false;
+      await loadHistory();
+    }
     await refreshWallet();
     await terminal.refresh();
     S.updatedAt = now();
@@ -1321,7 +1332,7 @@ function wire() {
     if (!target) return;
     if (target.id === "connect") return connect();
     if (target.id === "disconnect") return disconnect();
-    if (target.id === "refresh") return refreshAll();
+    if (target.id === "refresh") return refreshAll({ history: true });
     if (target.dataset.face) return transition(() => setFace(target.dataset.face));
     if (target.dataset.gotoFace) {
       window.scrollTo({ top: 0 });
@@ -1390,14 +1401,18 @@ function wire() {
   $("borrow-form").addEventListener("submit", submitBorrow);
   $("lend-form").addEventListener("submit", submitLend);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refreshAll();
+    if (!document.hidden) refreshAll({ history: true });
   });
 }
 
-/** The indexer's export, when it sits next to the page: it dates and links the closing steps of the timelines. Optional. */
+/**
+ * The indexer's export, when it sits next to the page: it dates and links the
+ * closing steps of the timelines. Optional. "no-cache" revalidates it with
+ * the host, which answers 304 while it is unchanged.
+ */
 async function loadHistory() {
   try {
-    const response = await fetch("./history.json", { cache: "no-store" });
+    const response = await fetch("./history.json", { cache: "no-cache" });
     if (!response.ok) return;
     const h = await response.json();
     if (Array.isArray(h?.events)) S.history = { generatedAt: h.generatedAt, events: h.events };
