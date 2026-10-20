@@ -45,15 +45,16 @@ cargo test
 
 A single crate: `cargo test -p <name>`.
 
-WASM test mode: with `NIGHT_WINDOW_TEST_WASM=1`, the tests of `night-window` register the built release WASM instead of the natively compiled contract, so the whole suite runs in the VM on the stack that WASM was linked with. The CI job `wasm-canary` does so with an 8 KiB stack, in a target directory of its own so that `target/` keeps the shipped WASM:
+WASM test mode: with `NIGHT_WINDOW_TEST_WASM=1`, the tests of `night-window` register the built release WASM instead of the natively compiled contract, so the whole suite runs in the VM on the stack that WASM was linked with. The CI job `wasm-canary` does so with an 8 KiB stack, in a target directory of its own so that `target/` keeps the shipped WASM. By hand, run it in a subshell so that neither variable stays exported: a later `stellar contract build` would otherwise link the 8 KiB stack into `target/`, which `demo/upgrade.mjs` proposes (the upgrade script refuses to run while either variable is set, and checks that the built stack is 65,536 bytes):
 
 ```sh
-export CARGO_TARGET_DIR=$PWD/target-canary NIGHT_WINDOW_STACK_SIZE=8192
-stellar contract build
-NIGHT_WINDOW_TEST_WASM=1 cargo test -p night-window
+(
+  export CARGO_TARGET_DIR=$PWD/target-canary NIGHT_WINDOW_STACK_SIZE=8192
+  stellar contract build && NIGHT_WINDOW_TEST_WASM=1 cargo test -p night-window
+)
 ```
 
-The tooling has offline tests too: `npm test` in `demo/` (the monitor's detectors and the library's checks before signing) and in `indexer/` (CI job `tooling`).
+The tooling has offline tests too: `npm test` in `demo/` (the monitor's detectors and state file, the library's checks before signing, the upgrade script against a chain stub, which needs the built WASM) and in `indexer/` (CI job `tooling`, which first checks the syntax of every demo and indexer script with `node --check`).
 
 ## Deploy and invoke
 
@@ -76,7 +77,7 @@ stellar contract invoke \
 
 The product contract is `night-window` (`contracts/night-window/`): the Open Window contract, a stablecoin liquidity facility for tokenized fund shares built as a repo. The crate keeps its historical name; the product name is Open Window. Its constructor takes `--admin <address>`, passed after the `--` separator at deploy time. `stellar contract invoke --id <id> -- -h` prints the generated CLI for the deployed contract.
 
-Version 4 is implemented and tested (audit candidate rc4, tag `audit-v4-rc4`, interface frozen on 18 October 2026): the full lifecycle, roles (governor, guardian, steward per fund, optional trustee, sentinel), price checks with a backup feed, deferred share delivery, lenders independent of the fund, a time delay on every upgrade, feed change and loosening (propose, wait, apply by anyone, cancel), a stablecoin registry behind that delay after the first admission, and a stored schema version with a governed `migrate`. Any change to `contracts/` after the tag means a new tag and a new rehearsal. The rc5 candidate (20 October 2026) keeps that interface and the stored layout and fixes the contract findings of the security pass of that day (decisions S30 to S34 in `docs/security.md`); it becomes the tag `audit-v4-rc5` after an adversarial review, then a governed upgrade of the testnet instance, which runs rc4 until then. Scripts that change an admitted fund, the guardian, the term ceiling, the envelope, fund limits, a currency cap or the stablecoin registry must handle the proposal: these calls queue the change after bootstrap, and since rc5 the governor applies a stablecoin registration with its own key. Operations extend the contract instance, never its code (decision S20). `contracts/fund-token/` (allowlisted SEP-41 share token) and `contracts/nav-oracle/` (operator-fed SEP-40 feed) exist for the tests and the testnet demo in `demo/`; they are not part of the product. Error codes are public ABI: add new ones, never renumber; `NotImplemented` (code 1) stays reserved.
+Version 4 is implemented and tested (audit candidate rc4, tag `audit-v4-rc4`, interface frozen on 18 October 2026): the full lifecycle, roles (governor, guardian, steward per fund, optional trustee, sentinel), price checks with a backup feed, deferred share delivery, lenders independent of the fund, a time delay on every upgrade, feed change and loosening (propose, wait, apply by anyone, cancel), a stablecoin registry behind that delay after the first admission, and a stored schema version with a governed `migrate`. Any change to `contracts/` after the tag means a new tag and a new rehearsal. The rc5 candidate (20 October 2026) keeps that interface and the stored layout and fixes the contract findings of the security pass of that day (decisions S30 to S34 in `docs/security.md`); it carries the fixes of its adversarial review of the same day (24 findings) and becomes the tag `audit-v4-rc5` next, then a governed upgrade of the testnet instance, which runs rc4 until then. Scripts that change an admitted fund, the guardian, the term ceiling, the envelope, fund limits, a currency cap or the stablecoin registry must handle the proposal: these calls queue the change after bootstrap, and since rc5 the governor applies a stablecoin registration with its own key. Operations extend the contract instance, never its code (decision S20). `contracts/fund-token/` (allowlisted SEP-41 share token) and `contracts/nav-oracle/` (operator-fed SEP-40 feed) exist for the tests and the testnet demo in `demo/`; they are not part of the product. Error codes are public ABI: add new ones, never renumber; `NotImplemented` (code 1) stays reserved.
 
 ## Web interface
 
