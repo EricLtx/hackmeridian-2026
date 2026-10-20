@@ -6,6 +6,7 @@
 import "@fontsource-variable/inter";
 import { Chain, rpcChangeText } from "./chain.js";
 import { checkDeployment } from "./deployment.js";
+import { refuseFrame, refusesFrame } from "./frame.js";
 import { describeError } from "./errors.js";
 import {
   UNSHOWABLE,
@@ -1459,6 +1460,8 @@ function setLanguage(choice, { persist = true } = {}) {
 async function start() {
   // The language comes first: every text below, the load error included, is written in it.
   bootLang();
+  // Inside another site's frame the page does nothing: no read, no wallet, no button wired.
+  if (refusesFrame(window)) return refuseFrame(document);
   applyStatic();
   markLangButtons();
   initMotion();

@@ -8,6 +8,7 @@
 import "@fontsource-variable/inter";
 import { tapeLine } from "./blotter.js";
 import { formatAmount, formatOrDash, formatRate, shortAddress } from "./format.js";
+import { refuseFrame, refusesFrame } from "./frame.js";
 import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
 import { addr, contractLink, esc, explorerOf, exportDecimals, txLink, when } from "./journal.js";
 import { initMotion, setLoading, transition } from "./motion.js";
@@ -205,6 +206,8 @@ async function loadJson(name) {
 
 async function main() {
   bootLang();
+  // Inside another site's frame the page shows nothing but how to open it in its own tab.
+  if (refusesFrame(window)) return refuseFrame(document);
   applyStatic();
   markLangButtons();
   initMotion();
