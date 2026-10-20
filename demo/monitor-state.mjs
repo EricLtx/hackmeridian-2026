@@ -24,9 +24,16 @@ export const ANNOUNCEMENTS = ["announced", "announcedStablecoins", "announcedAdm
  * `testnet` by default), in demo/.state/: `monitor.json` for the demo
  * instance, `monitor-<name>.json` for a disposable one, so that a rehearsal
  * or an offline run never writes into the demo instance's file. Every writer
- * (the watch, `npm run upgrade`) names it this way.
+ * (the watch, `npm run upgrade`) names it this way. The name goes into a
+ * path: only letters, digits, `_` and `-` are accepted, so no name reaches
+ * outside demo/.state/ or carries a separator.
  */
-export const monitorFileName = (stateName) => (stateName === "testnet" ? "monitor.json" : `monitor-${stateName}.json`);
+export function monitorFileName(stateName) {
+  if (typeof stateName !== "string" || !/^[A-Za-z0-9_-]+$/.test(stateName)) {
+    throw new Error(`OPEN_WINDOW_STATE must be made of letters, digits, _ and - only, not ${JSON.stringify(stateName)}`);
+  }
+  return stateName === "testnet" ? "monitor.json" : `monitor-${stateName}.json`;
+}
 
 /** The file's content, or null when it is missing or unreadable. */
 export function readMonitorFile(file) {

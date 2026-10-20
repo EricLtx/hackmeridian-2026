@@ -11,7 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { LIMITS, decideActions, detect, recordAnnouncement } from "../detectors.mjs";
-import { acknowledgeUpgrade, announceUpgrade, loadMonitor, mergeMonitor, readMonitorFile, refreshMonitor, saveMonitor } from "../monitor-state.mjs";
+import { acknowledgeUpgrade, announceUpgrade, loadMonitor, mergeMonitor, monitorFileName, readMonitorFile, refreshMonitor, saveMonitor } from "../monitor-state.mjs";
 
 const OW = "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL";
 const RC4 = "f5f13ae69499efdd23ae350d45f4bfe4bb25026bfcb6b44b264a2d3d2effbcea";
@@ -87,4 +87,13 @@ test("a file of another deployment is never merged; a new deployment keeps only 
   const missing = path.join(path.dirname(file), "none.json");
   assert.equal(acknowledgeUpgrade(missing, RC5), false);
   assert.equal(fs.existsSync(missing), false);
+});
+
+test("the monitor file of an instance is named from OPEN_WINDOW_STATE, which carries letters, digits, _ and - only", () => {
+  assert.equal(monitorFileName("testnet"), "monitor.json");
+  assert.equal(monitorFileName("rehearsal-2026_10-20"), "monitor-rehearsal-2026_10-20.json");
+  assert.equal(monitorFileName("offline-stub"), "monitor-offline-stub.json");
+  for (const bad of ["../testnet", "a/b", "a\\b", "", "name with space", "dot.json", ".", "..", undefined, null, 42]) {
+    assert.throws(() => monitorFileName(bad), /OPEN_WINDOW_STATE must be made of letters, digits, _ and - only/, JSON.stringify(bad));
+  }
 });
