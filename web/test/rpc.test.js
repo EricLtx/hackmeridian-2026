@@ -230,16 +230,16 @@ test("the height poll moves a lagging endpoint's calls, reads an unhealthy one's
   // An endpoint left after a failed call rests before calls return to it, level or not.
   const rested = chainWith(fake("first.example", { getHealth: health(5_293_787) }), fake("second.example", { getHealth: health(5_293_787) }));
   rested.active = 1;
-  rested.endpoints[0].failedAt = Date.now();
+  rested.endpoints[0].failedAt = performance.now();
   await rested.checkHeights();
   assert.equal(rested.rpcInfo().host, "second.example", "a minute of rest first");
-  rested.endpoints[0].failedAt = Date.now() - RETURN_QUIET_MS - 1;
+  rested.endpoints[0].failedAt = performance.now() - RETURN_QUIET_MS - 1;
   await rested.checkHeights();
   assert.equal(rested.rpcInfo().host, "first.example");
   // failover marks the endpoint it leaves.
   const marked = chainWith(fake("slow.example", { getHealth: never }), fake("fast.example", { getHealth: health(1) }));
   await marked.net(() => marked.server.getHealth(), { timeoutMs: 20 });
-  assert.ok(Date.now() - marked.endpoints[0].failedAt < 5_000);
+  assert.ok(performance.now() - marked.endpoints[0].failedAt < 5_000);
 
   // A silent endpoint has no height: nothing moves on its account.
   const down = async () => {
@@ -326,6 +326,7 @@ test("an endpoint that fails soon after each return rests longer each time, up t
   try {
     const health = async () => ({ status: "healthy", latestLedger: 100, latestLedgerCloseTime: String(Math.floor(clock / 1000) - 2) });
     const chain = chainWith(fake("first.example", { getHealth: health }), fake("second.example", { getHealth: health }));
+    chain.clock = () => clock; // the rests run on this test's clock
     const changes = [];
     chain.onRpcChange = (change) => changes.push(change.reason);
     const restOf = async () => {
@@ -355,20 +356,20 @@ test("an endpoint that fails soon after each return rests longer each time, up t
 
 test("a failing call skips an endpoint that is resting; with every other one resting, the calls stay where they are until a rest is over", () => {
   const chain = chainWith(fake("a.example", {}), fake("b.example", {}), fake("c.example", {}));
-  chain.endpoints[1].failedAt = Date.now(); // b failed a moment ago
+  chain.endpoints[1].failedAt = performance.now(); // b failed a moment ago
   assert.ok(chain.failover(new RpcTimeout(7000), 0));
   assert.equal(chain.rpcInfo().host, "c.example", "b rests: c takes the calls");
   // a just failed and b rests: when c fails too, there is nowhere to go; the calls stay on c, which rests too now.
   assert.equal(chain.failover(new RpcTimeout(7000), 2), false);
   assert.equal(chain.rpcInfo().host, "c.example");
-  assert.ok(Date.now() - chain.endpoints[2].failedAt < 1000, "c's failure is recorded");
+  assert.ok(performance.now() - chain.endpoints[2].failedAt < 1000, "c's failure is recorded");
   assert.equal(chain.moveCount, 1);
   // With two endpoints: the other one resting, the calls stay; once its rest is over, the next failure moves there.
   const two = chainWith(fake("a.example", {}), fake("b.example", {}));
-  two.endpoints[1].failedAt = Date.now();
+  two.endpoints[1].failedAt = performance.now();
   assert.equal(two.failover(new RpcTimeout(7000), 0), false);
   assert.equal(two.rpcInfo().host, "a.example");
-  two.endpoints[1].failedAt = Date.now() - 2 * RETURN_QUIET_MS;
+  two.endpoints[1].failedAt = performance.now() - 2 * RETURN_QUIET_MS;
   assert.ok(two.failover(new RpcTimeout(7000), 0));
   assert.equal(two.rpcInfo().host, "b.example");
 });
@@ -386,6 +387,7 @@ const liveServer = (alive) => {
   };
 };
 async function drive(chain, seconds, { onTick = () => {} } = {}) {
+  chain.clock = () => Date.now(); // virtual time: the rests and the window run on the mocked clock
   const start = Date.now();
   const since = () => Math.round((Date.now() - start) / 1000);
   const moves = [];
@@ -466,7 +468,7 @@ test("a failure during a stay keeps a doubled rest; only the first failure after
   const a = fake("a.example", {});
   const b = fake("b.example", {});
   const chain = chainWith(a, b);
-  const now = Date.now();
+  const now = performance.now();
   b.failedAt = now; // b rests, and its last poll did not answer
   a.restMs = 240_000;
   a.failedAt = now - 100_000;
@@ -598,12 +600,12 @@ test("calls that come back to an endpoint start its count of 429 polls again: on
   await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
   assert.equal(chain.rpcInfo().host, "b.example");
   // b fails too once a's rest is over: the calls come back to a by net()'s own return.
-  a.failedAt = Date.now() - 2 * RETURN_QUIET_MS;
+  a.failedAt = performance.now() - 2 * RETURN_QUIET_MS;
   await assert.rejects(chain.net(() => chain.server.simulateTransaction(), { timeoutMs: 20, attempts: 3 }), RpcTimeout);
   assert.equal(chain.rpcInfo().host, "a.example");
   assert.deepEqual(changes, ["timeout:b.example", "timeout:a.example"]);
   // b's rest is over by now; a answers its poll with a 429 once: no move.
-  b.failedAt = Date.now() - 2 * RETURN_QUIET_MS;
+  b.failedAt = performance.now() - 2 * RETURN_QUIET_MS;
   await chain.checkHeights();
   assert.equal(chain.rpcInfo().host, "a.example", "one 429 poll after the return");
   assert.equal(changes.length, 2);
@@ -637,7 +639,7 @@ test("a Retry-After longer than a timeout leaves the endpoint at the first 429; 
   // The other endpoint rests after a failure of its own: the third 429 in a row is then waited out too, and the call ends with the 429 after its attempts.
   busyCalls = 0;
   const alone = chainWith(busy("0"), fake("other.example", { getHealth: healthy }));
-  alone.endpoints[1].failedAt = Date.now();
+  alone.endpoints[1].failedAt = performance.now();
   const moves = [];
   alone.onRpcChange = (change) => moves.push(change.reason);
   await assert.rejects(alone.net(() => alone.server.getHealth()), /status code 429/);
@@ -788,7 +790,7 @@ test("a read moves away on the second timeout within 30 s of the endpoint in use
 
   // Two stalls 40 s apart: each is a first one.
   const apart = chainWith(fake("a.example", { getHealth: stalling([true, false]) }), fake("b.example", { getHealth: healthy }));
-  apart.endpoints[0].timedOutAt = Date.now() - 40_000;
+  apart.endpoints[0].timedOutAt = performance.now() - 40_000;
   assert.equal((await apart.net(() => apart.server.getHealth(), { timeoutMs: 30 })).status, "healthy");
   assert.equal(apart.rpcInfo().host, "a.example");
 
@@ -837,6 +839,29 @@ test("a scan of events whose bounds came from one endpoint and whose calls moved
   const openings = await run((chain) => chain.repoOpenings(G, 100));
   assert.deepEqual([...openings.result.openings.keys()], [5]);
   assert.deepEqual(openings.requests, [100, 150]);
+});
+
+test("the rate window and the rests run on a monotonic clock: a wall clock stepped back 10 s holds no call and keeps no rest", async () => {
+  // Only Date is mocked here: the timers and the monotonic clock are real.
+  mock.timers.enable({ apis: ["Date"], now: 1_792_500_000_000 });
+  try {
+    const chain = chainWith(fake("a.example", { getHealth: healthy }), fake("b.example", { getHealth: healthy }));
+    await Promise.all(Array.from({ length: 20 }, () => chain.net(() => chain.server.getHealth())));
+    mock.timers.setTime(Date.now() - 10_000); // the clock is corrected 10 s back (a sleep and wake, an NTP step)
+    const from = performance.now();
+    const bound = new Promise((resolve) => setTimeout(resolve, 2_000, "still waiting"));
+    assert.equal(await Promise.race([chain.net(() => chain.server.getHealth()).then(() => "answered"), bound]), "answered");
+    const waited = performance.now() - from;
+    assert.ok(waited < 1_500, `the 21st call was held ${waited} ms after the step`);
+    assert.ok(waited >= 900, `the window itself still held it ${waited} ms`);
+    // A rest too: b failed 70 s ago by the monotonic clock; the wall clock, now an hour back, keeps no rest.
+    chain.endpoints[1].failedAt = performance.now() - 70_000;
+    mock.timers.setTime(Date.now() - 3_600_000);
+    assert.ok(chain.failover(new RpcTimeout(7000), 0, { since: chain.moveCount }));
+    assert.equal(chain.rpcInfo().host, "b.example");
+  } finally {
+    mock.timers.reset();
+  }
 });
 
 test("every move between endpoints is told in a sentence", () => {

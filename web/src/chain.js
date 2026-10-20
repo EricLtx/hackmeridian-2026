@@ -115,6 +115,14 @@ function isRateLimited(error) {
   return error?.response?.status === 429 || /status code 429\b/.test(String(error?.message ?? ""));
 }
 
+/**
+ * The clock for durations: the rests, the rate window, the pair of
+ * timeouts, the poll budget, the silence of a cross-check. Monotonic, so a
+ * step of the wall clock (a sleep and wake, an NTP correction) holds no
+ * call and ends no rest; the wall clock serves only against ledger times.
+ */
+const monotonic = () => (typeof performance === "object" && typeof performance.now === "function" ? performance.now() : Date.now());
+
 /** The wait before a call an endpoint refused with HTTP 429 goes there again, when it gives no usable Retry-After. */
 const RATE_LIMIT_WAIT_MS = 1000;
 /** The longest Retry-After honoured: an endpoint cannot hold a call longer than a timeout would. */
@@ -199,7 +207,7 @@ export const TIMEOUT_PAIR_MS = 30_000;
  * of its calls took 6 to 15 s: a fixed rest returned to it, and left it
  * again, about once a minute.
  */
-export function restAfterFailure({ restMs, failedAt, returnedAt } = {}, now = Date.now()) {
+export function restAfterFailure({ restMs, failedAt, returnedAt } = {}, now = monotonic()) {
   const rest = Number.isFinite(restMs) && restMs > 0 ? restMs : RETURN_QUIET_MS;
   if (Number.isFinite(failedAt) && Number.isFinite(returnedAt) && failedAt > returnedAt) return rest;
   const soon = Number.isFinite(failedAt) && Number.isFinite(returnedAt) && returnedAt >= failedAt && now - returnedAt < rest;
@@ -207,7 +215,7 @@ export function restAfterFailure({ restMs, failedAt, returnedAt } = {}, now = Da
 }
 
 /** Whether `endpoint` is inside its rest after a failed call, at time `now`. */
-const resting = (endpoint, now = Date.now()) => now - (endpoint.failedAt ?? -Infinity) < (endpoint.restMs ?? RETURN_QUIET_MS);
+const resting = (endpoint, now = monotonic()) => now - (endpoint.failedAt ?? -Infinity) < (endpoint.restMs ?? RETURN_QUIET_MS);
 
 /** One of the MAX_IN_FLIGHT slots of `endpoint`: resolves a function that gives it back, once one is free. */
 function slotOn(endpoint) {
@@ -235,13 +243,13 @@ function slotOn(endpoint) {
  * Resolves when one more call may be sent to `endpoint` under
  * RATE_PER_SECOND: the sends of the last second are kept, and a call past
  * the budget waits for the oldest of them to leave the window. Turns are
- * given in the order asked.
+ * given in the order asked; `clock` gives the time in milliseconds.
  */
-function turnOn(endpoint) {
+function turnOn(endpoint, clock = monotonic) {
   const turn = (endpoint.turns ?? Promise.resolve()).then(async () => {
     endpoint.sentAt ??= [];
     for (;;) {
-      const now = Date.now();
+      const now = clock();
       while (endpoint.sentAt.length && now - endpoint.sentAt[0] >= RATE_WINDOW_MS) endpoint.sentAt.shift();
       if (endpoint.sentAt.length < RATE_PER_SECOND) {
         endpoint.sentAt.push(now);
@@ -596,6 +604,8 @@ export class Chain {
     this.active = 0;
     /** Moves between endpoints so far: a call started before the last one is no reason to move again (`failover`). */
     this.moveCount = 0;
+    /** The clock for durations (`monotonic`); tests on virtual time replace it. */
+    this.clock = monotonic;
     /** Pause between two looks at a submitted transaction, in milliseconds. */
     this.pollMs = 1000;
     /** How long the other endpoints may stay silent before a write ends unverified (SILENT_MS). */
@@ -725,7 +735,7 @@ export class Chain {
     const limited = isRateLimited(error);
     if (limited && !exhausted) return false;
     if (from !== this.active || (since !== undefined && since !== this.moveCount)) return true;
-    const now = Date.now();
+    const now = this.clock();
     let next = this.nextEndpoint(this.active, now);
     if (limited && next === null) return false;
     const previous = this.endpoints[this.active];
@@ -762,7 +772,7 @@ export class Chain {
   }
 
   /** The first endpoint after `from` that is not resting at `now`; null when every other one rests. */
-  nextEndpoint(from, now = Date.now()) {
+  nextEndpoint(from, now = this.clock()) {
     const count = this.endpoints.length;
     for (let step = 1; step < count; step += 1) {
       const index = (from + step) % count;
@@ -777,7 +787,7 @@ export class Chain {
    * polls starts again: what it answered before calls left it is no reason
    * to leave it again on one 429.
    */
-  moveTo(index, now = Date.now()) {
+  moveTo(index, now = this.clock()) {
     this.active = index;
     this.moveCount += 1;
     this.endpoints[index].returnedAt = now;
@@ -791,7 +801,7 @@ export class Chain {
    * TIMEOUT_PAIR_MS: it is recorded, and the read goes there once more
    * instead of moving. A second one within that time is left to `failover`.
    */
-  firstTimeout(index, since, now = Date.now()) {
+  firstTimeout(index, since, now = this.clock()) {
     if (index !== this.active || since !== this.moveCount) return false;
     const endpoint = this.endpoints[index];
     if (now - (endpoint.timedOutAt ?? -Infinity) <= TIMEOUT_PAIR_MS) return false;
@@ -822,7 +832,7 @@ export class Chain {
 
   /** One endpoint's height read for `heights`: `{ height, closeTime }`, or null when it did not answer within `budgetMs`. */
   async readHeight(endpoint, index, budgetMs) {
-    const until = Date.now() + budgetMs;
+    const until = this.clock() + budgetMs;
     try {
       const health = await withTimeout(endpoint.server.getHealth(), budgetMs);
       endpoint.limitedPolls = 0;
@@ -835,7 +845,7 @@ export class Chain {
       }
       if (error instanceof RpcTimeout || isTransient(error)) return null;
     }
-    const left = until - Date.now();
+    const left = until - this.clock();
     if (left <= 0) return null;
     try {
       const latest = await withTimeout(endpoint.server.getLatestLedger(), left);
@@ -875,9 +885,9 @@ export class Chain {
     if (this.endpoints.length < 2) return [];
     const reads = await this.heights();
     // An endpoint that failed a call is no target before its rest is over, however level it is.
-    const now = Date.now();
+    const now = this.clock();
     const candidates = reads.map((read, i) => (resting(this.endpoints[i], now) ? null : read));
-    const { index, reason, behind } = pickEndpoint(candidates, this.active, now / 1000);
+    const { index, reason, behind } = pickEndpoint(candidates, this.active, Date.now() / 1000);
     if (reason && index !== this.active) {
       const previous = this.endpoints[this.active];
       this.moveTo(index, now);
@@ -912,7 +922,7 @@ export class Chain {
       const index = this.active;
       const endpoint = this.endpoints[index];
       const release = await slotOn(endpoint);
-      if (index === this.active) await turnOn(endpoint);
+      if (index === this.active) await turnOn(endpoint, this.clock);
       if (index !== this.active) {
         // Calls moved while this one waited: it follows them, and that counts as its move, so that it
         // backs off rather than bouncing back when the new endpoint fails it too.
@@ -920,12 +930,12 @@ export class Chain {
         moves += 1;
         continue;
       }
-      const started = Date.now();
+      const started = this.clock();
       const since = this.moveCount;
       let error;
       try {
         const result = await withTimeout(call(), timeoutMs);
-        endpoint.lastMs = Date.now() - started;
+        endpoint.lastMs = this.clock() - started;
         endpoint.failures = 0;
         return result;
       } catch (caught) {
@@ -1364,7 +1374,7 @@ export class Chain {
     const hosts = others.map((e) => e.host).join(", ");
     onStatus({ stage: "confirming", text: t("Submitted, confirming: waiting for a second RPC endpoint ({host}) to see it.", { host: hosts }), hash });
     const deadline = (maxTime || Math.floor(Date.now() / 1000) + TX_VALIDITY_SECS) + CONFIRM_GRACE_SECS;
-    const asked = Date.now();
+    const asked = this.clock();
     let heard = false;
     for (;;) {
       const answers = await Promise.all(others.map(async (endpoint) => ({ endpoint, answer: await this.transactionOn(endpoint, hash) })));
@@ -1386,7 +1396,7 @@ export class Chain {
         }
       }
       const late = Date.now() / 1000 > deadline;
-      if (!heard && (late || Date.now() - asked >= this.silentMs)) return { unverified: hosts };
+      if (!heard && (late || this.clock() - asked >= this.silentMs)) return { unverified: hosts };
       if (late) throw new TransactionError("TxUnconfirmed", t("{host} did not confirm it in time.", { host: hosts }), hash);
       await sleep(this.pollMs);
     }
@@ -1402,12 +1412,12 @@ export class Chain {
    * silent: applied according to `host` alone, never confirmed.
    */
   async submit(tx, onStatus = () => {}) {
-    const started = Date.now();
+    const started = this.clock();
     const hash = toHex(tx.hash());
     const maxTime = Number(tx.timeBounds?.maxTime ?? 0);
     const done = async (answer) => {
       const confirmed = await this.confirmElsewhere(hash, answer.via, maxTime, onStatus);
-      const seconds = (Date.now() - started) / 1000;
+      const seconds = (this.clock() - started) / 1000;
       if (confirmed?.unverified) {
         const host = this.endpoints[answer.via]?.host ?? "";
         onStatus({ stage: "unverified", text: unverifiedText(host), hash });
