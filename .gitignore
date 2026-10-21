@@ -30,3 +30,6 @@ target-canary
 # web page reads (web/public/history.json) is committed: GitHub Pages serves it.
 /indexer/node_modules/
 /indexer/.state/
+
+# Plan execution scratch (superpowers ledgers)
+.superpowers/
