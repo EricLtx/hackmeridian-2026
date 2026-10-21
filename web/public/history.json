@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-10-19T23:32:57.773Z",
+  "generatedAt": "2026-10-21T22:51:09.848Z",
   "network": "testnet",
   "explorer": "https://stellar.expert/explorer/testnet",
   "contract": "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL",
   "journal": {
-    "lines": 159,
-    "lastHash": "b7abbe88a5d66b878564c79f59d74d01c3c2441bac811815a076362c2fcfe031",
+    "lines": 199,
+    "lastHash": "6aad73fb380cfc85db93ccef1ec919cccaf31ee5818f0b72fc15026dd8ac6975",
     "firstLedger": 5215393,
-    "lastLedger": 5266178,
+    "lastLedger": 5319854,
     "firstClosedAt": "2026-10-15T21:42:32Z",
-    "lastClosedAt": "2026-10-18T20:14:37Z",
+    "lastClosedAt": "2026-10-21T22:47:37Z",
     "gaps": []
   },
   "registry": [
@@ -201,9 +201,641 @@
       "release_shares": "",
       "last_tx": "47e7666bcf9c083876f70862c2d1db5096a32d23411b71c114ad3cd988929838",
       "source": "repo_opened@156 repo_repurchased@157 release_deferred@158 shares_released@159 stablecoin:offer_created currency:stablecoin_set"
+    },
+    {
+      "repo_id": "10",
+      "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
+      "borrower": "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN",
+      "fund": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+      "shares": "100000000000",
+      "principal": "83410000000",
+      "stablecoin": "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX",
+      "currency": "EUR",
+      "rate_bps": "250",
+      "opened_at": "2026-10-21T22:22:52Z",
+      "maturity": "2026-10-24T22:22:52Z",
+      "status": "repurchased",
+      "closure": "repurchased",
+      "closed_at": "2026-10-21T22:22:57Z",
+      "interest": "238043",
+      "release_to": "",
+      "release_shares": "",
+      "last_tx": "53ae784b0d55c744abbba90a59df2e8f6113bf79d4ee16f053c0bd9b64294090",
+      "source": "repo_opened@165 repo_repurchased@167 stablecoin:offer_created currency:stablecoin_set"
+    },
+    {
+      "repo_id": "11",
+      "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
+      "borrower": "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN",
+      "fund": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+      "shares": "1000000000",
+      "principal": "500000000",
+      "stablecoin": "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX",
+      "currency": "EUR",
+      "rate_bps": "350",
+      "opened_at": "2026-10-21T22:35:32Z",
+      "maturity": "2026-10-21T23:35:32Z",
+      "status": "repurchased",
+      "closure": "repurchased",
+      "closed_at": "2026-10-21T22:35:42Z",
+      "interest": "1998",
+      "release_to": "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN",
+      "release_shares": "",
+      "last_tx": "12b126819932506e1b38e30ef792974663757ae1334952b59938075781c0d849",
+      "source": "repo_opened@181 repo_repurchased@184 release_deferred@185 shares_released@186 stablecoin:offer_created currency:stablecoin_set"
     }
   ],
   "events": [
+    {
+      "seq": 199,
+      "ledger": 5319854,
+      "closedAt": "2026-10-21T22:47:37Z",
+      "txHash": "b92e52a4e1cbf77985ec9a112288dacbd03ca2bdc89551b9ab8f6ecb29ee91e8",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R",
+        "paused": false
+      },
+      "hash": "6aad73fb380cfc85db93ccef1ec919cccaf31ee5818f0b72fc15026dd8ac6975"
+    },
+    {
+      "seq": 198,
+      "ledger": 5319853,
+      "closedAt": "2026-10-21T22:47:32Z",
+      "txHash": "e294291374d06774d224ce7b97bf8aa2262ea4c950f6cf6f2cee81f48baaf24a",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GD2KRGVHIWHNDS7I7YITGIN43H7LAPUGBVUGFMKXXT77ZGEFZRPLJQC2",
+        "paused": true
+      },
+      "hash": "8814625efc8a8d4fb819306fdbf376efa16978521142a238f5a3db1abb54a700"
+    },
+    {
+      "seq": 197,
+      "ledger": 5319849,
+      "closedAt": "2026-10-21T22:47:12Z",
+      "txHash": "37d88ce6df63450c568e33062551a460a978a9987c35c12e6f8a87ac7fd65526",
+      "event": "stablecoin_change_cancelled",
+      "topics": [
+        "CBLO2MKFZR6MSJCN3I42HCDFR6U6G4CTYHHDZSOCYA7BKDYBEIVW2C72"
+      ],
+      "data": {
+        "by": "GD2KRGVHIWHNDS7I7YITGIN43H7LAPUGBVUGFMKXXT77ZGEFZRPLJQC2"
+      },
+      "hash": "15f569e1a5d49a3e571338016b17549da9c36437ca4c98e93ca3a1e81da0613c"
+    },
+    {
+      "seq": 196,
+      "ledger": 5319844,
+      "closedAt": "2026-10-21T22:46:47Z",
+      "txHash": "6162b8a56d09b25518c606a290b50467ee921ff3a289fb430762a1e03c5b1107",
+      "event": "stablecoin_change_proposed",
+      "topics": [
+        "CBLO2MKFZR6MSJCN3I42HCDFR6U6G4CTYHHDZSOCYA7BKDYBEIVW2C72"
+      ],
+      "data": {
+        "currency": "XXX",
+        "eta": "1792623107"
+      },
+      "hash": "cc74050e36de0a9274eed259d44082b213519b1601a23cb3dba8b159e816a869"
+    },
+    {
+      "seq": 195,
+      "ledger": 5319809,
+      "closedAt": "2026-10-21T22:43:52Z",
+      "txHash": "620fc6357939eb54e12bbe9eb30837643681cbc2ade0bce1da8bc718ddf66e3a",
+      "event": "forced_guardian_change_cancelled",
+      "topics": [],
+      "data": {
+        "by": "GB2STFJTDYOFNBFC5EPS2DW7BCM4WYFIWBZY7QQDQAWMBWPWLXSREZRC",
+        "guardian": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6"
+      },
+      "hash": "a6642fec428bdff6d8e64d2fc0d723c286cc8174e0eda588b5bf78640f7f7c52"
+    },
+    {
+      "seq": 194,
+      "ledger": 5319803,
+      "closedAt": "2026-10-21T22:43:22Z",
+      "txHash": "df7ebbd70963722710c28e7c23b194a48e741e0f4cabd5757103f960ae79dcad",
+      "event": "guardian_change_forced",
+      "topics": [],
+      "data": {
+        "eta": "1795214602",
+        "guardian": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6"
+      },
+      "hash": "e72dd5d79f2d3c679a9c8609cf7947c64e0eb09ce322ac26274583159e6d7fec"
+    },
+    {
+      "seq": 193,
+      "ledger": 5319802,
+      "closedAt": "2026-10-21T22:43:17Z",
+      "txHash": "59e5cbda23fefaceeac3b64db2ff486a10482cabfabfb7376fdb11e727b40c9c",
+      "event": "reanchored",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "fx": "112320773140987",
+        "nav": "108571680324074",
+        "nav_time": "1792621477"
+      },
+      "hash": "79b5ed8ee6100c1149f5d0e31e87798a87bbfcfff5e59581cc6c60021a949b80"
+    },
+    {
+      "seq": 192,
+      "ledger": 5319739,
+      "closedAt": "2026-10-21T22:38:02Z",
+      "txHash": "0af1898765d3718d14e6bee4687bb4790a36c8f5ff0ec409a5878d7655ecc150",
+      "event": "reanchor_proposed",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "eta": "1792622582",
+        "fx": "112320773140987",
+        "nav": "108571680324074",
+        "nav_time": "1792621477"
+      },
+      "hash": "1dbeec93f94f892f5f6f41e037192724083965a9cbf8e133a7151c22b15fd926"
+    },
+    {
+      "seq": 191,
+      "ledger": 5319738,
+      "closedAt": "2026-10-21T22:37:57Z",
+      "txHash": "03b839bac841ea54f888411ad4c7dead1a36eaf0fa5bf5094f6706cdae267abe",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R",
+        "paused": false
+      },
+      "hash": "bff89632c5058c4663ec81aff3a030a29ee3ab2eb19bd3047e2798b2b63e6cfb"
+    },
+    {
+      "seq": 190,
+      "ledger": 5319734,
+      "closedAt": "2026-10-21T22:37:37Z",
+      "txHash": "863c638d4fcdbba86cf8f2dbea9fbc28a9ba9fd6bfa56c75fcf3abac892973a5",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GD2KRGVHIWHNDS7I7YITGIN43H7LAPUGBVUGFMKXXT77ZGEFZRPLJQC2",
+        "paused": true
+      },
+      "hash": "41623f71db7fb9f743848d7e7fc39daaea1ee4a6d8d5f4f6404efbbadc4a17fe"
+    },
+    {
+      "seq": 189,
+      "ledger": 5319727,
+      "closedAt": "2026-10-21T22:37:02Z",
+      "txHash": "64fc9ac718401c0a65d485a3f9168f94ece493d6d8aed3d9c1daabdd89a5efc8",
+      "event": "admin_proposal_cancelled",
+      "topics": [],
+      "data": {
+        "by": "GCDFWLMZ3ONW7PB6CVFJLREQWYK5UXFBFBFGM2ROKJIBSVFWKKBIXEBB",
+        "proposed": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6"
+      },
+      "hash": "8271846bffd5fb017fbaab8c582fd20411b8c4b6115740f734be1362eded2353"
+    },
+    {
+      "seq": 188,
+      "ledger": 5319722,
+      "closedAt": "2026-10-21T22:36:37Z",
+      "txHash": "4a9e7d143083c8f20c4a8d6a1ad7708ea5d100671e8e798320a9caf52a8e9bc5",
+      "event": "admin_change_proposed",
+      "topics": [],
+      "data": {
+        "admin": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6",
+        "eta": "1792622497"
+      },
+      "hash": "c5a960bf952f2590d0a5617d0f2474c8195939127322688b08a107e18a87d517"
+    },
+    {
+      "seq": 187,
+      "ledger": 5319722,
+      "closedAt": "2026-10-21T22:36:37Z",
+      "txHash": "4a9e7d143083c8f20c4a8d6a1ad7708ea5d100671e8e798320a9caf52a8e9bc5",
+      "event": "admin_proposed",
+      "topics": [
+        "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R"
+      ],
+      "data": {
+        "proposed": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6"
+      },
+      "hash": "652c35dbd4474f76a2558a6df0bed092ce03223456a121a554703ce27e908842"
+    },
+    {
+      "seq": 186,
+      "ledger": 5319717,
+      "closedAt": "2026-10-21T22:36:12Z",
+      "txHash": "12b126819932506e1b38e30ef792974663757ae1334952b59938075781c0d849",
+      "event": "shares_released",
+      "topics": [
+        "11"
+      ],
+      "data": {
+        "shares": "1000000000",
+        "to": "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN"
+      },
+      "hash": "b61c04acb219d74e3da0bf89975423cf058271a97e14e633ab3eb122ee7c92ff"
+    },
+    {
+      "seq": 185,
+      "ledger": 5319711,
+      "closedAt": "2026-10-21T22:35:42Z",
+      "txHash": "aa05cf75de40da31587cdb70b17b9ec9ca869e4e6d87bf231fb8a36a96f0683a",
+      "event": "release_deferred",
+      "topics": [
+        "11"
+      ],
+      "data": {
+        "shares": "1000000000",
+        "to": "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN"
+      },
+      "hash": "3a519a4b10ca80a9493ba3b075abffde55bb9f74ea4a315f53c7bb6c6680a4cc"
+    },
+    {
+      "seq": 184,
+      "ledger": 5319711,
+      "closedAt": "2026-10-21T22:35:42Z",
+      "txHash": "aa05cf75de40da31587cdb70b17b9ec9ca869e4e6d87bf231fb8a36a96f0683a",
+      "event": "repo_repurchased",
+      "topics": [
+        "11"
+      ],
+      "data": {
+        "interest": "1998",
+        "principal": "500000000"
+      },
+      "hash": "00912a1f06f8ddf3ef78bdb6e559a511d545850f886b6090c37ff993008f5027"
+    },
+    {
+      "seq": 183,
+      "ledger": 5319709,
+      "closedAt": "2026-10-21T22:35:32Z",
+      "txHash": "e0dcfeca8e088ce0547a1eb609c61b95672d9074a6a56ea167f994b5104afb52",
+      "event": "reference_updated",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "nav": "108571680324074",
+        "timestamp": "1792621477"
+      },
+      "hash": "0b9720154dcf392de1ba619a95d40e7b1a1c9bb0c374caf046b01e60d5cd4dd8"
+    },
+    {
+      "seq": 182,
+      "ledger": 5319709,
+      "closedAt": "2026-10-21T22:35:32Z",
+      "txHash": "e0dcfeca8e088ce0547a1eb609c61b95672d9074a6a56ea167f994b5104afb52",
+      "event": "repo_valued",
+      "topics": [
+        "11",
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "fallback": false,
+        "fx": "112321066083736",
+        "fx_applied": "112450099157802",
+        "fx_time": "1792621800",
+        "haircut_bps": 400,
+        "nav": "108571680324074",
+        "nav_time": "1792621477",
+        "price": "96550986737427"
+      },
+      "hash": "f8364f7e62b3002d2d60b07fa790de0af15cd3bb45d445c003cd3d9745810eb4"
+    },
+    {
+      "seq": 181,
+      "ledger": 5319709,
+      "closedAt": "2026-10-21T22:35:32Z",
+      "txHash": "e0dcfeca8e088ce0547a1eb609c61b95672d9074a6a56ea167f994b5104afb52",
+      "event": "repo_opened",
+      "topics": [
+        "11",
+        "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN"
+      ],
+      "data": {
+        "fund": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+        "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
+        "maturity": "1792625732",
+        "offer_id": "2",
+        "principal": "500000000",
+        "rate_bps": 350,
+        "shares": "1000000000"
+      },
+      "hash": "8165999353684620cd2786399188b985cba8bfea8abe6c3ea923fe7251bda0a8"
+    },
+    {
+      "seq": 180,
+      "ledger": 5319706,
+      "closedAt": "2026-10-21T22:35:17Z",
+      "txHash": "5f2e9bcf6a365388c682cd7f6e5b95e1a8a5c79571b16170acaea6bbdf6f4dfe",
+      "event": "upgrade_cancelled",
+      "topics": [],
+      "data": {
+        "by": "GD2KRGVHIWHNDS7I7YITGIN43H7LAPUGBVUGFMKXXT77ZGEFZRPLJQC2",
+        "wasm_hash": "fd5cdbd3d02a9c6cc78d672cb81830b45532c43480cd6994d32a28e2cc0429c3"
+      },
+      "hash": "1cbf0b8578f3da3a09d7b5a53b758715eda610ed73b6019d2873dde52aeb9794"
+    },
+    {
+      "seq": 179,
+      "ledger": 5319700,
+      "closedAt": "2026-10-21T22:34:47Z",
+      "txHash": "befa48eebd4b4104beaae9f9aaefd3ea6698dd1dc50fefd4642d4c1a62355f89",
+      "event": "upgrade_proposed",
+      "topics": [],
+      "data": {
+        "eta": "1792622387",
+        "wasm_hash": "fd5cdbd3d02a9c6cc78d672cb81830b45532c43480cd6994d32a28e2cc0429c3"
+      },
+      "hash": "bc13aa1eeee27dcf17819f55d6ce8be378f741664f81fdc299c16ea4d00c3789"
+    },
+    {
+      "seq": 178,
+      "ledger": 5319683,
+      "closedAt": "2026-10-21T22:33:22Z",
+      "txHash": "a0a9506fbeb90ed06d935af9beb09567098e6428bebc351ea7b9b536e59f645c",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R",
+        "paused": false
+      },
+      "hash": "71317f4bfe291e65bfa2035617bac7312edcc70bccf442879881c578dde0370a"
+    },
+    {
+      "seq": 177,
+      "ledger": 5319678,
+      "closedAt": "2026-10-21T22:32:57Z",
+      "txHash": "84b6ef724afec3c9e8752898b38594bea3cd1c6a23346c0b17a338eaeb16b183",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GCDFWLMZ3ONW7PB6CVFJLREQWYK5UXFBFBFGM2ROKJIBSVFWKKBIXEBB",
+        "paused": true
+      },
+      "hash": "2f955759edbc63067ef6d79c169b5079e88ab82b2df945755673c9dc98dac4ae"
+    },
+    {
+      "seq": 176,
+      "ledger": 5319675,
+      "closedAt": "2026-10-21T22:32:42Z",
+      "txHash": "802299b33421088e3660c4fa5de7e10b9a0ce8d9a09fecba2b2d3ed22cc17b7a",
+      "event": "fund_limits_set",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "haircut_bps": 200,
+        "max_outstanding": "5000000000000",
+        "max_principal_per_repo": "1000000000000"
+      },
+      "hash": "17a8cc9230e75e7bedecd69b69e800ecb39dd9b4a16847657d0cb25323779c6f"
+    },
+    {
+      "seq": 175,
+      "ledger": 5319609,
+      "closedAt": "2026-10-21T22:27:12Z",
+      "txHash": "67084823294496e8ef525d38b74a9a4c5a9d1c0c5a7e365e41171537ddfd54fe",
+      "event": "fund_limits_change_proposed",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "eta": "1792621932",
+        "haircut_bps": 200,
+        "max_outstanding": "5000000000000",
+        "max_principal_per_repo": "1000000000000"
+      },
+      "hash": "a01a81bf044a7bd0233d8368982b5248a06a0d831ad943083d016692fc4460f0"
+    },
+    {
+      "seq": 174,
+      "ledger": 5319607,
+      "closedAt": "2026-10-21T22:27:02Z",
+      "txHash": "9da9ddabdca13ee3a2a9bf863b67eee8d4ac22ea833d61858780b13ee7caa8f2",
+      "event": "fund_limits_set",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "haircut_bps": 200,
+        "max_outstanding": "10000000001",
+        "max_principal_per_repo": "10000000001"
+      },
+      "hash": "0e0e919809d6c6cc2ef7ceac19e3adadd59998e93be85b0e35be29597b4bf50b"
+    },
+    {
+      "seq": 173,
+      "ledger": 5319606,
+      "closedAt": "2026-10-21T22:26:57Z",
+      "txHash": "8ea873b848d68543e9f2a5fe653b1a55f4cf081ce90862a0ab42d8ee94fd433e",
+      "event": "guardian_change_cancelled",
+      "topics": [],
+      "data": {
+        "by": "GCDFWLMZ3ONW7PB6CVFJLREQWYK5UXFBFBFGM2ROKJIBSVFWKKBIXEBB",
+        "guardian": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6"
+      },
+      "hash": "eeeb34af7ebebfffacc453f59eeefb8e9997945c4de3bdf68f4bb548cda48db6"
+    },
+    {
+      "seq": 172,
+      "ledger": 5319601,
+      "closedAt": "2026-10-21T22:26:32Z",
+      "txHash": "123f7cc2bee42d87cd6b39b82597d357397e22ed68a29459e5d5147c0411ca8d",
+      "event": "guardian_change_proposed",
+      "topics": [],
+      "data": {
+        "eta": "1792621892",
+        "guardian": "GD5ZBLZDFSFEAJAKUTZIFH7UHGXDOQMQLSRVHXII7WBK732MB6F6D5L6"
+      },
+      "hash": "ca959a29c4f098d5e48882cf282abddfa11c2f823dff2f9766f45bddcf2f57b4"
+    },
+    {
+      "seq": 171,
+      "ledger": 5319597,
+      "closedAt": "2026-10-21T22:26:12Z",
+      "txHash": "585ce4b5cebf059d1413c1bed93242b1c2a6a4c1f88460129a89a3ed00b00cf0",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R",
+        "paused": false
+      },
+      "hash": "dd3b64d57ed8f37599632bc5595fb527f66b7c47c9ce1154672057345d3e2bb0"
+    },
+    {
+      "seq": 170,
+      "ledger": 5319592,
+      "closedAt": "2026-10-21T22:25:47Z",
+      "txHash": "007e1e62be5ea566bf6ceba51f8bfe93ed3702a2c19eeca7ec96f66aa7acb3fa",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GD2KRGVHIWHNDS7I7YITGIN43H7LAPUGBVUGFMKXXT77ZGEFZRPLJQC2",
+        "paused": true
+      },
+      "hash": "75813dfd89b20da6fdad42cf06105fce0204e8e2533a22633a9ed4ebc12c94e1"
+    },
+    {
+      "seq": 169,
+      "ledger": 5319586,
+      "closedAt": "2026-10-21T22:25:17Z",
+      "txHash": "7ba443e8e58936c91670577f6eedb8570701346984352fa6addb3ecac9839fde",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R",
+        "paused": false
+      },
+      "hash": "62d1a4ed2fd793685fd17dcff5c9288fae0b2d8921f972bafabc7a52e2c91ae1"
+    },
+    {
+      "seq": 168,
+      "ledger": 5319584,
+      "closedAt": "2026-10-21T22:25:07Z",
+      "txHash": "5c18d57230953adc46a68f7c40b5ea49c84236ada3a198c0e268bf35f246618e",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GD2KRGVHIWHNDS7I7YITGIN43H7LAPUGBVUGFMKXXT77ZGEFZRPLJQC2",
+        "paused": true
+      },
+      "hash": "a51785b91d57d2a67f55da0e9ea6df050f4e8c7a615bb2bcdb3b651d36321901"
+    },
+    {
+      "seq": 167,
+      "ledger": 5319558,
+      "closedAt": "2026-10-21T22:22:57Z",
+      "txHash": "53ae784b0d55c744abbba90a59df2e8f6113bf79d4ee16f053c0bd9b64294090",
+      "event": "repo_repurchased",
+      "topics": [
+        "10"
+      ],
+      "data": {
+        "interest": "238043",
+        "principal": "83410000000"
+      },
+      "hash": "226927cd8018e1a812d69ae80f20e30d3aeeaa5fccb0a60900d7017e29aa191c"
+    },
+    {
+      "seq": 166,
+      "ledger": 5319557,
+      "closedAt": "2026-10-21T22:22:52Z",
+      "txHash": "ea5d0b768964a50904b3596b439d74a0b8e1ce1ac44a4342ec14f30fc0336321",
+      "event": "repo_valued",
+      "topics": [
+        "10",
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "fallback": false,
+        "fx": "112319794688077",
+        "fx_applied": "112450099157802",
+        "fx_time": "1792621200",
+        "haircut_bps": 400,
+        "nav": "108571530317732",
+        "nav_time": "1792620386",
+        "price": "96550853339286"
+      },
+      "hash": "ec73e9ea5380c185e94a2467b518173f091e9505437043eb81e8f533c18d61be"
+    },
+    {
+      "seq": 165,
+      "ledger": 5319557,
+      "closedAt": "2026-10-21T22:22:52Z",
+      "txHash": "ea5d0b768964a50904b3596b439d74a0b8e1ce1ac44a4342ec14f30fc0336321",
+      "event": "repo_opened",
+      "topics": [
+        "10",
+        "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN"
+      ],
+      "data": {
+        "fund": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+        "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
+        "maturity": "1792880572",
+        "offer_id": "1",
+        "principal": "83410000000",
+        "rate_bps": 250,
+        "shares": "100000000000"
+      },
+      "hash": "fba29f010467bca450e1c6dab38724e0355eac3f3ad614d342e4104bc12b007c"
+    },
+    {
+      "seq": 164,
+      "ledger": 5319510,
+      "closedAt": "2026-10-21T22:18:57Z",
+      "txHash": "1804dde00dd5200895bb45581c45ef6933e0dc3258750fd6586d3d57752c054c",
+      "event": "upgraded",
+      "topics": [],
+      "data": {
+        "wasm_hash": "6b7c6c80378297aab8e4e9535555190c07980410ecdde5625673ff7a6b80d478"
+      },
+      "hash": "8252f0c515ad47a1b3a582beed31e3405f648b3d120ffd7dba8daebf10831e33"
+    },
+    {
+      "seq": 163,
+      "ledger": 5319447,
+      "closedAt": "2026-10-21T22:13:42Z",
+      "txHash": "6cdbd2551a0e6ccbbc6d329603c75703eb3ce3914eadc51cea011adafcf77f4f",
+      "event": "upgrade_proposed",
+      "topics": [],
+      "data": {
+        "eta": "1792621122",
+        "wasm_hash": "6b7c6c80378297aab8e4e9535555190c07980410ecdde5625673ff7a6b80d478"
+      },
+      "hash": "9775d74b8e6d308be88b5a85be1006d5e06ea210207fcfdd081e7a273dd38ff8"
+    },
+    {
+      "seq": 162,
+      "ledger": 5319383,
+      "closedAt": "2026-10-21T22:08:22Z",
+      "txHash": "8dfc752dea43d5540367bac3f33d47398eecd24476f614ed51cdc086c523bcf9",
+      "event": "reference_updated",
+      "topics": [
+        "CAMKNCKFBPO4HHYW3KS4WEQTTKKLJMSHHGHNQ7VNW5JXEYDTZNFFPYY2"
+      ],
+      "data": {
+        "nav": "100200000000000",
+        "timestamp": "1792620396"
+      },
+      "hash": "faf7dff3ab3efc9af0a76c976efd4e56619380a501828fe950417ae43617c909"
+    },
+    {
+      "seq": 161,
+      "ledger": 5319379,
+      "closedAt": "2026-10-21T22:08:02Z",
+      "txHash": "29cd0f6c31991bacf711b179a138f3a2cbeeeeb0b12b6cab0ca0d91acef182b8",
+      "event": "reference_updated",
+      "topics": [
+        "CCE42GVRYTFBVZY77KHMPNWVQDMTAUQHMPLUF6VR2GDBUIBFO5E2EY6J"
+      ],
+      "data": {
+        "nav": "100200000000000",
+        "timestamp": "1792620396"
+      },
+      "hash": "52a8da2ecf83ac5f04a7b2714a3fe70849ac5a0309fee4911a9267746d5f15b6"
+    },
+    {
+      "seq": 160,
+      "ledger": 5319362,
+      "closedAt": "2026-10-21T22:06:37Z",
+      "txHash": "14d626a739564c848243119cb91634cbf1df8be4584f84b1acfb012d9f00b560",
+      "event": "reference_updated",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "nav": "108571530317732",
+        "timestamp": "1792620386"
+      },
+      "hash": "2ff1e5e6fd2ba13eadc51d673e92561a523f440bda40e2a2d61afd21df7dc77d"
+    },
     {
       "seq": 159,
       "ledger": 5266178,
