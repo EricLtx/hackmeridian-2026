@@ -290,7 +290,7 @@ flowchart LR
   IDX --> MON
 ```
 
-Nineteen drills, one per detector with a real trigger, were rehearsed on the testnet instance on 18 October 2026, against rc4 ([incident-procedure.md](incident-procedure.md), section 5). The detectors rc5 adds (reference age, flat feeds, stablecoin authorization, revoked lenders, proposals read from state, unreadable funds, the journal checked by content) have offline tests in `demo/test/` and no drill yet. With two endpoints, the default, every action waits for the second endpoint's own reading of the facts it rests on; reads simulate from the null account, so the host holds no governor key.
+Nineteen drills, one per detector with a real trigger, were rehearsed on the testnet instance on 18 October 2026, against rc4, and replayed against rc5 on 22 October 2026 after its governed upgrade ([incident-procedure.md](incident-procedure.md), section 5). The detectors rc5 adds (reference age, flat feeds, stablecoin authorization, revoked lenders, proposals read from state, unreadable funds, the journal checked by content) have offline tests in `demo/test/` and no drill yet. With two endpoints, the default, every action waits for the second endpoint's own reading of the facts it rests on; reads simulate from the null account, so the host holds no governor key.
 
 The web interface sits on its own trust boundary (F7 in [threat-model-stride.md](threat-model-stride.md)). It reads the chain through public RPCs, SDF's first and Gateway.fm's when the first fails, times out twice within 30 s, keeps refusing with HTTP 429 or, since rc5, falls more than 10 ledgers and 60 s behind by its own close time, each call with its own time limit; the endpoint left rests 60 s (up to 10 min when it fails again soon after), the page sends at most 20 calls a second to one endpoint with at most 6 in flight, and it returns to SDF's once that one is level and rested. Every value it decodes is checked before it reaches the page; the content security policy of its pages limits connections to those endpoints and Friendbot. Since rc5 the fee of the assembled transaction the wallet will sign is checked (25 XLM at most, equal to the simulation's estimate), a write shows as confirmed only once the second endpoint sees it (a write only one endpoint saw is said so, in amber), the page refuses to run inside another site's frame, and the footer names the RPC providers, which see the visitor's IP address. The published deployment file lists only keyless public endpoints, and the page accepts only one for the test network.
 
@@ -307,7 +307,7 @@ flowchart LR
   CAN --> DENY[cargo deny]
   DENY --> AUD[RustSec audit]
   AUD --> HASH[reproducible WASM hash<br/>= executable on the ledger]
-  HASH --> TAG[tag audit-v4-rc4 on testnet;<br/>audit-v4-rc5 after review]
+  HASH --> TAG[tag audit-v4-rc5 on testnet<br/>since 22 October 2026]
   TAG --> EXT[external audit<br/>through the Audit Bank: to come]
 ```
 
