@@ -1,6 +1,6 @@
 # Security policy
 
-Open Window (crate `night-window`) is under development. No contract is deployed on mainnet, and testnet deployments hold no real value. The testnet instance runs version 4, audit candidate rc4 (tag `audit-v4-rc4`); the rc5 candidate, with the fixes of the security pass of 20 October 2026 and of its adversarial review of the same day (24 findings), becomes the tag `audit-v4-rc5` next. The security baseline, threat model and invariants are documented in [docs/security.md](docs/security.md).
+Open Window (crate `night-window`) is under development. No contract is deployed on mainnet, and testnet deployments hold no real value. The testnet instance runs version 4, audit candidate rc5 (tag `audit-v4-rc5`, since its governed upgrade of 22 October 2026), with the fixes of the security pass of 20 October 2026 and of its adversarial review of the same day (24 findings). The security baseline, threat model and invariants are documented in [docs/security.md](docs/security.md).
 
 ## Reporting a vulnerability
 
