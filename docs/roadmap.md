@@ -58,7 +58,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **What it retires:** the operating risk. The team can see, explain and stop what happens on chain.
 
-**Status on 20 October 2026:**
+**Status on 22 October 2026:**
 
 | Item | State | Evidence |
 |---|---|---|
@@ -87,7 +87,7 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 
 **What it retires:** the governance risk and the residual code risk.
 
-**Status on 20 October 2026:**
+**Status on 22 October 2026:**
 
 | Item | State | Evidence |
 |---|---|---|
@@ -97,14 +97,14 @@ The value for a holder is shown in the demo's last scene. It compares the measur
 | Sentinel | Done, rc4 | A hot key named by the guardian that can pause and cancel proposals, and nothing else; the monitoring host acts with it, so the guardian key leaves that host |
 | Several funds and stablecoins as data | Done, 18 October 2026 | Two funds (a dollar T-bill share with an FX leg, a euro money market share without one) and two euro stablecoins sharing one currency cap, admitted on the same testnet instance without a code change |
 | Issuer freeze | Done, version 3 | Debt settles, shares are recorded and delivered once the issuer allows it; rehearsed on testnet |
-| Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one; in the rc5 candidate it is never the primary itself and is installed only against a fresh primary it agrees with |
+| Backup NAV feed | Done, version 3 | Stands in for a stale primary, must agree with a fresh one; in rc5 it is never the primary itself and is installed only against a fresh primary it agrees with |
 | Key compromise drill | Done | An unannounced upgrade proposed with the governor keys was cancelled by the guardian 6 seconds later, with 295 of the 300 seconds of the testnet delay left |
 | Internal reviews | Done | Three passes on version 3 and two on version 4, every finding fixed with a test; the security pass of 20 October 2026, and the adversarial review of the merged rc5 candidate the same day, 24 findings each fixed with a test, then two check rounds on the fixes |
-| Security pass of 20 October 2026 | Done; contract fixes in the rc5 candidate | Over rc4, its RPC path, the web interface and the tooling: the web and the tooling hardened the same day; the contract's findings fixed in the rc5 candidate (decisions S30 to S34 and amendments in [security.md](security.md)), which passed its adversarial review the same day, is the tag `audit-v4-rc5` and runs on the testnet instance since the governed upgrade of 22 October 2026; a stablecoin freeze on the cash leg and the pooled share balance wait for an interface change (version 2); the restore of an archived code entry on mainnet is to check before any mainnet deployment ([threat-model-stride.md](threat-model-stride.md#32-security-pass-of-20-october-2026)) |
-| Real-time profile | Done, rc5 candidate | A 64 KiB WASM stack instead of 1 MiB: 122,880 instructions and 983,040 bytes of memory saved on every call, measured on the testnet instance after the upgrade of 22 October 2026 (`version()` simulated at 828,021 instructions against 949,251 under rc4); every user-facing call checked against a budget on the release WASM; a CI canary runs the whole suite on an 8 KiB stack |
+| Security pass of 20 October 2026 | Done; contract fixes in rc5 | Over rc4, its RPC path, the web interface and the tooling: the web and the tooling hardened the same day; the contract's findings fixed in the rc5 candidate (decisions S30 to S34 and amendments in [security.md](security.md)), which passed its adversarial review the same day, is the tag `audit-v4-rc5` and runs on the testnet instance since the governed upgrade of 22 October 2026; a stablecoin freeze on the cash leg and the pooled share balance wait for an interface change (version 2); the restore of an archived code entry on mainnet is to check before any mainnet deployment ([threat-model-stride.md](threat-model-stride.md#32-security-pass-of-20-october-2026)) |
+| Real-time profile | Done, rc5 | A 64 KiB WASM stack instead of 1 MiB: 122,880 instructions and 983,040 bytes of memory saved on every call, measured on the testnet instance after the upgrade of 22 October 2026 (`version()` simulated at 828,021 instructions against 949,251 under rc4); every user-facing call checked against a budget on the release WASM; a CI canary runs the whole suite on an 8 KiB stack |
 | Lenders independent of the fund | Done, version 4 | The issuer can never lend against its fund; lenders attested before approval; an instance can be fixed to a single regulated lender (mode D3); shown live in the demo |
 | Custody safeguards in the contract | Done, version 4 | Governor handover behind the delay with a guardian veto; guardian handover only to a registered backup; lost steward key recovered only to the issuer's own backup, after 30 days, with governor and guardian. Devices and signers are still to set up |
-| Audit package | Ready, for the rc5 candidate | [audit-scope.md](audit-scope.md) |
+| Audit package | Ready, for the tag `audit-v4-rc5` | [audit-scope.md](audit-scope.md) |
 | Third-party audit | Not started | Needs an auditor and a budget |
 | Bug bounty | Not started | Needs a budget sized to the value at stake |
 
@@ -137,10 +137,10 @@ Found on the way and fixed: operations used to extend the contract's code entry,
 
 ## Next developments, sorted MoSCoW
 
-Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. "Must" items gate the guarded launch; nothing below changes the contract before the external audit, except a fix a review requires. The rc5 candidate of 20 October 2026 is such a fix, from the security pass of that day, under a new tag.
+Sorted on 18 October 2026 and re-read on 22 October 2026, once the code was frozen at the tag `audit-v4-rc5` and installed on the testnet instance. "Must" items gate the guarded launch; nothing below changes the contract before the external audit, except a fix a review requires: rc5 was such a fix, from the security pass of 20 October 2026, under its own tag.
 
 **Must**
-- External audit of the frozen tag (`audit-v4-rc5`, the rc5 candidate having passed its adversarial review on 20 October 2026); every critical, high and medium finding fixed, each on its own commit.
+- External audit of the frozen tag `audit-v4-rc5` (adversarial review passed on 20 October 2026, on testnet since 22 October 2026); every critical, high and medium finding fixed, each on its own commit.
 - Key custody on hardware with separate signers: governor signers, guardian, sentinel and keeper keys off the development machine; the ceremony replayed on devices; the monitor's witness on a second host.
 - A NAV feed for the pilot fund published to a SEP-40 interface, with the freshness policy written into the fund's admission.
 - One public story: the reserve of step 3 is the lender's own, held off chain by agreement and sized from the maximum-loss scenarios (S16, amended 18 October 2026).
@@ -168,6 +168,22 @@ Sorted on 18 October 2026, after the code was frozen at the tag `audit-v4-rc4`. 
 - A deployment factory before several instances exist.
 - A soroban-sdk upgrade before the audit intake: it changes the hash of the frozen code.
 
+## The order of proof, from here to the guarded launch
+
+The MoSCoW list says what; this says in which order, and what stops the sequence. Each step starts when the previous one's exit criterion is met; each has a stop rule, so that a missing proof is seen before money or exposure follows it. Dates are deliberately absent: every step below depends on a third party, and the only dates the project controls are the testnet network resets and its own releases.
+
+| # | Step | Exit criterion | Stop rule |
+|---|---|---|---|
+| 1 | A second maintainer with keys; the custody ceremony replayed on hardware devices in the two-person configuration | signed ceremony record; the governor's second signature held by another person on another device; the backup device sealed off line | no second person: the project stays single-person, says so publicly, and no step beyond 4 starts |
+| 2 | Counsel's written opinion on the three structuring questions (the repo's qualification, the issuer's prohibition to lend, the platform-scope question) | opinion received; each fallback either triggered or declined in writing | a fallback changes the frozen interface: a new candidate, a new review and a new tag before any audit |
+| 3 | Testnet redeployment after the network reset of December 2026, with the second signer in the ceremony | three funds and two stablecoins re-admitted; indexer and anchor restarted; the nineteen drills green | — |
+| 4 | External audit of the tag, intake package first | report received; every critical, high and medium finding fixed on its own commit; re-tag only if a fix touches the interface | a finding that changes the mechanism: back to internal review before any launch |
+| 5 | Signable documents: master agreement with its technical annex, terms of use, attestation declaration; a legal entity and LEI | documents read by counsel; the issuer's register letter drafted | — |
+| 6 | A regulated lender with a written rate quote and an issuer as steward with a SEP-40 NAV feed, both under letters of intent; three treasurer interviews | two letters; the fund's freshness policy written into its admission; interviews on file | no letter after a set number of formal contacts: the lender profile and the operating mode are reviewed before any bounty or hardware spend |
+| 7 | Bug bounty sized to the launch caps, then the first real repo under the step 3 caps | pool funded and rules published; one repo opened and closed with the SFTR report filed the next business day; a joint incident drill with the lender and the issuer | caps stay at their floor until the three-month compliance review |
+
+What this order protects: the two scarcest resources are the maintainer's time and the trust of the first lender and issuer. Steps 1 and 2 cost little and unblock everything; steps 4 and 5 can run in parallel once 2 is done; step 6 is the one that cannot be forced, and its stop rule is the honest one.
+
 ## Running it over time
 
 These tasks run continuously from step 1 on. Each one has an owner in the incident procedure.
@@ -188,7 +204,7 @@ These tasks run continuously from step 1 on. Each one has an owner in the incide
 - [threat-model-stride.md](threat-model-stride.md): threat model and monitoring plan.
 - [incident-procedure.md](incident-procedure.md): who acts, how and within what time when an alert fires.
 - [interface-reference.md](interface-reference.md): every entry point, type and error, in long form.
-- [audit-scope.md](audit-scope.md): what an external auditor needs; the testnet runs the tag `audit-v4-rc5` since 22 October 2026, and the rc5 candidate, its size, hash and test counts are described there.
+- [audit-scope.md](audit-scope.md): what an external auditor needs; the testnet runs the tag `audit-v4-rc5` since 22 October 2026, and its size, hash and test counts are described there.
 - [operations.md](operations.md): running an instance as its operator, with the pre-upgrade inventory and the instance register.
 - [faq.md](faq.md): questions and answers for users, the Stellar ecosystem, engineers and security reviewers.
 - [demo/README.md](../demo/README.md): the live testnet demo and its recovery procedures.
