@@ -1,5 +1,5 @@
 // Types exported in the contract interface. The interface freezes at the tag
-// the external audit reviews, `audit-v4-rc4`; from then on it is append-only:
+// the external audit reviews, `audit-v4-rc5`; from then on it is append-only:
 // new types, new enum variants at the end and new functions, never a reshaped
 // or removed one. A stored type keeps its key (see `DataKey`); a change of
 // layout bumps `SCHEMA_VERSION` and gets a step in `migrate`.
