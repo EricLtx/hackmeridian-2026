@@ -38,7 +38,7 @@ npm run monitor -- --watch --fx-fallback=C...  # compare the fund's FX leg with 
 npm run monitor -- --rehearse    # fire every detector with a real trigger, act, restore
 npm run monitor -- --witness     # second instance elsewhere: alerts, never acts (refuses --act)
 npm run keys -- --rehearse       # key ceremony: --plan builds the unsigned multisig setOptions transaction, --readback checks an account, --rehearse replays it on testnet
-npm run upgrade                  # governed upgrade: upload the built WASM, propose (governor + trustee), announce, wait, upgrade, migrate; --propose / --apply split it
+npm run upgrade -- --expect=<sha256>   # governed upgrade: check the built WASM against the expected hash, upload, extend, announce, propose (governor + trustee), wait, upgrade, migrate, keep the code alive; --propose / --apply split it; --restore-code restores an archived code entry
 npm run setup -- --sentinel      # the guardian names the monitoring key as sentinel (rc4): it may only pause and cancel
 npm run inventory -- --json      # every admitted fund against the envelope and the admission rules, rc5's included; writes the off-chain instance register (docs/operations.md)
 npm test                         # offline tests of the monitor and the library
@@ -76,7 +76,7 @@ Each transaction is valid for 60 seconds. The script waits until it has landed o
 
 ## How a transaction is signed
 
-Every write goes through `send()` in `lib.mjs`, which signs only what the RPC's simulation proves harmless, since a hostile or broken RPC chooses what a simulation returns. Since rc5 it signs only authorization entries for the operation's own call, by the addresses the call expects: its source, the addresses in its arguments and the co-signers the script declares (`invoke(..., { cosigners })`). It refuses a footprint that writes an entry the call does not touch, contract code included: an invocation writes only this deployment's contracts, the contracts and accounts it names and the local roles; an upload writes only the code it uploads; an extension extends exactly the entries asked, with nothing to restore. And it refuses a resource fee above its cap, or a total fee that is not the inclusion bid plus that resource fee: 25 XLM by default, 100 XLM for a code upload (about 50 XLM for `night_window.wasm` on testnet), 300 XLM for the keeper's 30-day slice of the code's rent (about 215 XLM on testnet on 20 October 2026). Reads simulate from the null account, so the monitoring host needs no governor key.
+Every write goes through `send()` in `lib.mjs`, which signs only what the RPC's simulation proves harmless, since a hostile or broken RPC chooses what a simulation returns. Since rc5 it signs only authorization entries for the operation's own call, by the addresses the call expects: its source, the addresses in its arguments and the co-signers the script declares (`invoke(..., { cosigners })`). It refuses a footprint that writes an entry the call does not touch, contract code included: an invocation writes only this deployment's contracts, the contracts and accounts it names and the local roles; an upload writes only the code it uploads; an extension extends exactly the entries asked, with nothing to restore. And it refuses a resource fee above its cap, or a total fee that is not the inclusion bid plus that resource fee: 25 XLM by default, 100 XLM for a code upload (about 50 XLM for `night_window.wasm` on testnet), 400 XLM for the keeper's 30-day slice of the code's rent (`CODE_SLICE_MAX_FEE`; about 250 XLM for the rc4 code and 257 XLM for rc5's on testnet on 20 October 2026, a dearer slice being shortened) and 100 XLM for the restore of an archived code entry (`CODE_RESTORE_MAX_FEE`). Reads simulate from the null account, so the monitoring host needs no governor key.
 
 ## Demo parameters
 
@@ -131,7 +131,7 @@ Since rc5 a fund's price corridor grows over at most one NAV age bound after its
 - `stablecoins` (rc5): a registered stablecoin whose contract no longer authorizes the contract's balance is critical, without a pause: repurchases in that coin fail while seizures go ahead, so borrowers must be warned;
 - `lenders` (rc5): a lender revoked while its repos are open;
 - `privileged` and `proposals`: privileged changes, governor handovers, forced guardian changes, steward recoveries, stablecoin registrations and code upgrades; since rc5 the pending upgrade, handover and forced guardian change are also read from state on every pass, so an event an endpoint dropped hides none;
-- `pause`; `schema`, a stored layout left behind by an upgrade without `migrate`; `exposure`, fund and currency caps at 80 % and more than 20 openings in an hour; `events`, the event trail of each repo and a stretch of events past the RPC's retention; `keeper`, a float below 250 XLM;
+- `pause`; `schema`, a stored layout left behind by an upgrade without `migrate`; `exposure`, fund and currency caps at 80 % and more than 20 openings in an hour; `events`, the event trail of each repo and a stretch of events past the RPC's retention; `keeper`, a float below 800 XLM, the rent of one upgrade run;
 - `ttl`: entries with less than 14 days to live, lender approvals a seizure reads included, and the contract code with less than 90 days.
 
 And two cross-checks between redundant sources (two sources, one arbiter):
