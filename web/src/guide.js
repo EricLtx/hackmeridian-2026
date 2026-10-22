@@ -99,6 +99,17 @@ export function roleGuide(role, ctx) {
 }
 
 /**
+ * The haircut a loan against this fund actually bears, in basis points: the
+ * fund's own, plus the exchange-rate leg's for a cross-priced fund, since the
+ * quote applies both. `null` when the fund's configuration is unknown.
+ */
+export function effectiveHaircutBps(config) {
+  if (!config || config.haircut_bps === undefined || config.haircut_bps === null) return null;
+  const leg = Array.isArray(config.source) && config.source[0] === "Cross" ? config.source[1] : null;
+  return Number(config.haircut_bps) + (leg?.haircut_bps !== undefined ? Number(leg.haircut_bps) : 0);
+}
+
+/**
  * The terms of this instance, as rows [label, value, note], from the deployment
  * file and the board. Every value is read from the chain at the time shown.
  */
@@ -120,7 +131,7 @@ export function guideTerms({ dep, board, maxTermSecs, delaySecs, version, paused
           // A cross-priced fund adds the exchange-rate haircut: the quote applies both.
           const leg = src === "Cross" && Array.isArray(c.source) ? c.source[1] : null;
           if (leg?.haircut_bps !== undefined) {
-            const fx = { ...facts, fxHaircut: formatRate(leg.haircut_bps), total: formatRate(Number(c.haircut_bps) + Number(leg.haircut_bps)) };
+            const fx = { ...facts, fxHaircut: formatRate(leg.haircut_bps), total: formatRate(effectiveHaircutBps(c)) };
             return t("{symbol}: {haircut} haircut plus {fxHaircut} on the exchange rate, {total} in all; NAV in {currency} through an exchange-rate feed, at most {age} old", fx);
           }
           return src === "Cross"

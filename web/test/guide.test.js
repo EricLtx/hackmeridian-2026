@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ROLES, guideTerms, roleGuide } from "../src/guide.js";
+import { ROLES, effectiveHaircutBps, guideTerms, roleGuide } from "../src/guide.js";
 
 const ctx = { code: "tEUR", sym: "tMMF", maxTermSecs: 7 * 24 * 3600, delaySecs: 48 * 3600, haircutBps: 200 };
 
@@ -41,4 +41,17 @@ test("the terms rows read the deployment and the board", () => {
   assert.match(byLabel.Changes, /^5 min time delay/);
   assert.equal(byLabel.Pause, "open");
   assert.match(byLabel.Network, /testnet, contract version 4/);
+});
+
+test("effectiveHaircutBps adds the exchange-rate leg's haircut: the quote applies both", () => {
+  assert.equal(effectiveHaircutBps({ haircut_bps: 200, source: ["Cross", { haircut_bps: 200 }] }), 400);
+  assert.equal(effectiveHaircutBps({ haircut_bps: 150, source: "Direct" }), 150);
+  assert.equal(effectiveHaircutBps({ haircut_bps: 100, source: ["Direct"] }), 100);
+  assert.equal(effectiveHaircutBps(null), null);
+  assert.equal(effectiveHaircutBps(undefined), null);
+});
+
+test("the borrower's guide states the total haircut of a cross-priced fund", () => {
+  const b = roleGuide("borrower", { ...ctx, haircutBps: effectiveHaircutBps({ haircut_bps: 200, source: ["Cross", { haircut_bps: 200 }] }) });
+  assert.match(b.steps[1], /4\.00 % haircut/);
 });

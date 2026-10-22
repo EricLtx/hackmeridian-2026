@@ -34,7 +34,7 @@ import {
   sortOffers,
   withdrawalAmount,
 } from "./terms.js";
-import { ROLES, ROLE_TITLES, guideTerms, roleGuide } from "./guide.js";
+import { ROLES, ROLE_TITLES, effectiveHaircutBps, guideTerms, roleGuide } from "./guide.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
@@ -246,7 +246,7 @@ function renderGuide() {
     sym: sym(),
     maxTermSecs: S.maxTerm || 7 * 24 * 3600,
     delaySecs: S.delay ?? 48 * 3600,
-    haircutBps: config ? Number(config.haircut_bps) : null,
+    haircutBps: effectiveHaircutBps(config),
   };
   setHTML(
     tabs,
@@ -377,6 +377,15 @@ function renderBoard() {
 }
 
 /** The funds this instance admits, each with its own issuer, feed and settings; shown when there is more than one. */
+/** A fund's haircut as a loan bears it: the total, and for a cross-priced fund its two parts. */
+function haircutCell(cfg) {
+  const total = effectiveHaircutBps(cfg);
+  if (total === null) return "—";
+  if (total === Number(cfg.haircut_bps)) return esc(formatRate(total));
+  const fx = total - Number(cfg.haircut_bps);
+  return `${esc(formatRate(total))} <span class="muted small">${esc(t("({haircut} + {fxHaircut} on the exchange rate)", { haircut: formatRate(cfg.haircut_bps), fxHaircut: formatRate(fx) }))}</span>`;
+}
+
 function renderFunds(funds) {
   const out = $("funds");
   if (!out) return;
@@ -397,7 +406,7 @@ function renderFunds(funds) {
           : "—";
       const leg = source === "Cross" ? esc(t("exchange-rate leg")) : source === "Direct" ? esc(t("none")) : "—";
       const maxAge = cfg ? `${decimalText(Number(cfg.nav_max_age_secs) / 3600)} h` : "—";
-      return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${cfg ? formatRate(cfg.haircut_bps) : "—"}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
+      return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="muted small">${esc(f.name)}</span></td><td data-label="${heads[1]}">${esc(f.navCurrency)}</td><td data-label="${heads[2]}">${leg}</td><td data-label="${heads[3]}">${haircutCell(cfg)}</td><td data-label="${heads[4]}">${maxAge}</td><td data-label="${heads[5]}">${lent}</td></tr>`;
     } catch (error) {
       console.warn("fund row", error);
       return `<tr><td data-label="${heads[0]}">${esc(f.symbol)} <span class="text-error small">${esc(t(UNSHOWABLE))}</span></td>${heads

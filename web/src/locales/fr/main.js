@@ -192,4 +192,5 @@ export default {
   "The deployment file could not be loaded ({reason}). The interface needs deployment.testnet.json next to this page.":
     "Le fichier de déploiement n'a pas pu être chargé ({reason}). L'interface a besoin de deployment.testnet.json à côté de cette page.",
   "Chain read through {host}.": "Chaîne lue via {host}.",
+  "({haircut} + {fxHaircut} on the exchange rate)": "({haircut} + {fxHaircut} sur le change)",
 };
