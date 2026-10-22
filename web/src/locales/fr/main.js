@@ -193,4 +193,9 @@ export default {
     "Le fichier de déploiement n'a pas pu être chargé ({reason}). L'interface a besoin de deployment.testnet.json à côté de cette page.",
   "Chain read through {host}.": "Chaîne lue via {host}.",
   "({haircut} + {fxHaircut} on the exchange rate)": "({haircut} + {fxHaircut} sur le change)",
+  "Roles": "Rôles",
+  "Reading roles…": "Lecture des rôles…",
+  "None beyond borrowing and lending": "Aucun, au-delà d'emprunter et de prêter",
+  "{n} role could not be read": "{n} rôle n'a pas pu être lu",
+  "{n} roles could not be read": "{n} rôles n'ont pas pu être lus",
 };

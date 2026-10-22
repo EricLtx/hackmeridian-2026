@@ -336,3 +336,12 @@ test("an RPC that reports a small fee and sets a large one is refused before the
   await assert.rejects(chain.repurchase(signer, 1), (error) => error.name === "TxRefused" && /429\.49 XLM/.test(error.message));
   assert.equal(asked, 0);
 });
+
+test("a role getter's answer is an address or nothing; anything else is refused at the boundary", async () => {
+  const { checkOptAddress } = await import("../src/chain.js");
+  const G = "GAMEWALLETAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAME";
+  assert.equal(checkOptAddress(G), G);
+  assert.equal(checkOptAddress(null), null);
+  assert.equal(checkOptAddress(undefined), null);
+  for (const bad of ["<img src=x>", "gabc", 42, { address: G }, `${G} `]) assert.throws(() => checkOptAddress(bad), TypeError);
+});

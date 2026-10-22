@@ -193,4 +193,9 @@ export default {
     "No se pudo cargar el archivo de despliegue ({reason}). La interfaz necesita deployment.testnet.json junto a esta página.",
   "Chain read through {host}.": "Cadena leída a través de {host}.",
   "({haircut} + {fxHaircut} on the exchange rate)": "({haircut} + {fxHaircut} sobre el tipo de cambio)",
+  "Roles": "Roles",
+  "Reading roles…": "Leyendo los roles…",
+  "None beyond borrowing and lending": "Ninguno, más allá de pedir prestado y prestar",
+  "{n} role could not be read": "{n} rol no se pudo leer",
+  "{n} roles could not be read": "{n} roles no se pudieron leer",
 };

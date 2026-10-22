@@ -35,6 +35,7 @@ import {
   withdrawalAmount,
 } from "./terms.js";
 import { ROLES, ROLE_TITLES, effectiveHaircutBps, guideTerms, roleGuide } from "./guide.js";
+import { roleLabel, rolesOf } from "./roles.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
@@ -85,6 +86,9 @@ const S = {
   termEdited: false,
   borrowSharesSet: false,
   updatedAt: null, // ledger time of the last complete refresh
+  roleFacts: null, // the instance's role holders, read on the chain (chain.roleFacts)
+  roles: null, // { held, unknown } for the connected wallet (roles.js)
+  rolesAt: 0, // local time of the last role read, ms; 0 asks for a read on the next pass
 };
 
 const now = () => Math.floor(Date.now() / 1000 + S.offset);
@@ -533,6 +537,18 @@ function step(done, title, body) {
     <div><p class="step-title">${title}${done ? ` <span class="sr-only">${esc(t("(done)"))}</span>` : ""}</p>${done ? "" : body}</div></li>`;
 }
 
+/** The connected wallet's roles on this instance, as chips; the roles a read could not tell are counted. */
+function rolesMarkup() {
+  const r = S.roles;
+  if (!r) return `<span class="muted">${esc(t("Reading roles…"))}</span>`;
+  const chips = r.held.map((h) => `<span class="pill pill-ok">${esc(roleLabel(h))}</span>`).join(" ");
+  const none = r.held.length ? "" : `<span class="muted">${esc(t("None beyond borrowing and lending"))}</span>`;
+  const unread = r.unknown.length
+    ? ` <span class="muted small">${esc(tn("{n} role could not be read", "{n} roles could not be read", r.unknown.length))}</span>`
+    : "";
+  return `${chips}${none}${unread}`;
+}
+
 function renderWallet() {
   renderWalletChip();
   const body = $("wallet-body");
@@ -583,6 +599,7 @@ function renderWallet() {
        <div><dt>XLM</dt><dd class="num">${b.xlm === null ? "—" : esc(formatAmount(b.xlm, 7))}</dd></div>
        <div><dt>${esc(code())}</dt><dd class="num">${trust ? esc(formatAmount(b.stablecoin, SD())) : `<span class="muted">${esc(t("No trustline"))}</span>`}</dd></div>
        <div><dt>${esc(sym())}</dt><dd class="num">${esc(formatAmount(b.shares, FD()))}</dd></div>
+       <div><dt>${esc(t("Roles"))}</dt><dd>${rolesMarkup()}</dd></div>
      </dl>
      ${
        allDone
@@ -623,6 +640,8 @@ function adoptWallet(wallet) {
   S.releases = new Map();
   S.eventsFrom = null;
   S.borrowSharesSet = false;
+  S.roles = null;
+  S.rolesAt = 0;
   S.stopWatch?.();
   S.stopWatch = watchFreighter((change) => {
     if (!S.wallet) return;
@@ -650,6 +669,8 @@ function disconnect(reason = null) {
   S.lent = new Map();
   S.unreadable = new Set();
   S.positionsError = null;
+  S.roles = null;
+  S.rolesAt = 0;
   try {
     localStorage.removeItem(REMEMBER_KEY);
   } catch {
@@ -1286,6 +1307,28 @@ async function refreshBoard() {
   renderBoard();
 }
 
+/** How often the role holders are read again, ms: they change only through governance. */
+const ROLES_EVERY_MS = 60_000;
+
+/**
+ * Reads who holds each role on the instance, and the connected wallet's
+ * roles, at most once a minute (or at once after a wallet change). A failed
+ * read keeps the last answer and never fails the pass.
+ */
+async function refreshRoles() {
+  if (!S.board || (S.rolesAt && Date.now() - S.rolesAt < ROLES_EVERY_MS)) return;
+  const address = S.wallet?.address ?? null;
+  try {
+    const facts = await S.chain.roleFacts(S.board.funds ?? [], address);
+    if ((S.wallet?.address ?? null) !== address) return;
+    S.roleFacts = facts;
+    S.roles = address ? rolesOf(address, facts) : null;
+    S.rolesAt = Date.now();
+  } catch (error) {
+    console.warn("roles", error);
+  }
+}
+
 async function refreshWallet() {
   const address = S.wallet?.address;
   if (!address) return;
@@ -1324,6 +1367,7 @@ async function refreshAll({ history = false } = {}) {
     // the poll holds the pass 1.5 s at most (a silent endpoint), and a move it decides later applies to later calls.
     await S.chain.pollHeights();
     await refreshBoard();
+    await refreshRoles();
     if (S.historyDue) {
       S.historyDue = false;
       await loadHistory();

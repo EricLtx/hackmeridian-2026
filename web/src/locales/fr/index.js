@@ -14,5 +14,6 @@ import history from "./history.js";
 import terms from "./terms.js";
 import deployment from "./deployment.js";
 import frame from "./frame.js";
+import roles from "./roles.js";
 
-export default { ...common, ...page, ...main, ...terminal, ...command, ...blotter, ...guide, ...timeline, ...errors, ...wallet, ...chain, ...history, ...terms, ...deployment, ...frame };
+export default { ...common, ...page, ...main, ...terminal, ...command, ...blotter, ...guide, ...timeline, ...errors, ...wallet, ...chain, ...history, ...terms, ...deployment, ...frame, ...roles };

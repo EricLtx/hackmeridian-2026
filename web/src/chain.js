@@ -24,6 +24,7 @@ import {
   nativeToScVal,
   rpc,
   scValToNative,
+  StrKey,
   xdr,
 } from "@stellar/stellar-sdk";
 import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError } from "./errors.js";
@@ -406,6 +407,13 @@ export function checkShape(value, { ints = [], addresses = [], what = "value" } 
   for (const k of ints) if (k in value && !isInt(value[k])) throw new TypeError(`unexpected ${what}.${k} from the chain`);
   for (const k of addresses) if (k in value && !(typeof value[k] === "string" && STRKEY.test(value[k]))) throw new TypeError(`unexpected ${what}.${k} from the chain`);
   return value;
+}
+
+/** A Stellar address or nothing, as a role getter (`Option<Address>`) answers; anything else is refused. */
+export function checkOptAddress(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && STRKEY.test(value)) return value;
+  throw new TypeError("unexpected address from the chain");
 }
 
 /** A SEP-40 price as `lastprice` returns it: `{ price, timestamp }`, both integers, or the error to show. */
@@ -1230,6 +1238,67 @@ export class Chain {
    * guardian, envelope, term ceiling, the currency cap, and each fund; plus
    * the stored layout version.
    */
+  /**
+   * The signers of a classic account with their weights, the master key
+   * first: `[{ key, weight }]`. Reads the account's ledger entry; signer
+   * kinds other than an ed25519 key (pre-authorised transactions, hashes)
+   * are left out, since a wallet cannot be one of them.
+   */
+  async accountSigners(address) {
+    const key = xdr.LedgerKey.account(new xdr.LedgerKeyAccount({ accountId: xdr.PublicKey.publicKeyTypeEd25519(StrKey.decodeEd25519PublicKey(address)) }));
+    const res = await this.net(() => this.server.getLedgerEntries(key));
+    // The SDK exposes XDR fields as accessors in some versions and as plain properties in others.
+    const pick = (o, k) => (typeof o?.[k] === "function" ? o[k]() : o?.[k]);
+    const entry = pick(res.entries?.[0]?.val, "account");
+    if (!entry) throw new TypeError("account entry missing");
+    const thresholds = pick(entry, "thresholds");
+    const master = Number((thresholds?.value ?? thresholds)?.[0]);
+    if (!Number.isInteger(master)) throw new TypeError("unexpected account thresholds");
+    const signers = [{ key: address, weight: master }];
+    for (const s of pick(entry, "signers") ?? []) {
+      const k = pick(s, "key");
+      const kind = k?.type ?? k?.switch?.()?.name;
+      if (kind !== "signerKeyTypeEd25519") continue;
+      const raw = pick(k, "ed25519");
+      const weight = Number(pick(s, "weight"));
+      if (!Number.isInteger(weight)) continue;
+      signers.push({ key: StrKey.encodeEd25519PublicKey(raw?.value ?? raw), weight });
+    }
+    return signers;
+  }
+
+  /**
+   * What the page needs to tell a wallet's roles (`rolesOf` in roles.js):
+   * each role getter, the governor's signers, and per fund its steward (from
+   * the board's read), its steward backup and whether `address` is an
+   * approved lender. Every field a settled, boundary-checked read.
+   */
+  async roleFacts(funds = [], address = null) {
+    const ow = this.contracts.openWindow;
+    const addr = settledWith(checkOptAddress);
+    const [admin, guardian, guardianBackup, sentinel, trustee, soleLender] = await Promise.all(
+      ["admin", "guardian", "guardian_backup", "sentinel", "trustee", "sole_lender"].map((fn) => this.settle(ow, fn).then(addr)),
+    );
+    const adminSigners =
+      admin.value && admin.value.startsWith("G")
+        ? await this.accountSigners(admin.value).then((value) => ({ value }), (error) => ({ error }))
+        : { value: [] };
+    const fundFacts = await Promise.all(
+      funds.map(async (f) => {
+        const shares = sv.address(f.shares);
+        const [stewardBackup, approved] = await Promise.all([
+          this.settle(ow, "steward_backup", [shares]).then(addr),
+          address
+            ? this.settle(ow, "is_lender_approved", [shares, sv.address(address)]).then(settledWith((v) => isBool(v, "is_lender_approved")))
+            : { value: false },
+        ]);
+        const steward = !f.config || f.config.error ? { error: f.config?.error ?? new Error("fund unread") } : { value: f.config.value?.steward ?? null };
+        return { symbol: f.symbol, shares: f.shares, steward, stewardBackup, approved };
+      }),
+    );
+    return { admin, adminSigners, guardian, guardianBackup, sentinel, trustee, soleLender, funds: fundFacts };
+  }
+
   async pendingChanges(funds = []) {
     const ow = this.contracts.openWindow;
     const currency = sv.symbol(this.deployment.stablecoin.currency);
