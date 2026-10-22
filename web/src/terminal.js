@@ -643,7 +643,7 @@ export function createTerminal(ctx) {
     if (rpcNow) {
       const slow = rpcNow.ms !== null && rpcNow.ms > 2000;
       parts.push(
-        `<span class="tb-item" title="${esc(t("RPC endpoint in use ({index} of {count}) and the time of its last answer", { index: rpcNow.index + 1, count: rpcNow.count }))}"><span class="tb-k">RPC</span> <span class="tb-v${rpcNow.index ? " t-warn" : ""}">${esc(rpcNow.host)}</span>${rpcNow.ms === null ? "" : ` <span class="${slow ? "t-warn" : "t-dim"}">${esc(formatUnits(BigInt(rpcNow.ms), 0))} ms</span>`}</span>`,
+        `<span class="tb-item" title="${esc(t("RPC endpoint in use ({index} of {count}) and the time of its last answer", { index: rpcNow.index + 1, count: rpcNow.count }))}"><span class="tb-k">RPC</span> <span class="tb-v${rpcNow.index ? " t-warn" : ""}">${esc(rpcNow.host)}</span>${rpcNow.ms === null ? "" : ` <span class="${slow ? "t-warn" : "t-dim"}">${esc(formatUnits(BigInt(Math.round(rpcNow.ms)), 0))} ms</span>`}</span>`,
       );
     }
     if (T.updatedAt) parts.push(`<span class="tb-item t-dim">${t("updated {when}", { when: `<span data-since="${T.updatedAt}">${esc(t("just now"))}</span>` })}</span>`);

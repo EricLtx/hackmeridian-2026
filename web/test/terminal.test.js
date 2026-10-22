@@ -184,3 +184,17 @@ test("a tracked open repo whose re-read fails keeps its last reading and is coun
     warn.mock.restore();
   }
 });
+
+test("the status band shows an RPC time with decimals: the clock that measures it is fractional", async () => {
+  // The endpoint's last answer time comes from a monotonic clock in milliseconds, with decimals.
+  await withTerminal(
+    async (from) => ({ repos: from === 1 ? [repoOf()] : [], unreadable: [] }),
+    ($) => {
+      const band = $("t-status").innerHTML;
+      assert.match(band, /first\.example/, "the endpoint");
+      assert.match(band, /148/, "the time, rounded to the millisecond");
+      assert.doesNotMatch(band, /cannot show/, "no unshowable note in place of the status");
+    },
+    { rpcInfo: () => ({ host: "first.example", url: "https://first.example", ms: 147.7, index: 0, count: 2 }) },
+  );
+});
