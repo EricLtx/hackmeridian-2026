@@ -210,6 +210,50 @@ const human = (name) => String(name ?? "").replace(/_/g, " ");
  * the interface language; `known` is false for an event this table does not
  * name, shown with a generic code.
  */
+/**
+ * Labels of the contract's governance events that have no row of their own:
+ * the tape's generic line names them in the reader's language. Every
+ * contract event has either a row in `tapeLine` or a label here (a test reads
+ * the contract's event list).
+ */
+export const EVENT_LABELS = {
+  admin_proposed: () => t("governor handover proposed"),
+  admin_proposal_cancelled: () => t("governor handover cancelled"),
+  admin_change_proposed: () => t("governor change proposed"),
+  reanchor_proposed: () => t("re-anchor proposed"),
+  reanchor_cancelled: () => t("re-anchor cancelled"),
+  envelope_changed: () => t("risk envelope changed"),
+  envelope_change_proposed: () => t("risk envelope change proposed"),
+  envelope_change_cancelled: () => t("risk envelope change cancelled"),
+  guardian_change_proposed: () => t("guardian change proposed"),
+  guardian_change_cancelled: () => t("guardian change cancelled"),
+  guardian_change_forced: () => t("guardian change forced"),
+  forced_guardian_change_cancelled: () => t("forced guardian change cancelled"),
+  max_term_change_proposed: () => t("term ceiling change proposed"),
+  max_term_change_cancelled: () => t("term ceiling change cancelled"),
+  fund_limits_change_proposed: () => t("fund limits change proposed"),
+  fund_limits_change_cancelled: () => t("fund limits change cancelled"),
+  currency_cap_change_proposed: () => t("currency cap change proposed"),
+  currency_cap_change_cancelled: () => t("currency cap change cancelled"),
+  fund_change_proposed: () => t("fund change proposed"),
+  fund_change_cancelled: () => t("fund change cancelled"),
+  fallback_proposed: () => t("backup feed proposed"),
+  fallback_set: () => t("backup feed set"),
+  fallback_cancelled: () => t("backup feed cancelled"),
+  fallback_removed: () => t("backup feed removed"),
+  guardian_backup_set: () => t("guardian backup set"),
+  steward_backup_set: () => t("steward backup key set"),
+  steward_backup_change_proposed: () => t("steward backup key change proposed"),
+  steward_backup_change_cancelled: () => t("steward backup key change cancelled"),
+  steward_recovery_proposed: () => t("steward recovery proposed"),
+  steward_recovery_cancelled: () => t("steward recovery cancelled"),
+  steward_recovered: () => t("steward recovered by its backup key"),
+  trustee_set: () => t("trustee set"),
+  trustee_changed: () => t("trustee changed"),
+  stablecoin_change_proposed: () => t("stablecoin change proposed"),
+  stablecoin_change_cancelled: () => t("stablecoin change cancelled"),
+};
+
 export function tapeLine(e, ctx = {}) {
   const sd = ctx.sd ?? 7;
   const fd = ctx.fd ?? 7;
@@ -334,8 +378,9 @@ export function tapeLine(e, ctx = {}) {
     row = null;
   }
   if (!row) {
-    // Events this table does not know: the event name, as the contract spells it.
-    const event = human(name);
+    // Events without a row of their own: their translated label, else the event name as the contract spells it.
+    // Own keys only: a name such as "__proto__" or "toString" must not reach the object's prototype.
+    const event = (Object.hasOwn(EVENT_LABELS, name) ? EVENT_LABELS[name]() : null) ?? human(name);
     if (name.endsWith("_proposed")) row = { code: t("PROP"), tone: "warn", text: d && d.eta !== undefined ? t("{event}, applicable {eta} UTC", { event, eta: at(d.eta) }) : event };
     else if (name.endsWith("_cancelled")) row = { code: t("CANCEL"), tone: "ok", text: d?.by ? t("{event} by {by}", { event, by: short(d.by) }) : event };
     else row = { code: t("GOV"), tone: "dim", text: event };

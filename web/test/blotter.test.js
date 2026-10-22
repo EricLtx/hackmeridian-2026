@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  EVENT_LABELS,
   bandItems,
   bookRows,
   compactDuration,
@@ -164,7 +165,7 @@ test("tape lines read both the indexer's export and decoded RPC events", () => {
   assert.deepEqual([paused.code, paused.tone], ["PAUSE", "warn"]);
   const proposed = tapeLine({ event: "steward_backup_change_proposed", topics: [F1], data: { eta: String(T0 + 300) } }, ctx);
   assert.equal(proposed.code, "PROP");
-  assert.match(proposed.text, /^steward backup change proposed, applicable /);
+  assert.match(proposed.text, /^steward backup key change proposed, applicable /);
   assert.equal(tapeLine({ event: "something_new", topics: [], data: {} }, ctx).code, "GOV");
 });
 
@@ -228,7 +229,7 @@ test("a malformed event never stops the tape", () => {
   assert.match(tapeLine({ event: "fund_limits_set", topics: [F1], data: { haircut_bps: "x" } }, ctx).text, /tMMF haircut 0\.00 %/);
   // A date that is not one keeps a placeholder time.
   assert.equal(tapeLine({ event: "upgrade_proposed", topics: [], data: { wasm_hash: "abcdef0123", eta: "abc" } }, ctx).text, "code abcdef01 proposed, applicable --:--:-- UTC");
-  assert.equal(tapeLine({ event: "fallback_proposed", topics: [], data: { eta: 1e300 } }, ctx).text, "fallback proposed, applicable --:--:-- UTC");
+  assert.equal(tapeLine({ event: "fallback_proposed", topics: [], data: { eta: 1e300 } }, ctx).text, "backup feed proposed, applicable --:--:-- UTC");
   // A known event whose line cannot be made keeps the generic line of its name.
   const odd = tapeLine({ event: "fund_set", topics: [5], data: { haircut_bps: 100 } }, ctx);
   assert.deepEqual([odd.code, odd.text, odd.known], ["GOV", "fund set", true]);
@@ -414,4 +415,30 @@ test("a fund whose value cannot be formatted marks its own band item, not the ba
   assert.equal(band[2].title, "The chain returned a value this page cannot show.");
   // A coarse feed's NAV shows with the four digits asked, padded.
   assert.equal(bandItems({ funds: [fund("tTWO", { nav: 97n, navDecimals: 2 })] })[2].value, "0.9700 USD 1m00s");
+});
+
+test("every contract event has a dedicated tape row or a translated label", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const events = await readFile(new URL("../../contracts/night-window/src/events.rs", import.meta.url), "utf8");
+  const names = [...events.matchAll(/#\[contractevent\]\s*pub struct (\w+)/g)].map((m) => m[1].replace(/(?<!^)([A-Z])/g, "_$1").toLowerCase());
+  assert.ok(names.length > 60, "the contract's events were found");
+  const source = await readFile(new URL("../src/blotter.js", import.meta.url), "utf8");
+  const rows = new Set([...source.matchAll(/^\s+([a-z_]+): \(\) =>/gm)].map((m) => m[1]));
+  const missing = names.filter((n) => !rows.has(n) && !(n in EVENT_LABELS));
+  assert.deepEqual(missing, [], "events with neither a row nor a label");
+});
+
+test("in French and Spanish a governance event the tape has no row for reads in that language", () => {
+  const e = { event: "stablecoin_change_cancelled", topics: ["stablecoin_change_cancelled"], data: { by: "GD2KQ6ZJEXAMPLEADDRESSFORTESTSONLYXXXXXXXXXXXXXXXXXJQC2" }, closedAt: "2026-10-21T22:47:00Z" };
+  try {
+    setLang("fr");
+    const fr = tapeLine(e, { now: 0 }).text;
+    assert.match(fr, /changement de stablecoin annulé par/);
+    assert.doesNotMatch(fr, /stablecoin change cancelled/);
+    setLang("es");
+    assert.match(tapeLine(e, { now: 0 }).text, /cambio de stablecoin cancelado por/);
+  } finally {
+    setLang("en");
+  }
+  assert.match(tapeLine(e, { now: 0 }).text, /^stablecoin change cancelled by /);
 });
