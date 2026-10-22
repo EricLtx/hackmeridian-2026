@@ -203,6 +203,25 @@ Residual risks after rc5, each recorded in its row above:
 - `scan()` still reads repos and offers one simulation per id (DoS.10);
 - a web write that only one endpoint saw rests on that endpoint's word, said in amber (Infra.4); with a single endpoint configured, the tooling's verdicts on a signed transaction rest on its word too (Infra.1); and the frame refusal is defence in depth only (Infra.3).
 
+### 3.3 Adversary review of the rc5 instance (22 October 2026)
+
+A review by adversary profile of the testnet instance after its upgrade to rc5, run by the maintainer on the project's own contract, instance, tooling and published page; third-party services (RPC providers, the FX feed, the hosting, the wallet) were out of scope and received no load. Each scenario is traced to the decision that stops it, the test or drill that shows it, the detector that sees it, and what remains. No scenario reaches the assets held by the contract, the governance authority or the price without crossing a control that a host test or a drill replayed on rc5 exercises; what remains is operational.
+
+| Adversary and goal | What stops it | Evidence | Detection | Residual |
+|---|---|---|---|---|
+| A user borrows more than the haircut value of the shares | ceiling from a checked price and the haircut; caps per repo, fund and currency (S18) | `open_lends_exactly_the_ceiling_and_not_one_unit_more` | `exposure` | none in the contract |
+| A user blocks other users' exits | no exit reads the pause; fixed term, no liquidation (S6) | repurchase-while-paused tests; drill 5 | `pause` | crowding bounded by the caps |
+| A price operator publishes a wrong NAV | model corridor bounded by one NAV age and covered by the haircut (S2, S30); backup feed must agree | drills 1 and 11 | `price`, `nav` | drift inside the corridor, one NAV age of growth per accepted reading |
+| A price operator re-stamps a frozen value | `feed-flat` on NAV and FX; corridor floor | drill 17 | `feed-flat` | bounded by the feed's integrity and the backup comparison |
+| The governor quorum proposes an unannounced upgrade | time delay, trustee co-signature, cancellation by the sentinel or the guardian (S7, S15, S28) | drill 8 on rc5: cancelled with 260 of 300 seconds left | `privileged`, `proposals` read from state | the automatic cancellation needs a running `monitor --watch --act`; otherwise a human guardian inside the delay |
+| The monitoring host leaves its role | the sentinel can only pause and cancel, with its own consent (S26) | drill 19: veto refused `Unauthorized` | `privileged` | a griefing pause, exits intact |
+| A hostile RPC gets a harmful operation signed | the tooling signs only what the simulation proves harmless (authorizations, footprint, fee cap); the web caps the fee and confirms writes on a second endpoint | tooling offline tests; `web/src/chain.js` | `rpc`; any disagreement on the pause or the proposals is critical | with one endpoint configured, its word alone (Infra.1, Infra.4) |
+| A compromised dependency | lockfiles, no install scripts, actions pinned by SHA, `npm audit` gate, `cargo deny`, RustSec | the gate refused the web on 21 October 2026 on a fresh high advisory, fixed the same day | CI | a compromised release with no published advisory (Infra.3) |
+| A share token the project did not write misbehaves (refuses, lies on balance, changes after admission) | `pull` checks the contract received exactly the amount; deferred delivery on refusal (S9); per-fund cap; decimals checked at admission (S31, S32) | drill 9; deferred-delivery tests | `reconciliation`: a deficit is critical and pauses | a token that changes after admission, bounded by its fund's cap; admit such a fund with low caps and reconcile after its first repo |
+| The issuer lends against its own fund, or seizes after a revocation | `StewardCannotLend`; seizure goes to the lender of record (DoS.7, rc5) | host tests | `lenders` | a stablecoin freeze on the cash leg (DoS.8, version 2) |
+
+Operational residuals the review records, none of them in the contract: the automatic answers exist only while a watch runs; the instance's testnet keys live in one state file on one host, which the custody policy accepts for testnet only ([security.md](security.md), section 6.4); and a feed's NAV age bound expires on schedule, after which a watch with `--act` pauses new entries until the NAV is republished.
+
 ## 4. Did we do a good job?
 
 Review list, to be gone through again at every architecture change:
