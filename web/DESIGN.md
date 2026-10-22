@@ -67,10 +67,10 @@ Font sizes and spacing are not tokens yet: they are written in each rule (see th
 
 ## Gaps, by priority
 
-1. **Outline contrast of chips, ghost buttons, step marks and terminal keys.** They are drawn with `--field`, at 1.5:1 (light) and 1.8:1 (dark) against their surface, under the 3:1 that WCAG 2.2 (1.4.11) asks of a boundary that identifies a control. Fix: draw interactive outlines with `--input-border`, and keep `--field` for decoration.
-2. **Touch targets under 44 px** on narrow screens: `.face-btn` 30, `.btn-small` and `.input-small` 32, `.chip` and `.t-key` 34, `.tab` 38. They pass the 24 px minimum of WCAG 2.2 (2.5.8) but not the 44 px of the platform guidelines. Fix: one `@media (pointer: coarse)` block raising them to 44 px.
+1. **Outline contrast of chips, ghost buttons, step marks and terminal keys.** Fixed on 22 October 2026: they are drawn with `--input-border` (3:1 or more in every palette, the terminal face defining its own), and `test/design.test.js` checks it from the stylesheet.
+2. **Touch targets under 44 px.** Fixed on 22 October 2026: one `@media (pointer: coarse)` block raises `.face-btn`, `.lang-btn`, `.tab`, `.chip`, `.btn-small`, `.input-small input` and `.t-key` to 44 px; the same test checks it.
 3. **Type scale.** 26 distinct font sizes, mostly `rem` values two decimals apart (`0.84`, `0.88`, `0.9`, `0.92`, `0.95`) plus a few `px`. Fix: eight tokens on a 1.125 ratio (`--fs-xs` to `--fs-3xl`) and a `clamp()` for the hero, then map each rule onto the nearest step.
 4. **Spacing scale.** 29 distinct values, 13 of them off a 4 px grid (5, 6, 7, 9, 10, 11, 13, 14, 18, 22, 26, 30 px). Fix: `--space-1` to `--space-8` on the 4 px grid; values of 2 and 6 px stay allowed inside dense terminal rows.
 5. **Colours outside the tokens.** 40 hex values in rules, 23 distinct, mostly `#fff` and terminal greys. Fix: move them onto existing tokens or new terminal ones.
 
-None of these changes the behaviour of the page; gaps 1 and 2 are accessibility, 3 to 5 are maintenance. A change to the stylesheet runs `npm test` and `npm run build` in `web/` like any other.
+None of these changes the behaviour of the page; gaps 1 and 2 were accessibility and are closed, 3 to 5 are maintenance. A change to the stylesheet runs `npm test` and `npm run build` in `web/` like any other.

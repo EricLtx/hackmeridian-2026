@@ -1,6 +1,6 @@
 # Role workspaces on the web platform — design
 
-Date: 22 October 2026. Status: design approved for phase 0 by the maintainer's request to proceed without a question round; later phases are described so that phase 0 does not close them off.
+Date: 22 October 2026. Status: design approved for phase 0 by the maintainer's request to proceed without a question round; later phases are described so that phase 0 does not close them off. Phase 0 delivered on 22 October 2026 (plan `docs/superpowers/plans/2026-10-22-role-workspaces-phase0.md`), except repos past maturity in the Health panel, moved to phase 1.
 
 ## Intent
 

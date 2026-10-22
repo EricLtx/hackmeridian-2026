@@ -1,6 +1,8 @@
 # Open Window web interface
 
-A minimal interface for the Open Window contract on Stellar testnet: the market board (NAV, exchange rate, quote, offers, caps, pause state), borrowing, positions and repurchase, and lending. Plain JavaScript modules built with Vite; Freighter signs.
+A minimal interface for the Open Window contract on Stellar testnet: the market board (NAV, exchange rate, quote, offers, caps, pause state), borrowing, positions and repurchase, lending, and an Operate space. Plain JavaScript modules built with Vite; Freighter signs.
+
+The **Operate** space shows the instance as its operator sees it, to anyone: its health (new loans open or paused, contract version and stored layout, each fund's price reference age against its NAV age bound, the cap used, a freeze), who holds each role (governor, guardian and its backup, sentinel, trustee, sole lender, each fund's steward and its backup), and every proposal waiting for the time delay, with a countdown to the moment it can apply. A connected wallet sees its own roles in the wallet card, read from the chain: a role whose read failed is counted as unread, never granted. The actions of these roles still run through the tooling in `demo/`; the design of the role workspaces and their phases is in `docs/superpowers/specs/2026-10-22-role-workspaces-design.md`.
 
 A "How it works" card opens the page: one tab per party (holder of shares, lender, fund issuer) with what it needs, what it does and what it commits to, and the terms of the instance read from the chain (stablecoins, funds and haircuts, caps, interest rule, term range, time delay, pause state, contract version). Each position carries a timeline (opened, interest, term, closing, delivery), dated and linked to transactions when the indexer's export `public/history.json` is present. The layout works at phone width.
 
