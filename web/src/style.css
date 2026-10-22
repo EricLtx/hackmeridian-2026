@@ -880,7 +880,7 @@ input[aria-invalid="true"] {
   font-weight: 550;
   padding: 6px 14px;
   border-radius: 980px;
-  border: 1px solid var(--field);
+  border: 1px solid var(--input-border);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
@@ -961,7 +961,7 @@ input[aria-invalid="true"] {
 .btn-ghost {
   background: transparent;
   color: var(--accent);
-  border-color: var(--field);
+  border-color: var(--input-border);
 }
 
 .btn-ghost:hover:not(:disabled) {
@@ -1117,7 +1117,7 @@ input[aria-invalid="true"] {
   width: 26px;
   height: 26px;
   border-radius: 50%;
-  border: 2px solid var(--field);
+  border: 2px solid var(--input-border);
   display: grid;
   place-items: center;
   font-size: 0.8rem;
@@ -2041,6 +2041,7 @@ body.face-terminal {
   --subtle: #636366;
   --border: #232326;
   --field: #3a3a3c;
+  --input-border: #6e6e73;
   --accent: #409cff;
   --accent-strong: #0a84ff;
   --accent-hover: #2a95ff;
@@ -2624,7 +2625,7 @@ body.face-terminal .top.is-scrolled {
 .term kbd {
   font: inherit;
   padding: 0 5px;
-  border: 1px solid var(--field);
+  border: 1px solid var(--input-border);
   border-radius: 5px;
   background: var(--surface-3);
   color: #fff;
@@ -2676,6 +2677,19 @@ body.face-terminal .top.is-scrolled {
 ::view-transition-new(root) {
   animation-duration: 0.32s;
   animation-timing-function: var(--ease);
+}
+
+/* Touch screens: the small controls reach 44 px, the size a finger needs. */
+@media (pointer: coarse) {
+  .face-btn,
+  .lang-btn,
+  .tab,
+  .chip,
+  .btn-small,
+  .input-small input,
+  .t-key {
+    min-height: 44px;
+  }
 }
 
 /* Reduced motion: everything stays still. */
