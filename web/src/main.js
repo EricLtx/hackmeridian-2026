@@ -35,8 +35,8 @@ import {
   withdrawalAmount,
 } from "./terms.js";
 import { ROLES, ROLE_TITLES, effectiveHaircutBps, guideTerms, roleGuide } from "./guide.js";
-import { roleLabel, rolesOf } from "./roles.js";
-import { operateModel } from "./operate.js";
+import { roleLabel, rolesNone, rolesOf } from "./roles.js";
+import { operateModel, whoCanApply } from "./operate.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
@@ -91,6 +91,7 @@ const S = {
   roles: null, // { held, unknown } for the connected wallet (roles.js)
   rolesAt: 0, // local time of the last role read, ms; 0 asks for a read on the next pass
   pending: null, // every pending proposal (chain.pendingAll), read with the roles
+  rolesTask: null, // the role read in flight, at most one
 };
 
 const now = () => Math.floor(Date.now() / 1000 + S.offset);
@@ -382,7 +383,6 @@ function renderBoard() {
   renderOffers();
 }
 
-/** The funds this instance admits, each with its own issuer, feed and settings; shown when there is more than one. */
 /** A fund's haircut as a loan bears it: the total, and for a cross-priced fund its two parts. */
 function haircutCell(cfg) {
   const total = effectiveHaircutBps(cfg);
@@ -392,6 +392,7 @@ function haircutCell(cfg) {
   return `${esc(formatRate(total))} <span class="muted small">${esc(t("({haircut} + {fxHaircut} on the exchange rate)", { haircut: formatRate(cfg.haircut_bps), fxHaircut: formatRate(fx) }))}</span>`;
 }
 
+/** The funds this instance admits, each with its own issuer, feed and settings; shown when there is more than one. */
 function renderFunds(funds) {
   const out = $("funds");
   if (!out) return;
@@ -544,7 +545,7 @@ function rolesMarkup() {
   const r = S.roles;
   if (!r) return `<span class="muted">${esc(t("Reading roles…"))}</span>`;
   const chips = r.held.map((h) => `<span class="pill pill-ok">${esc(roleLabel(h))}</span>`).join(" ");
-  const none = r.held.length ? "" : `<span class="muted">${esc(t("None beyond borrowing and lending"))}</span>`;
+  const none = rolesNone(r) ? `<span class="muted">${esc(t("None beyond borrowing and lending"))}</span>` : "";
   const unread = r.unknown.length
     ? ` <span class="muted small">${esc(tn("{n} role could not be read", "{n} roles could not be read", r.unknown.length))}</span>`
     : "";
@@ -683,6 +684,7 @@ function disconnect(reason = null) {
     $(id).innerHTML = "";
   }
   renderAllWalletViews();
+  renderOperate();
 }
 
 function renderAllWalletViews() {
@@ -1361,13 +1363,19 @@ function renderOperate() {
       ? `<ul class="operate-list">${m.proposals
           .map(
             (p) =>
-              `<li><span>${esc(p.label)}</span> <span class="${p.due ? "tone-warn" : "muted"}" data-until="${p.eta}" data-after="${esc(t("can apply now"))}">${esc(p.due ? t("can apply now") : t("pending"))}</span></li>`,
+              `<li><span>${esc(p.label)}</span> <span class="${p.due ? "tone-warn" : "muted"}" data-until="${p.eta}" data-after="${esc(whoCanApply(p.whoCan))}">${esc(p.due ? whoCanApply(p.whoCan) : t("pending"))}</span></li>`,
           )
           .join("")}</ul>`
-      : `<p class="muted">${esc(t("Nothing waits for the time delay."))}</p>`;
-    const unread = m.unreadable
-      ? `<p class="muted small">${esc(tn("{n} proposal could not be read", "{n} proposals could not be read", m.unreadable))}</p>`
-      : "";
+      : m.proposalsState === "read"
+        ? `<p class="muted">${esc(t("Nothing waits for the time delay."))}</p>`
+        : "";
+    // Only a complete read may say that nothing is pending; an unread proposal is a warning, never an absence.
+    const unread =
+      m.proposalsState === "unknown"
+        ? `<p class="tone-warn">${esc(t("The pending proposals could not be read yet."))}</p>`
+        : m.unreadable
+          ? `<p class="tone-warn">${esc(tn("{n} proposal could not be read", "{n} proposals could not be read", m.unreadable))}</p>`
+          : "";
     setHTML(
       body,
       `<div class="operate-grid">
@@ -1375,7 +1383,7 @@ function renderOperate() {
          <div><h3 class="sub">${esc(t("Roles"))}</h3><table class="table"><thead><tr><th>${esc(t("Role"))}</th><th>${esc(t("Address"))}</th></tr></thead><tbody>${roleRows}</tbody></table></div>
          <div><h3 class="sub">${esc(t("Pending proposals"))}</h3>${proposals}${unread}</div>
        </div>
-       <p class="muted small">${esc(t("Actions on this space come in a later version; today the operator, the guardian and the steward act through the operator's tooling, and anyone can apply a proposal once it is due."))}</p>`,
+       <p class="muted small">${esc(t("Actions on this space come in a later version; today the operator, the guardian and the steward act through the operator's tooling. Each due proposal says who the contract lets apply it."))}</p>`,
     );
     tick();
   });
@@ -1419,7 +1427,12 @@ async function refreshAll({ history = false } = {}) {
     // the poll holds the pass 1.5 s at most (a silent endpoint), and a move it decides later applies to later calls.
     await S.chain.pollHeights();
     await refreshBoard();
-    await refreshRoles();
+    // The role and proposal reads run beside the pass, so the holder's balances and positions never wait for them.
+    S.rolesTask ??= refreshRoles().finally(() => {
+      S.rolesTask = null;
+      renderOperate();
+      renderWallet();
+    });
     renderOperate();
     if (S.historyDue) {
       S.historyDue = false;

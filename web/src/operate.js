@@ -5,6 +5,7 @@
 
 import { formatDuration } from "./format.js";
 import { t } from "./i18n.js";
+import { rolesOf } from "./roles.js";
 
 /** Share of a fund's cap from which its use is a warning. */
 const CAP_WARN = 0.8;
@@ -22,8 +23,11 @@ const SINGLE_ROLES = [
  * The model the Operate space draws: `{ health, roles, proposals, unreadable }`.
  * - `health`: `[{ label, value, tone }]`, tone "ok", "warn" or "dim" (unknown);
  * - `roles`: `[{ label, address, unknown, you }]`, address null when the role is empty or unread;
- * - `proposals`: `[{ label, eta, due }]`, sorted by `eta`, `due` once it can apply;
- * - `unreadable`: how many proposal reads failed.
+ * - `proposals`: `[{ label, eta, due, whoCan }]`, sorted by `eta`, `due` once it can apply,
+ *   `whoCan` the party the contract lets apply it ("anyone", "governor", "proposedGovernor");
+ * - `unreadable`: how many proposal reads failed;
+ * - `proposalsState`: "read" (every read answered), "partial" (some failed) or "unknown" (none read):
+ *   only "read" with an empty list may say that nothing is pending.
  */
 export function operateModel({ pending, roleFacts, board, now, wallet = null, version = null }) {
   return {
@@ -41,8 +45,9 @@ function health(board, pending, now, version) {
   else rows.push({ label: t("New loans"), value: t("Open"), tone: "ok" });
 
   const schema = pending?.schema?.value;
+  const isInt = (v) => typeof v === "bigint" || Number.isSafeInteger(v);
   rows.push(
-    version !== null && version !== undefined && schema !== null && schema !== undefined
+    isInt(version) && isInt(schema)
       ? { label: t("Contract"), value: t("version {version}, stored layout {schema}", { version: String(version), schema: String(schema) }), tone: "ok" }
       : { label: t("Contract"), value: t("Unknown"), tone: "dim" },
   );
@@ -79,16 +84,14 @@ function health(board, pending, now, version) {
 
 function roles(facts, wallet) {
   if (!facts) return [];
-  const signer = (address) =>
-    Array.isArray(facts.adminSigners?.value) && facts.adminSigners.value.some((s) => s && s.key === address && Number(s.weight) > 0);
   const row = (label, read, you = (a) => a === wallet) => {
     if (!read || read.error) return { label, address: null, unknown: true, you: false };
     const address = read.value ?? null;
     return { label, address, unknown: false, you: Boolean(wallet && address && you(address)) };
   };
-  const rows = SINGLE_ROLES.map(([field, label]) =>
-    field === "admin" ? row(label(), facts.admin, (a) => a === wallet || signer(wallet)) : row(label(), facts[field]),
-  );
+  // The governor row marks the wallet by the same rule as its roles: a signer with a weight, or a contract governor's address.
+  const governs = Boolean(wallet) && rolesOf(wallet, facts).held.some((h) => h.role === "governor");
+  const rows = SINGLE_ROLES.map(([field, label]) => (field === "admin" ? row(label(), facts.admin, () => governs) : row(label(), facts[field])));
   for (const f of facts.funds ?? []) {
     rows.push(row(t("Steward of {fund}", { fund: f.symbol }), f.steward));
     rows.push(row(t("Steward backup of {fund}", { fund: f.symbol }), f.stewardBackup));
@@ -99,7 +102,7 @@ function roles(facts, wallet) {
 function proposals(pending, now) {
   const list = [];
   let unreadable = 0;
-  const add = (label, read) => {
+  const add = (label, read, whoCan = "anyone") => {
     if (!read) return;
     if (read.error) {
       unreadable += 1;
@@ -107,14 +110,16 @@ function proposals(pending, now) {
     }
     if (read.value && read.value.eta !== undefined) {
       const eta = Number(read.value.eta);
-      list.push({ label, eta, due: eta <= now });
+      list.push({ label, eta, due: eta <= now, whoCan });
     }
   };
   if (pending) {
-    add(t("Code upgrade"), pending.upgrade);
-    add(t("Governor handover"), pending.admin);
+    // Who the contract lets apply each kind: the governor installs an upgrade, applies a forced guardian
+    // change and a stablecoin registration; the proposed governor accepts a handover; anyone applies the rest.
+    add(t("Code upgrade"), pending.upgrade, "governor");
+    add(t("Governor handover"), pending.admin, "proposedGovernor");
     add(t("Guardian change"), pending.guardian);
-    add(t("Forced guardian change"), pending.forced);
+    add(t("Forced guardian change"), pending.forced, "governor");
     add(t("Risk envelope change"), pending.envelope);
     add(t("Term ceiling change"), pending.maxTerm);
     add(t("Currency cap change: {currency}", { currency: pending.currency ?? "" }), pending.cap);
@@ -126,8 +131,16 @@ function proposals(pending, now) {
       add(t("Steward backup key change: {fund}", { fund: f.symbol }), f.stewardBackup);
       add(t("Steward recovery: {fund}", { fund: f.symbol }), f.stewardRecovery);
     }
-    for (const s of pending.stablecoins ?? []) add(t("Stablecoin registration: {code}", { code: s.code }), s.change);
+    for (const s of pending.stablecoins ?? []) add(t("Stablecoin registration: {code}", { code: s.code }), s.change, "governor");
   }
   list.sort((a, b) => a.eta - b.eta);
-  return { proposals: list, unreadable };
+  const proposalsState = !pending ? "unknown" : unreadable ? "partial" : "read";
+  return { proposals: list, unreadable, proposalsState };
+}
+
+/** What a due proposal's row says, by who the contract lets apply it. */
+export function whoCanApply(whoCan) {
+  if (whoCan === "governor") return t("the governor can apply it now");
+  if (whoCan === "proposedGovernor") return t("the proposed governor can accept it now");
+  return t("anyone can apply it now");
 }

@@ -212,7 +212,7 @@ export default {
   "risk envelope change cancelled": "changement de l'enveloppe de risque annulé",
   "guardian change proposed": "changement de gardien proposé",
   "guardian change cancelled": "changement de gardien annulé",
-  "guardian change forced": "changement de gardien forcé",
+  "forced guardian change proposed": "changement forcé de gardien proposé",
   "forced guardian change cancelled": "changement forcé de gardien annulé",
   "term ceiling change proposed": "changement de durée maximale proposé",
   "term ceiling change cancelled": "changement de durée maximale annulé",

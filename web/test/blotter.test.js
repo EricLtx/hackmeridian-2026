@@ -442,3 +442,9 @@ test("in French and Spanish a governance event the tape has no row for reads in 
   }
   assert.match(tapeLine(e, { now: 0 }).text, /^stablecoin change cancelled by /);
 });
+
+test("a forced guardian change is a proposal with the moment it can apply, not a done change", () => {
+  const line = tapeLine({ event: "guardian_change_forced", topics: [], data: { guardian: "GAOTHERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOTHER", eta: "1792620000" } }, { now: 0 });
+  assert.equal(line.code, "PROP");
+  assert.match(line.text, /^forced guardian change proposed, applicable /);
+});

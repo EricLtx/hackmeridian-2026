@@ -28,4 +28,7 @@ export default {
   "Steward backup key change: {fund}": "Clave de respaldo del steward: {fund}",
   "Steward recovery: {fund}": "Recuperación del steward: {fund}",
   "Stablecoin registration: {code}": "Registro de stablecoin: {code}",
+  "the governor can apply it now": "el gobernador puede aplicarla ahora",
+  "the proposed governor can accept it now": "el gobernador propuesto puede aceptarla ahora",
+  "anyone can apply it now": "cualquiera puede aplicarla ahora",
 };

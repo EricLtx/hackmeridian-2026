@@ -37,10 +37,11 @@ export function rolesOf(address, facts) {
     return read.value === address;
   };
 
-  // The governor: the account itself, or one of its signers with a weight.
+  // The governor: a contract governor by its address; a classic account through its signers,
+  // the master key included with its own weight, so a disabled master key (weight 0) is not governor.
   const admin = facts.admin;
-  if (!admin || admin.error) add(null, "governor");
-  else if (admin.value === address) add(true, "governor");
+  if (!admin || admin.error || typeof admin.value !== "string") add(null, "governor");
+  else if (admin.value.startsWith("C")) add(admin.value === address, "governor");
   else {
     const signers = facts.adminSigners;
     if (!signers || signers.error || !Array.isArray(signers.value)) add(null, "governor");
@@ -56,6 +57,11 @@ export function rolesOf(address, facts) {
     add(!approved || approved.error ? null : approved.value === true, "approvedLender", f.symbol);
   }
   return { held, unknown };
+}
+
+/** True only when every role was read and none is held: an unread role is not "no role". */
+export function rolesNone(r) {
+  return Boolean(r) && r.held.length === 0 && r.unknown.length === 0;
 }
 
 const NAMES = {

@@ -1505,9 +1505,14 @@ code.err {
 
 .operate-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
   gap: 22px;
   margin: 8px 0 12px;
+}
+
+/* A short address stays on one line, whatever the length of the role's label. */
+.operate-grid .mono {
+  white-space: nowrap;
 }
 
 .facts-operate {

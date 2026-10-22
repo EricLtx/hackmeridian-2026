@@ -1241,12 +1241,6 @@ export class Chain {
   }
 
   /**
-   * Governance changes waiting for their time delay, each `{ value }` (null
-   * when nothing is pending) or `{ error }`: upgrade, governor handover,
-   * guardian, envelope, term ceiling, the currency cap, and each fund; plus
-   * the stored layout version.
-   */
-  /**
    * The signers of a classic account with their weights, the master key
    * first: `[{ key, weight }]`. Reads the account's ledger entry; signer
    * kinds other than an ed25519 key (pre-authorised transactions, hashes)
@@ -1341,12 +1335,18 @@ export class Chain {
       maxTerm: eta(base.maxTerm),
       cap: eta(base.cap),
       currency: this.deployment.stablecoin.currency,
-      schema: base.schema,
+      schema: settledWith((v) => checkInt(v, "schema_version"))(base.schema),
       funds: perFund,
       stablecoins: coins,
     };
   }
 
+  /**
+   * Governance changes waiting for their time delay, each `{ value }` (null
+   * when nothing is pending) or `{ error }`: upgrade, governor handover,
+   * guardian, envelope, term ceiling, the currency cap, and each fund; plus
+   * the stored layout version.
+   */
   async pendingChanges(funds = []) {
     const ow = this.contracts.openWindow;
     const currency = sv.symbol(this.deployment.stablecoin.currency);

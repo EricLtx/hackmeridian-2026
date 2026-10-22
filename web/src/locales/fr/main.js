@@ -201,11 +201,11 @@ export default {
   "you": "vous",
   "None": "Aucun",
   "Role": "Rôle",
-  "can apply now": "applicable maintenant",
   "Nothing waits for the time delay.": "Rien n'attend le délai.",
   "Health": "Santé",
   "Pending proposals": "Propositions en attente",
-  "Actions on this space come in a later version; today the operator, the guardian and the steward act through the operator's tooling, and anyone can apply a proposal once it is due.": "Les actions de cet espace arrivent dans une version suivante ; aujourd'hui l'opérateur, le gardien et le steward agissent par l'outillage de l'opérateur, et n'importe qui peut appliquer une proposition une fois son délai écoulé.",
   "{n} proposal could not be read": "{n} proposition n'a pas pu être lue",
   "{n} proposals could not be read": "{n} propositions n'ont pas pu être lues",
+  "The pending proposals could not be read yet.": "Les propositions en attente n'ont pas encore pu être lues.",
+  "Actions on this space come in a later version; today the operator, the guardian and the steward act through the operator's tooling. Each due proposal says who the contract lets apply it.": "Les actions de cet espace arrivent dans une version suivante ; aujourd'hui l'opérateur, le gardien et le steward agissent par l'outillage de l'opérateur. Chaque proposition échue indique qui le contrat autorise à l'appliquer.",
 };

@@ -72,3 +72,8 @@ test("touch screens get 44 px targets on the small controls", () => {
   const heights = [...coarse.matchAll(/min-height:\s*(\d+)px/g)].map((m) => Number(m[1]));
   assert.ok(heights.length && heights.every((h) => h >= 44), "every enlarged control is at least 44 px high");
 });
+
+test("the Operate grid never asks for more width than a 320 px phone has", () => {
+  const grid = block("\n.operate-grid {");
+  assert.match(grid, /minmax\(min\(\d+px, 100%\), 1fr\)/, "the column minimum yields to the available width");
+});

@@ -202,15 +202,6 @@ export function positionTotals(rows) {
 const human = (name) => String(name ?? "").replace(/_/g, " ");
 
 /**
- * One tape line from a contract event, as the indexer exports it or as the
- * RPC returns it once decoded: `{ event, topics (name excluded), data,
- * closedAt, txHash }`. `ctx`: `{ sd, fd, code, sym, symbolOf(fund),
- * navDecimalsOf(fund), codeOfOffer(id), codeOfRepo(id), now }`. Returns
- * `{ time, code, text, tone, repoId, txHash, known }`, `code` and `text` in
- * the interface language; `known` is false for an event this table does not
- * name, shown with a generic code.
- */
-/**
  * Labels of the contract's governance events that have no row of their own:
  * the tape's generic line names them in the reader's language. Every
  * contract event has either a row in `tapeLine` or a label here (a test reads
@@ -227,7 +218,7 @@ export const EVENT_LABELS = {
   envelope_change_cancelled: () => t("risk envelope change cancelled"),
   guardian_change_proposed: () => t("guardian change proposed"),
   guardian_change_cancelled: () => t("guardian change cancelled"),
-  guardian_change_forced: () => t("guardian change forced"),
+  guardian_change_forced: () => t("forced guardian change proposed"),
   forced_guardian_change_cancelled: () => t("forced guardian change cancelled"),
   max_term_change_proposed: () => t("term ceiling change proposed"),
   max_term_change_cancelled: () => t("term ceiling change cancelled"),
@@ -254,6 +245,15 @@ export const EVENT_LABELS = {
   stablecoin_change_cancelled: () => t("stablecoin change cancelled"),
 };
 
+/**
+ * One tape line from a contract event, as the indexer exports it or as the
+ * RPC returns it once decoded: `{ event, topics (name excluded), data,
+ * closedAt, txHash }`. `ctx`: `{ sd, fd, code, sym, symbolOf(fund),
+ * navDecimalsOf(fund), codeOfOffer(id), codeOfRepo(id), now }`. Returns
+ * `{ time, code, text, tone, repoId, txHash, known }`, `code` and `text` in
+ * the interface language; `known` is false for an event this table does not
+ * name, shown with a generic code.
+ */
 export function tapeLine(e, ctx = {}) {
   const sd = ctx.sd ?? 7;
   const fd = ctx.fd ?? 7;
@@ -381,7 +381,8 @@ export function tapeLine(e, ctx = {}) {
     // Events without a row of their own: their translated label, else the event name as the contract spells it.
     // Own keys only: a name such as "__proto__" or "toString" must not reach the object's prototype.
     const event = (Object.hasOwn(EVENT_LABELS, name) ? EVENT_LABELS[name]() : null) ?? human(name);
-    if (name.endsWith("_proposed")) row = { code: t("PROP"), tone: "warn", text: d && d.eta !== undefined ? t("{event}, applicable {eta} UTC", { event, eta: at(d.eta) }) : event };
+    // A forced guardian change is a proposal too: it waits for its delay, like every `_proposed` event.
+    if (name.endsWith("_proposed") || name === "guardian_change_forced") row = { code: t("PROP"), tone: "warn", text: d && d.eta !== undefined ? t("{event}, applicable {eta} UTC", { event, eta: at(d.eta) }) : event };
     else if (name.endsWith("_cancelled")) row = { code: t("CANCEL"), tone: "ok", text: d?.by ? t("{event} by {by}", { event, by: short(d.by) }) : event };
     else row = { code: t("GOV"), tone: "dim", text: event };
   }
