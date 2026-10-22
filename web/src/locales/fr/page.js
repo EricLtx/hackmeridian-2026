@@ -68,4 +68,7 @@ export default {
   "Stellar testnet · tokenized fund shares · euro stablecoins": "Testnet Stellar · parts de fonds tokenisées · stablecoins en euro",
   "See how it works": "Voir comment ça marche",
   "Open the terminal": "Ouvrir le terminal",
+  "Operate": "Opérer",
+  "The instance as its operator sees it: its health, who holds each role, and every change waiting for the time delay. Anyone can read it.": "L'instance telle que la voit son opérateur : sa santé, qui détient chaque rôle, et chaque changement qui attend le délai. Tout le monde peut la lire.",
+  "Reading the instance…": "Lecture de l'instance…",
 };

@@ -409,6 +409,14 @@ export function checkShape(value, { ints = [], addresses = [], what = "value" } 
   return value;
 }
 
+/** A pending proposal as a `pending_*` getter answers: an object with an integer `eta`, or nothing. */
+export function checkPendingEta(value) {
+  if (value === null || value === undefined) return null;
+  checkShape(value, { ints: ["eta"], what: "pending change" });
+  need(value, ["eta"], "pending change");
+  return value;
+}
+
 /** A Stellar address or nothing, as a role getter (`Option<Address>`) answers; anything else is refused. */
 export function checkOptAddress(value) {
   if (value === null || value === undefined) return null;
@@ -1297,6 +1305,46 @@ export class Chain {
       }),
     );
     return { admin, adminSigners, guardian, guardianBackup, sentinel, trustee, soleLender, funds: fundFacts };
+  }
+
+  /**
+   * Every proposal the contract has pending, for the Operate space: the
+   * instance-wide ones of `pendingChanges`, the forced guardian change, and
+   * per fund its limits, backup feed, re-anchor, steward backup and steward
+   * recovery; per stablecoin its registration. Each a settled read whose
+   * value, when there is one, carries an integer `eta`.
+   */
+  async pendingAll(funds = [], stablecoins = []) {
+    const ow = this.contracts.openWindow;
+    const eta = settledWith(checkPendingEta);
+    const [base, forced] = await Promise.all([this.pendingChanges(funds), this.settle(ow, "pending_forced_guardian_change").then(eta)]);
+    const perFund = await Promise.all(
+      funds.map(async (f, i) => {
+        const args = [sv.address(f.shares)];
+        const [limits, fallback, reanchor, stewardBackup, stewardRecovery] = await Promise.all(
+          ["pending_fund_limits_change", "pending_fallback", "pending_reanchor", "pending_steward_backup", "pending_steward_recovery"].map((fn) =>
+            this.settle(ow, fn, args).then(eta),
+          ),
+        );
+        return { symbol: f.symbol, change: eta(base.funds[i]?.change), limits, fallback, reanchor, stewardBackup, stewardRecovery };
+      }),
+    );
+    const coins = await Promise.all(
+      stablecoins.map(async (s) => ({ code: s.code, change: await this.settle(ow, "pending_stablecoin_change", [sv.address(s.contract)]).then(eta) })),
+    );
+    return {
+      upgrade: eta(base.upgrade),
+      admin: eta(base.admin),
+      guardian: eta(base.guardian),
+      forced,
+      envelope: eta(base.envelope),
+      maxTerm: eta(base.maxTerm),
+      cap: eta(base.cap),
+      currency: this.deployment.stablecoin.currency,
+      schema: base.schema,
+      funds: perFund,
+      stablecoins: coins,
+    };
   }
 
   async pendingChanges(funds = []) {

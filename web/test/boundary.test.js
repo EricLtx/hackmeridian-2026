@@ -345,3 +345,10 @@ test("a role getter's answer is an address or nothing; anything else is refused 
   assert.equal(checkOptAddress(undefined), null);
   for (const bad of ["<img src=x>", "gabc", 42, { address: G }, `${G} `]) assert.throws(() => checkOptAddress(bad), TypeError);
 });
+
+test("a pending proposal is read only with an integer eta; anything else is refused at the boundary", async () => {
+  const { checkPendingEta } = await import("../src/chain.js");
+  assert.equal(checkPendingEta(null), null);
+  assert.deepEqual(checkPendingEta({ eta: 1_792_620_000n, guardian: "x" }), { eta: 1_792_620_000n, guardian: "x" });
+  for (const bad of [{}, { eta: "soon" }, { eta: 1.5 }, "eta", 42]) assert.throws(() => checkPendingEta(bad), TypeError);
+});

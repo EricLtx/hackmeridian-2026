@@ -36,6 +36,7 @@ import {
 } from "./terms.js";
 import { ROLES, ROLE_TITLES, effectiveHaircutBps, guideTerms, roleGuide } from "./guide.js";
 import { roleLabel, rolesOf } from "./roles.js";
+import { operateModel } from "./operate.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
@@ -89,6 +90,7 @@ const S = {
   roleFacts: null, // the instance's role holders, read on the chain (chain.roleFacts)
   roles: null, // { held, unknown } for the connected wallet (roles.js)
   rolesAt: 0, // local time of the last role read, ms; 0 asks for a read on the next pass
+  pending: null, // every pending proposal (chain.pendingAll), read with the roles
 };
 
 const now = () => Math.floor(Date.now() / 1000 + S.offset);
@@ -1319,14 +1321,64 @@ async function refreshRoles() {
   if (!S.board || (S.rolesAt && Date.now() - S.rolesAt < ROLES_EVERY_MS)) return;
   const address = S.wallet?.address ?? null;
   try {
-    const facts = await S.chain.roleFacts(S.board.funds ?? [], address);
+    const [facts, pending] = await Promise.all([
+      S.chain.roleFacts(S.board.funds ?? [], address),
+      S.chain.pendingAll(S.board.funds ?? [], S.dep.stablecoins ?? []).catch((error) => {
+        console.warn("proposals", error);
+        return S.pending;
+      }),
+    ]);
     if ((S.wallet?.address ?? null) !== address) return;
     S.roleFacts = facts;
+    S.pending = pending;
     S.roles = address ? rolesOf(address, facts) : null;
     S.rolesAt = Date.now();
   } catch (error) {
     console.warn("roles", error);
   }
+}
+
+/** The Operate space: health, roles and pending proposals, read-only (operate.js). */
+function renderOperate() {
+  const body = $("operate-body");
+  if (!body || !S.board || !S.roleFacts) return;
+  drawPart(body, "operate", () => {
+    const m = operateModel({ pending: S.pending, roleFacts: S.roleFacts, board: S.board, now: now(), wallet: S.wallet?.address ?? null, version: S.version });
+    const health = m.health
+      .map((r) => `<div><dt>${esc(r.label)}</dt><dd class="tone-${r.tone}">${esc(r.value)}</dd></div>`)
+      .join("");
+    const roleRows = m.roles
+      .map((r) => {
+        const who = r.unknown
+          ? `<span class="muted">${esc(t("Unknown"))}</span>`
+          : r.address
+            ? `${link(S.chain.explorerAccount(r.address), shortAddress(r.address))}${r.you ? ` <span class="pill pill-ok">${esc(t("you"))}</span>` : ""}`
+            : `<span class="muted">${esc(t("None"))}</span>`;
+        return `<tr><td data-label="${esc(t("Role"))}">${esc(r.label)}</td><td data-label="${esc(t("Address"))}" class="mono">${who}</td></tr>`;
+      })
+      .join("");
+    const proposals = m.proposals.length
+      ? `<ul class="operate-list">${m.proposals
+          .map(
+            (p) =>
+              `<li><span>${esc(p.label)}</span> <span class="${p.due ? "tone-warn" : "muted"}" data-until="${p.eta}" data-after="${esc(t("can apply now"))}">${esc(p.due ? t("can apply now") : t("pending"))}</span></li>`,
+          )
+          .join("")}</ul>`
+      : `<p class="muted">${esc(t("Nothing waits for the time delay."))}</p>`;
+    const unread = m.unreadable
+      ? `<p class="muted small">${esc(tn("{n} proposal could not be read", "{n} proposals could not be read", m.unreadable))}</p>`
+      : "";
+    setHTML(
+      body,
+      `<div class="operate-grid">
+         <div><h3 class="sub">${esc(t("Health"))}</h3><dl class="facts facts-operate">${health}</dl></div>
+         <div><h3 class="sub">${esc(t("Roles"))}</h3><table class="table"><thead><tr><th>${esc(t("Role"))}</th><th>${esc(t("Address"))}</th></tr></thead><tbody>${roleRows}</tbody></table></div>
+         <div><h3 class="sub">${esc(t("Pending proposals"))}</h3>${proposals}${unread}</div>
+       </div>
+       <p class="muted small">${esc(t("Actions on this space come in a later version; today the operator, the guardian and the steward act through the operator's tooling, and anyone can apply a proposal once it is due."))}</p>`,
+    );
+    tick();
+  });
 }
 
 async function refreshWallet() {
@@ -1368,6 +1420,7 @@ async function refreshAll({ history = false } = {}) {
     await S.chain.pollHeights();
     await refreshBoard();
     await refreshRoles();
+    renderOperate();
     if (S.historyDue) {
       S.historyDue = false;
       await loadHistory();
@@ -1597,6 +1650,7 @@ function setLanguage(choice, { persist = true } = {}) {
   if (S.board) renderBoard();
   else renderGuide();
   renderAllWalletViews();
+  renderOperate();
   renderUpdated();
   tick();
 }

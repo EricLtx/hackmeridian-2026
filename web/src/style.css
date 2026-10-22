@@ -1501,6 +1501,46 @@ code.err {
   margin-top: 4px;
 }
 
+/* Operate: the instance as its operator sees it */
+
+.operate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 22px;
+  margin: 8px 0 12px;
+}
+
+.facts-operate {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.operate-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.operate-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tone-ok {
+  color: var(--text);
+}
+
+.tone-warn {
+  color: var(--warn);
+}
+
+.tone-dim {
+  color: var(--muted);
+}
+
 /* Narrow screens */
 
 @media (max-width: 760px) {
