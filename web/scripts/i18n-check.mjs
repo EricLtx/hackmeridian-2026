@@ -135,12 +135,12 @@ export function tagsOf(s) {
   return tags.sort().join(" ");
 }
 
-/** The default sources: every module of src/ except the language module, and both pages. */
+/** The default sources: every module of src/ except the language module, and the three pages. */
 export function sources() {
   const src = readdirSync(join(ROOT, "src"))
     .filter((f) => f.endsWith(".js") && f !== "i18n.js")
     .map((f) => `src/${f}`);
-  return [...src, "index.html", "history.html"];
+  return [...src, "index.html", "history.html", "tour.html"];
 }
 
 async function load(lang) {

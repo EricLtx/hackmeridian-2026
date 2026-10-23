@@ -13,5 +13,11 @@ Inconsolata, are bundled from @fontsource-variable under the SIL Open Font
 License 1.1 (the licence text is in each package's LICENSE file and at
 https://openfontlicense.org).
 
+The guided tour (web/tour.html) shows two NASA images from the NASA 3D
+Resources collection (https://github.com/nasa/NASA-3D-Resources): "Earth (B)"
+and the "Hipparcos Star Map". They are used under NASA's media usage
+guidelines (https://www.nasa.gov/nasa-brand-center/images-and-media); their
+use implies no endorsement by NASA.
+
 "Open Window" is the name of this project. The Apache License does not grant
 permission to use it as a trademark (Section 6 of the License).

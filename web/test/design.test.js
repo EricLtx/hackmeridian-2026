@@ -26,6 +26,7 @@ const tokensOf = (text) => Object.fromEntries([...text.matchAll(/--([a-z0-9-]+)\
 const light = tokensOf(block(":root {"));
 const dark = { ...light, ...tokensOf(block(":root {", css.indexOf("@media (prefers-color-scheme: dark)"))) };
 const terminal = { ...light, ...tokensOf(block("body.face-terminal {")) };
+const stage = { ...light, ...tokensOf(block("body.face-stage {")) };
 
 function luminance(hex) {
   const h = hex.length === 4 ? hex.slice(1).replace(/./g, (c) => c + c) : hex.slice(1, 7);
@@ -92,10 +93,10 @@ test("the Operate grid never asks for more width than a 320 px phone has", () =>
   assert.match(grid, /minmax\(min\(\d+px, 100%\), 1fr\)/, "the column minimum yields to the available width");
 });
 
-test("every text token reaches 4.5:1 on every surface, in the three palettes", () => {
+test("every text token reaches 4.5:1 on every surface, in the four palettes", () => {
   const texts = ["text", "muted", "accent", "ok", "warn", "danger"];
   const surfaces = ["bg", "surface", "surface-2", "surface-3"];
-  for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal]]) {
+  for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal], ["stage", stage]]) {
     for (const fg of [...texts, ...(name === "terminal" ? ["t-id"] : [])]) {
       for (const bg of surfaces) {
         const ratio = contrast(palette[fg], palette[bg]);
@@ -113,7 +114,7 @@ test("every text token reaches 4.5:1 on every surface, in the three palettes", (
 
 test("font sizes come from the type scale, or are relative to their parent", () => {
   const sizes = [...css.matchAll(/font-size:\s*([^;]+);/g)].map((m) => m[1].trim());
-  const off = sizes.filter((v) => !/^var\(--fs-[a-z0-9]+\)$/.test(v) && !/^[0-9.]+em$/.test(v));
+  const off = sizes.filter((v) => !/^var\(--fs-[a-z0-9-]+\)$/.test(v) && !/^[0-9.]+em$/.test(v));
   assert.deepEqual(off, [], "every font-size reads a --fs- token");
 });
 
@@ -130,7 +131,7 @@ test("the palette colours are Stellar Design System values", () => {
     "#ffefef", "#cd2b31", "#3c181a", "#ff6369",
     "#849dff",
   ]);
-  for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal]]) {
+  for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal], ["stage", stage]]) {
     for (const [token, value] of Object.entries(palette)) {
       assert.ok(sds.has(value.toLowerCase()), `${name}: --${token} ${value} is not an SDS step`);
     }
