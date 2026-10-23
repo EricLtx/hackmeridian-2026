@@ -11,7 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { LIMITS, decideActions, detect, recordAnnouncement } from "../detectors.mjs";
-import { acknowledgeUpgrade, announceUpgrade, checkStateName, loadMonitor, mergeMonitor, monitorFileName, readMonitorFile, refreshMonitor, rehearsalAllowed, saveMonitor } from "../monitor-state.mjs";
+import { acknowledgeUpgrade, announceUpgrade, checkStateName, loadMonitor, mergeMonitor, monitorFileName, newContractsAllowed, readMonitorFile, refreshMonitor, rehearsalAllowed, saveMonitor } from "../monitor-state.mjs";
 
 const OW = "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL";
 const RC4 = "f5f13ae69499efdd23ae350d45f4bfe4bb25026bfcb6b44b264a2d3d2effbcea";
@@ -117,4 +117,12 @@ test("a rehearsal never runs on the demo instance unless --live asks for it", ()
   assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW, live: "yes" }), false);
   // A bad instance name is refused before anything else.
   assert.throws(() => rehearsalAllowed({ stateName: "../x", contractId: other, publishedId: OW }), /OPEN_WINDOW_STATE/);
+});
+
+test("new contracts for the demo instance need --new-demo-instance; a disposable instance never does", () => {
+  assert.equal(newContractsAllowed({ stateName: "testnet" }), false);
+  assert.equal(newContractsAllowed({ stateName: "testnet", confirmed: "yes" }), false);
+  assert.equal(newContractsAllowed({ stateName: "testnet", confirmed: true }), true);
+  assert.equal(newContractsAllowed({ stateName: "pentest" }), true);
+  assert.throws(() => newContractsAllowed({ stateName: "a/b" }), /OPEN_WINDOW_STATE/);
 });

@@ -556,12 +556,12 @@ async function open() {
   const principal = ((BigInt(q.max_principal) * LIVE_BORROW_BPS) / 10_000n / ONE) * ONE;
   const [offer] = (await offers()).filter((o) => BigInt(o.available) >= principal);
   if (!offer) {
-    alarm("No offer has enough funds left.", "npm run setup -- --fresh");
+    alarm("No offer has enough funds left.", "npm run setup -- --fresh --new-demo-instance");
     return;
   }
   const shares = BigInt(await balance(C.shares, pub("borrower")));
   if (shares < LIVE_SHARES) {
-    alarm(`The borrower holds ${fmt(shares, 7, 0)} shares, fewer than ${fmt(LIVE_SHARES, 7, 0)}.`, "npm run setup -- --fresh");
+    alarm(`The borrower holds ${fmt(shares, 7, 0)} shares, fewer than ${fmt(LIVE_SHARES, 7, 0)}.`, "npm run setup -- --fresh --new-demo-instance");
     return;
   }
   const term = 3 * 24 * 3600;

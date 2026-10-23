@@ -62,6 +62,18 @@ export function rehearsalAllowed({ stateName, contractId, publishedId, live }) {
   return !demo || live === true;
 }
 
+/**
+ * Whether `npm run setup` may deploy new contracts under the instance name
+ * `stateName`. New contracts on the demo instance (`testnet`) replace the
+ * facts the web interface serves (`web/public/deployment.testnet.json`), so
+ * they need `--new-demo-instance`: a `--fresh` meant for a disposable
+ * instance whose `OPEN_WINDOW_STATE` was forgotten, or a run from a checkout
+ * without the demo's state file, stops before anything is sent or written.
+ */
+export function newContractsAllowed({ stateName, confirmed }) {
+  return checkStateName(stateName) !== "testnet" || confirmed === true;
+}
+
 /** The file's content, or null when it is missing or unreadable. */
 export function readMonitorFile(file) {
   try {

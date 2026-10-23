@@ -2,7 +2,10 @@
 //
 //   npm run setup              resumes where the last run stopped
 //   npm run setup -- --fresh   new contracts (keeps the funded accounts; the
-//                              previous state is copied to testnet-<id>.json)
+//                              previous state is copied to testnet-<id>.json);
+//                              on the demo instance, only with
+//                              --new-demo-instance, since the web interface
+//                              then serves the new contracts
 //   npm run setup -- --restage new short repo for the seizure scene
 //   npm run setup -- --fx=local     re-admit the fund on the local FX feed
 //   npm run setup -- --fx=reflector back to the Reflector FX feed
@@ -61,6 +64,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { AuthClawbackEnabledFlag, AuthRequiredFlag, AuthRevocableFlag } from "@stellar/stellar-sdk";
+import { newContractsAllowed } from "./monitor-state.mjs";
 import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_EUR_AT_SETUP, NAV_USD_AT_SETUP, OFFERS, SECOND_FUND_SETTINGS, THIRD_FUND_SETTINGS, navAt } from "./config.mjs";
 
 // The provider is an independent lender the issuer designates: the issuer
@@ -130,6 +134,14 @@ async function refreshNav(state) {
 async function main() {
   const state = loadState();
   if (process.argv.includes("--fresh") || !state.done) {
+    if (!newContractsAllowed({ stateName: STATE_NAME, confirmed: process.argv.includes("--new-demo-instance") })) {
+      console.error(
+        `${state.done ? "--fresh" : `No demo state in ${path.basename(STATE_FILE)}: this run`} would deploy new contracts for the demo instance and replace web/public/deployment.testnet.json.\n` +
+          "For a disposable instance, set its name: OPEN_WINDOW_STATE=<name> npm run setup -- --fresh.\n" +
+          "To replace the demo instance itself, add --new-demo-instance.",
+      );
+      process.exit(1);
+    }
     // Keeps the previous deployment reachable: copy its state aside, named
     // after its contract, so a rehearsed demo can be restored by renaming the file.
     if (state.contracts?.openWindow && fs.existsSync(STATE_FILE)) {

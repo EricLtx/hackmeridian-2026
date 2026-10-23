@@ -15,11 +15,11 @@ Keys and contract addresses are written to `demo/.state/testnet.json`. The folde
 ## Commands
 
 ```sh
-npm run setup                    # deploy and configure; resumes after a failure
+npm run setup                    # deploy and configure; resumes after a failure (the first deployment of the demo instance needs --new-demo-instance)
 npm run setup -- --restage       # new short repo for the seizure scene
 npm run setup -- --fx=local      # re-admit the fund on the local FX feed
 npm run setup -- --fx=reflector  # back to the Reflector FX feed
-npm run setup -- --fresh         # new contracts, same funded accounts
+npm run setup -- --fresh --new-demo-instance   # new demo contracts, same funded accounts; the web interface follows them
 npm run setup -- --multisig      # governor becomes a 2-of-2 account with an outside co-signer
 npm run setup -- --second-fund   # admit a second fund (euro MMF share, own issuer and feed, no FX leg) and a second euro stablecoin
 npm run setup -- --third-fund    # admit a third fund whose share is a classic Stellar asset held through the Stellar Asset Contract (token code not ours), issuer flags: auth required, revocable, clawback
@@ -106,7 +106,7 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 | `PriceOutOfBand` outside the guardrails scene | EUR/USD moved more than 2 % since admission | `setup -- --fx=local`, or back with `--fx=reflector`: re-admission anchors today's rate |
 | `PriceOutOfBand` after a quiet spell (rc5) | Nobody stepped the price reference for about ten days, and the NAV left its corridor | `npm run status` steps it while the NAV is still inside; otherwise re-anchor with two keys: `npm run monitor -- --rehearse --live --steps=12` |
 | `Repo #n from an earlier run is still open` | A rehearsal opened a repo and did not repurchase it | `npm run demo -- --only=repurchase` |
-| `No offer has enough funds left` | Offers drained by repeated runs | `setup -- --fresh` |
+| `No offer has enough funds left` | Offers drained by repeated runs | `setup -- --fresh --new-demo-instance` (new demo contracts: the web interface follows them) |
 | `Repo #n is Defaulted` | The staged repo was already seized | `setup -- --restage`, then wait one hour |
 | `Setup failed: … account` | Testnet reset; accounts and contracts are gone | Delete `demo/.state/testnet.json`, run `setup` again |
 
