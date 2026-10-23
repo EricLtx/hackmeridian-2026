@@ -6,6 +6,7 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
+import "@fontsource-variable/inconsolata";
 import { tapeLine } from "./blotter.js";
 import { formatAmount, formatOrDash, formatRate, shortAddress } from "./format.js";
 import { privacyLine } from "./deployment.js";

@@ -4,6 +4,7 @@
 
 // Inter, served with the page (no font request to a third party).
 import "@fontsource-variable/inter";
+import "@fontsource-variable/inconsolata";
 import { Chain, rpcChangeText, unverifiedText } from "./chain.js";
 import { checkDeployment, privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
