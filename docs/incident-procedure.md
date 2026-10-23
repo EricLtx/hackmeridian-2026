@@ -87,10 +87,10 @@ npm run setup -- --fx=local       # switch to the backup FX feed (new admission)
 
 ## 5. Drills
 
-The rehearsal replays every detector with a real trigger on testnet, takes the action and restores the state:
+The rehearsal replays every detector with a real trigger on testnet, takes the action and restores the state. It runs on a disposable instance deployed from the same build; on the instance the web interface serves it is refused unless `--live` asks for it, once any `--watch --act` on that instance has been stopped:
 
 ```sh
-npm run monitor -- --rehearse
+OPEN_WINDOW_STATE=<name> npm run monitor -- --rehearse
 ```
 
 Rehearsal of 15 October 2026, on version 4 with a multisig governor, a sole lender (mode D3) and a 5-minute delay:

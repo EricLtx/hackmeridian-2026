@@ -11,7 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { LIMITS, decideActions, detect, recordAnnouncement } from "../detectors.mjs";
-import { acknowledgeUpgrade, announceUpgrade, checkStateName, loadMonitor, mergeMonitor, monitorFileName, readMonitorFile, refreshMonitor, saveMonitor } from "../monitor-state.mjs";
+import { acknowledgeUpgrade, announceUpgrade, checkStateName, loadMonitor, mergeMonitor, monitorFileName, readMonitorFile, refreshMonitor, rehearsalAllowed, saveMonitor } from "../monitor-state.mjs";
 
 const OW = "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL";
 const RC4 = "f5f13ae69499efdd23ae350d45f4bfe4bb25026bfcb6b44b264a2d3d2effbcea";
@@ -100,4 +100,21 @@ test("the monitor file of an instance is named from OPEN_WINDOW_STATE, which car
   // The one validator every file name derives from: it returns the name it accepts.
   assert.equal(checkStateName("testnet"), "testnet");
   assert.equal(checkStateName("rehearsal-2026_10-20"), "rehearsal-2026_10-20");
+});
+
+test("a rehearsal never runs on the demo instance unless --live asks for it", () => {
+  const other = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  // The demo instance, by name: refused, whatever contract the state file holds.
+  assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW }), false);
+  assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: other, publishedId: OW }), false);
+  // A disposable name whose state file points at the published contract: refused too.
+  assert.equal(rehearsalAllowed({ stateName: "pentest", contractId: OW, publishedId: OW }), false);
+  // A disposable instance: allowed, with or without a readable deployment file.
+  assert.equal(rehearsalAllowed({ stateName: "pentest", contractId: other, publishedId: OW }), true);
+  assert.equal(rehearsalAllowed({ stateName: "pentest", contractId: other, publishedId: undefined }), true);
+  // --live is the explicit override, and only `true` counts.
+  assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW, live: true }), true);
+  assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW, live: "yes" }), false);
+  // A bad instance name is refused before anything else.
+  assert.throws(() => rehearsalAllowed({ stateName: "../x", contractId: other, publishedId: OW }), /OPEN_WINDOW_STATE/);
 });

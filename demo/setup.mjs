@@ -122,7 +122,7 @@ async function refreshNav(state) {
       console.log("  NAV reference stepped along the model");
     } catch (error) {
       // The NAV left the corridor: only a two-key re-anchor restores the fund.
-      console.log(`  NAV reference not stepped: ${error.message}; re-anchor with two keys (npm run monitor -- --rehearse --steps=12)`);
+      console.log(`  NAV reference not stepped: ${error.message}; re-anchor with two keys (npm run monitor -- --rehearse --live --steps=12)`);
     }
   }
 }

@@ -46,6 +46,22 @@ export function monitorFileName(stateName) {
   return checkStateName(stateName) === "testnet" ? "monitor.json" : `monitor-${stateName}.json`;
 }
 
+/**
+ * Whether `--rehearse` may run on the instance it points at. The drills
+ * publish a NAV jump, claw back shares, pause, propose upgrades and change
+ * fund settings: on the demo instance, which the web interface serves, every
+ * visitor would see them, and a running `--watch --act` would answer them on
+ * the same accounts. So a rehearsal runs on a disposable instance
+ * (`OPEN_WINDOW_STATE=<name>`), and on the demo instance only when `--live`
+ * asks for it. The demo instance is known by its name (`testnet`) or by its
+ * contract id, the one `web/public/deployment.testnet.json` publishes: a
+ * disposable state file that points at the demo contract is refused too.
+ */
+export function rehearsalAllowed({ stateName, contractId, publishedId, live }) {
+  const demo = checkStateName(stateName) === "testnet" || (Boolean(publishedId) && contractId === publishedId);
+  return !demo || live === true;
+}
+
 /** The file's content, or null when it is missing or unreadable. */
 export function readMonitorFile(file) {
   try {

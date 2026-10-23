@@ -7,7 +7,10 @@
 //                                    pause on a critical alert, extend TTLs,
 //                                    refresh an old price reference
 //   npm run monitor -- --rehearse    fires each detector with a real trigger
-//                                    on testnet, takes the action, restores
+//                                    on testnet, takes the action, restores;
+//                                    on a disposable instance only
+//                                    (OPEN_WINDOW_STATE=<name>), or on the
+//                                    demo instance with --live
 //   npm run monitor -- --witness     a second watch from another machine:
 //                                    alerts, never acts; own files, own heartbeat
 //
@@ -73,7 +76,7 @@ import {
 import { FUND_SETTINGS, navAt } from "./config.mjs";
 import { plain } from "../indexer/lib/plain.mjs";
 import { LEDGER_SECS, LIMITS, compareFacts, confirmation, decideActions, detect, hex, labelOf, lenderPairs, proposalFacts, recordAnnouncement, restoredLabel, restoredOutcome, statusOf } from "./detectors.mjs";
-import { loadMonitor as loadMonitorFile, monitorFileName, refreshMonitor as refreshMonitorFile, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
+import { loadMonitor as loadMonitorFile, monitorFileName, refreshMonitor as refreshMonitorFile, rehearsalAllowed, saveMonitor as saveMonitorFile } from "./monitor-state.mjs";
 
 const args = process.argv.slice(2);
 /** Witness: a watch that alerts and never acts, for a second instance elsewhere (two witnesses, one actor). */
@@ -81,6 +84,12 @@ const WITNESS = args.includes("--witness");
 const WATCH = args.includes("--watch") || WITNESS;
 const ACT = args.includes("--act");
 const REHEARSE = args.includes("--rehearse");
+/** A rehearsal on the demo instance, asked for explicitly (monitor-state.mjs, rehearsalAllowed). */
+const LIVE = args.includes("--live");
+if (LIVE && !REHEARSE) {
+  console.error("--live only applies to --rehearse.");
+  process.exit(1);
+}
 if (WITNESS && (ACT || REHEARSE)) {
   console.error(`--witness never submits a transaction: drop ${ACT ? "--act" : "--rehearse"}, or run without --witness on the acting instance.`);
   process.exit(1);
@@ -797,7 +806,25 @@ async function act(alerts, s, monitor = {}) {
 // Rehearsal: a real trigger per detector, the action, then a clean pass
 // ---------------------------------------------------------------------------
 
+/** The contract id the web interface serves, or undefined when the deployment file cannot be read. */
+function publishedContractId() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "web", "public", "deployment.testnet.json"), "utf8")).contracts?.openWindow;
+  } catch {
+    return undefined;
+  }
+}
+
 async function rehearse() {
+  // Checked before the first pass: nothing is read from or sent to a refused instance.
+  if (!rehearsalAllowed({ stateName: STATE_NAME, contractId: C.openWindow, publishedId: publishedContractId(), live: LIVE })) {
+    console.error(
+      "The rehearsal changes the instance it runs on (NAV, shares, pause, proposals), and this is the demo instance the web interface serves.\n" +
+        "Run it on a disposable instance: OPEN_WINDOW_STATE=<name> npm run setup -- --fresh, then OPEN_WINDOW_STATE=<name> npm run monitor -- --rehearse.\n" +
+        "To rehearse on the demo instance anyway, stop any `--watch --act` on it first and add --live.",
+    );
+    process.exit(1);
+  }
   const monitor = loadMonitor();
   const results = [];
   const pub = (role) => keypair(state, role).publicKey();

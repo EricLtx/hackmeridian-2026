@@ -231,7 +231,7 @@ async function stepReference(now) {
   } catch (error) {
     alarm(
       `The NAV left the corridor of a reference ${age(referenceAge)} old (${error.message}).`,
-      "re-anchor with two keys: `npm run monitor -- --rehearse --steps=12` proposes the current NAV and rate, then applies them after the delay",
+      "re-anchor with two keys: `npm run monitor -- --rehearse --live --steps=12` proposes the current NAV and rate, then applies them after the delay",
     );
   }
 }
