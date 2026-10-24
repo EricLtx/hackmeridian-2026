@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-10-24T07:51:36.429Z",
+  "generatedAt": "2026-10-24T09:31:06.272Z",
   "network": "testnet",
   "explorer": "https://stellar.expert/explorer/testnet",
   "contract": "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL",
   "journal": {
-    "lines": 200,
-    "lastHash": "a79e78a145d202babd3797a24d3ad76e4dd4d846c1ffa99f7ed17fcb82b877a2",
+    "lines": 207,
+    "lastHash": "76769f7ed051ff2b07c698a2d908aa3fe886ffe5633b076a91653720c8c8b389",
     "firstLedger": 5215393,
-    "lastLedger": 5359603,
+    "lastLedger": 5361016,
     "firstClosedAt": "2026-10-15T21:42:32Z",
-    "lastClosedAt": "2026-10-24T06:00:02Z",
+    "lastClosedAt": "2026-10-24T07:57:47Z",
     "gaps": []
   },
   "registry": [
@@ -88,14 +88,14 @@
       "rate_bps": "350",
       "opened_at": "2026-10-17T16:32:17Z",
       "maturity": "2026-10-17T17:32:17Z",
-      "status": "open",
-      "closure": "",
-      "closed_at": "",
+      "status": "seized",
+      "closure": "seized",
+      "closed_at": "2026-10-24T07:57:47Z",
       "interest": "",
-      "release_to": "",
+      "release_to": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
       "release_shares": "",
-      "last_tx": "cba1cd65c3264ef967ea7228a8ec2615edc2fe33bbbf49712c94d54f6ae88291",
-      "source": "repo_opened@53 stablecoin:offer_created currency:stablecoin_set"
+      "last_tx": "826bf74c1de9ed1c8af2e90f01cd79f3a072ba65845c9eb489dc80b1c373cd45",
+      "source": "repo_opened@53 repo_seized@207 stablecoin:offer_created currency:stablecoin_set"
     },
     {
       "repo_id": "5",
@@ -243,9 +243,144 @@
       "release_shares": "",
       "last_tx": "12b126819932506e1b38e30ef792974663757ae1334952b59938075781c0d849",
       "source": "repo_opened@181 repo_repurchased@184 release_deferred@185 shares_released@186 stablecoin:offer_created currency:stablecoin_set"
+    },
+    {
+      "repo_id": "12",
+      "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
+      "borrower": "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN",
+      "fund": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+      "shares": "100000000000",
+      "principal": "83530000000",
+      "stablecoin": "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX",
+      "currency": "EUR",
+      "rate_bps": "250",
+      "opened_at": "2026-10-24T07:57:17Z",
+      "maturity": "2026-10-27T07:57:17Z",
+      "status": "repurchased",
+      "closure": "repurchased",
+      "closed_at": "2026-10-24T07:57:42Z",
+      "interest": "238385",
+      "release_to": "",
+      "release_shares": "",
+      "last_tx": "61175a562f2b52c7b34a92bdf610b4a39263d6e45475295a930ba08dd5641b45",
+      "source": "repo_opened@201 repo_repurchased@206 stablecoin:offer_created currency:stablecoin_set"
     }
   ],
   "events": [
+    {
+      "seq": 207,
+      "ledger": 5361016,
+      "closedAt": "2026-10-24T07:57:47Z",
+      "txHash": "826bf74c1de9ed1c8af2e90f01cd79f3a072ba65845c9eb489dc80b1c373cd45",
+      "event": "repo_seized",
+      "topics": [
+        "4"
+      ],
+      "data": {
+        "shares": "10000000000",
+        "to": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R"
+      },
+      "hash": "76769f7ed051ff2b07c698a2d908aa3fe886ffe5633b076a91653720c8c8b389"
+    },
+    {
+      "seq": 206,
+      "ledger": 5361015,
+      "closedAt": "2026-10-24T07:57:42Z",
+      "txHash": "61175a562f2b52c7b34a92bdf610b4a39263d6e45475295a930ba08dd5641b45",
+      "event": "repo_repurchased",
+      "topics": [
+        "12"
+      ],
+      "data": {
+        "interest": "238385",
+        "principal": "83530000000"
+      },
+      "hash": "74a2307a68229ac57d76323836f2eb9cad0aeba2036770d7c0b3c1acaef8b78d"
+    },
+    {
+      "seq": 205,
+      "ledger": 5361014,
+      "closedAt": "2026-10-24T07:57:37Z",
+      "txHash": "9ccd75cd126cc7b0892cf45427733bec8ca6c30a56c196f8fab489a315d2e7d1",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GBBZYTS73THMJMQ3SCL32LG3B2C5EONPB7Y5GVWWN6WZA6Y7VLNAVR2R",
+        "paused": false
+      },
+      "hash": "4b9df8fcb811b859d53685cfea9fb8d1909b4a77c9983fc9990aead37585fe40"
+    },
+    {
+      "seq": 204,
+      "ledger": 5361013,
+      "closedAt": "2026-10-24T07:57:32Z",
+      "txHash": "878c654ad997c400a5436223f207b43bc192edf17ffa40d73aa2def47e3cead4",
+      "event": "pause_changed",
+      "topics": [],
+      "data": {
+        "by": "GCDFWLMZ3ONW7PB6CVFJLREQWYK5UXFBFBFGM2ROKJIBSVFWKKBIXEBB",
+        "paused": true
+      },
+      "hash": "3d05510b6ff89eed6346440087a1b90269be2e8f1f2dae1b1c6474aa2d0edaf8"
+    },
+    {
+      "seq": 203,
+      "ledger": 5361010,
+      "closedAt": "2026-10-24T07:57:17Z",
+      "txHash": "83499f841fe861d5bc2789ac1c688ab14fa42d2d61e95f53c10515b1a88a71d2",
+      "event": "reference_updated",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "nav": "108588978775318",
+        "timestamp": "1792828481"
+      },
+      "hash": "6bfce9eecd4793a6bb7e9d7c504025d6c0e6ed6710176513b7ab00f0ecfb359a"
+    },
+    {
+      "seq": 202,
+      "ledger": 5361010,
+      "closedAt": "2026-10-24T07:57:17Z",
+      "txHash": "83499f841fe861d5bc2789ac1c688ab14fa42d2d61e95f53c10515b1a88a71d2",
+      "event": "repo_valued",
+      "topics": [
+        "12",
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "fallback": false,
+        "fx": "111930000000000",
+        "fx_applied": "112320773140987",
+        "fx_time": "1792828500",
+        "haircut_bps": 400,
+        "nav": "108600168455098",
+        "nav_time": "1792828481",
+        "price": "96687518629150"
+      },
+      "hash": "48fc0d99cb0c42e7030d2fcb9618b33eb02624f987121a56fa470bf9f606c467"
+    },
+    {
+      "seq": 201,
+      "ledger": 5361010,
+      "closedAt": "2026-10-24T07:57:17Z",
+      "txHash": "83499f841fe861d5bc2789ac1c688ab14fa42d2d61e95f53c10515b1a88a71d2",
+      "event": "repo_opened",
+      "topics": [
+        "12",
+        "GAOLESTCJHYYSTQ5G3IM46B4KT33RM22JEQXVIF5KHZF5DTTOB3MYZNN"
+      ],
+      "data": {
+        "fund": "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB",
+        "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R",
+        "maturity": "1793087837",
+        "offer_id": "1",
+        "principal": "83530000000",
+        "rate_bps": 250,
+        "shares": "100000000000"
+      },
+      "hash": "c9584b542fe05377bd18334079fdcdd514f731b3ed12f5c56e0405f7b522d5a8"
+    },
     {
       "seq": 200,
       "ledger": 5359603,
@@ -3066,94 +3201,6 @@
         "oracle": "CBOVFFTT3CWDZAF5YKH3EBGQHFL6LRBO2UQITXOQF7TJXRF5KFB35EYG"
       },
       "hash": "58368d54ecc21c2e4fa2f51a48603945ef19dda3a4fdbe03262d36b036c7f8d8"
-    },
-    {
-      "seq": 7,
-      "ledger": 5215401,
-      "closedAt": "2026-10-15T21:43:12Z",
-      "txHash": "1d703b3b22bbd1d4db583857dacc6489781e65f3d71c1323690f11a56fa95ed8",
-      "event": "trustee_set",
-      "topics": [],
-      "data": {
-        "trustee": "GB2STFJTDYOFNBFC5EPS2DW7BCM4WYFIWBZY7QQDQAWMBWPWLXSREZRC"
-      },
-      "hash": "059690c16597abfff6c16667c0e50b94f1bd456c4d37e627e9c947e9b37ebd78"
-    },
-    {
-      "seq": 6,
-      "ledger": 5215398,
-      "closedAt": "2026-10-15T21:42:57Z",
-      "txHash": "4ff312224eec8e64d3303a5c762e928c0e745c36f863659929b385c723c2520e",
-      "event": "guardian_backup_set",
-      "topics": [],
-      "data": {
-        "backup": "GD5SGSPLPFQF54DLPJ7QGJRLK6O33GJDRG7PAWGNTHAKSVYEPQN7QPGE"
-      },
-      "hash": "e268b28102832a495aa4c5116bc9a5447ae8bbbce099e05cc51e1b10bcb51a18"
-    },
-    {
-      "seq": 5,
-      "ledger": 5215397,
-      "closedAt": "2026-10-15T21:42:52Z",
-      "txHash": "cd3d7fb4907eff54242682b1c44120a77ad70489f231c82bdef5372c58820ba8",
-      "event": "sole_lender_set",
-      "topics": [],
-      "data": {
-        "lender": "GCUGRDNQC6H57MYVVZJZKAV7VCCWWOTXEAYUOCI6EU7XVQSELO65642R"
-      },
-      "hash": "c83a3898e9dfb1bf847a04324f4bbb23f78ece4b6e257e682586b4c06e3add42"
-    },
-    {
-      "seq": 4,
-      "ledger": 5215396,
-      "closedAt": "2026-10-15T21:42:47Z",
-      "txHash": "c6f778e811adf29bbe7a731dedcdb73180c78780144fdc0b4a9ade19d7bdef21",
-      "event": "timelock_delay_changed",
-      "topics": [],
-      "data": {
-        "delay": "300"
-      },
-      "hash": "3fd99606d2c80dd5f284154c6977b658176b7291c0edbfe22007c40959461640"
-    },
-    {
-      "seq": 3,
-      "ledger": 5215395,
-      "closedAt": "2026-10-15T21:42:42Z",
-      "txHash": "539c7c867ae10e00cfd224ff8f9c401c715e28faaa3b4cc3a45cfdcdefe8c4ec",
-      "event": "currency_cap_set",
-      "topics": [
-        "EUR"
-      ],
-      "data": {
-        "cap": "10000000000000"
-      },
-      "hash": "dccfc89b50e2e4d9ba60d29a206f5b457818e63a003dfce259aa3eb61d009c31"
-    },
-    {
-      "seq": 2,
-      "ledger": 5215394,
-      "closedAt": "2026-10-15T21:42:37Z",
-      "txHash": "494772fa0a8848784e982d1aa3ff434c1fbc90eb58415071c5a2c29700445818",
-      "event": "stablecoin_set",
-      "topics": [
-        "CC7Z4ENDJV4PBCJMKAOEENJRRU6FFY3FS7W252MNJZ2SUW7ZEVAIP4QX"
-      ],
-      "data": {
-        "currency": "EUR"
-      },
-      "hash": "1ebbadfffe5458db9c7d3ff685eacf67980053a76840425ef215bdf3a3b5b3ea"
-    },
-    {
-      "seq": 1,
-      "ledger": 5215393,
-      "closedAt": "2026-10-15T21:42:32Z",
-      "txHash": "fe0114dbde584d370ff768098c65549b0b1a98b476a9c1ab6f6ef7cba864c2f4",
-      "event": "guardian_changed",
-      "topics": [],
-      "data": {
-        "guardian": "GCDFWLMZ3ONW7PB6CVFJLREQWYK5UXFBFBFGM2ROKJIBSVFWKKBIXEBB"
-      },
-      "hash": "afab46b94d76970cb64e1d865c5acdb5a4d4c4d32e4d7088cf5cbb1267e51d0b"
     }
   ]
 }
