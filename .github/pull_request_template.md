@@ -15,7 +15,7 @@
 
 Needed when any box above except "documentation only" is ticked. CI posts the same list for the areas it detects.
 
-- [ ] The review rules of [`docs/security.md` §7](../blob/main/docs/security.md#7-toolchain-and-review-process) were applied to every changed privileged function and stored value.
+- [ ] The review rules of [`docs/security.md` §7](https://github.com/EricLtx/hackmeridian-2026/blob/main/docs/security.md#7-toolchain-and-review-process) were applied to every changed privileged function and stored value.
 - [ ] No change under `contracts/` without a new tag and a new testnet rehearsal (`AGENTS.md`).
 - [ ] Values read from the chain are checked in `web/src/chain.js` before they reach the markup; the deployment file is checked in `web/src/deployment.js`.
 - [ ] The content security policy is the same on every page, and `connect-src` lists every RPC endpoint of the deployment file.

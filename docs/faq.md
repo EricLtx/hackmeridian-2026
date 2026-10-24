@@ -215,7 +215,7 @@ Host tests across the workspace, most of them for Open Window (the counts for th
 - an upgrade to the real compiled WASM, through the time delay;
 - issuer freezes, allowlist removal, clawback and asset-contract deauthorization during a repo.
 
-An integration module runs the full cycle with the real share token and NAV feed contracts of this repository. CI runs format, clippy with warnings as errors, the tests, the WASM build and a RustSec advisory check on every push; since rc5 also the whole contract suite against a WASM linked with an 8 KiB stack, the tooling's offline tests, and an advisory gate on the web's dependencies.
+An integration module runs the full cycle with the real share token and NAV feed contracts of this repository. CI runs format, clippy with warnings as errors, the tests, the WASM build and a RustSec advisory check on every push; since rc5 also the whole contract suite against a WASM linked with an 8 KiB stack, the tooling's offline tests, and an advisory gate on the web's dependencies; since 24 October 2026 a pull request runs only the jobs its files need, behind one `ci-ok` check, with a guard on the private folders and a review checklist on critical paths.
 
 ### How do I run it?
 
