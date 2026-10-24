@@ -63,13 +63,14 @@ export function changedPaths(baseSha, headSha, run = execFileSync) {
 
 /**
  * The outputs of the `changes` job for one event: the five areas and the
- * critical areas (critical.mjs), as `key=value` lines. The paths are read
- * only for a pull request or a push whose previous commit is known; anything
- * else runs every job and lists every critical area.
+ * critical areas (critical.mjs), as `key=value` lines. Only a pull request
+ * is routed; a push to main or a manual run runs every job. The critical
+ * areas come from the diff whenever it can be read (a push's too, for the
+ * checklist in the job summary), and are all on when it cannot.
  */
 export function outputs({ eventName, baseSha, headSha, paths = changedPaths }) {
   const known = (eventName === "pull_request" || eventName === "push") ? paths(baseSha, headSha) : null;
-  const areas = classify(known);
+  const areas = eventName === "pull_request" ? classify(known) : classify(null);
   const critical = known ? criticalAreas(known) : criticalAreas(null);
   const lines = AREAS.map((a) => `${a}=${areas[a]}`);
   lines.push(`critical=${JSON.stringify(critical)}`);

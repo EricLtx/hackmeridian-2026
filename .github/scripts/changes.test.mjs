@@ -65,8 +65,9 @@ test("the outputs: six keys, the areas of the diff on a pull request, everything
   const sha = (c) => c.repeat(40);
   const docs = outputs({ eventName: "pull_request", baseSha: sha("a"), headSha: sha("b"), paths: () => ["docs/roadmap.md"] });
   assert.deepEqual(docs, ["rust=false", "web=false", "tooling=false", "docs=true", "ci=false", "critical=[]"]);
+  // A push to main runs everything; its diff still names the critical areas for the checklist.
   const csp = outputs({ eventName: "push", baseSha: sha("a"), headSha: sha("b"), paths: () => ["web/index.html"] });
-  assert.deepEqual(csp, ["rust=false", "web=true", "tooling=false", "docs=false", "ci=false", 'critical=["csp"]']);
+  assert.deepEqual(csp, ["rust=true", "web=true", "tooling=true", "docs=true", "ci=true", 'critical=["csp"]']);
   const dispatch = outputs({ eventName: "workflow_dispatch", baseSha: "", headSha: "", paths: () => { throw new Error("never read"); } });
   assert.equal(dispatch.length, 6);
   assert.deepEqual(dispatch.slice(0, 5), AREAS.map((a) => `${a}=true`));
