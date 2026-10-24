@@ -2972,9 +2972,129 @@ body.face-stage {
   z-index: 0;
 }
 
-.tour-k-title > :not(.tour-earth) {
+/* Text and controls sit above the earth and the planets, never behind them. */
+.tour-scene > :not(.tour-earth, .tour-planet) {
   position: relative;
   z-index: 1;
+}
+
+/*
+ * A planet beside the text: a circle that clips a strip of two copies of an
+ * equirectangular texture (Solar System Scope, CC BY 4.0). The strip slides
+ * by one texture width per turn, so the loop is seamless; the ::after
+ * overlay draws the night side on the limb nearest the text, a scrim that
+ * keeps the text's contrast should a long translation reach it. On the
+ * 1280 px canvas the planets start at or beyond x = 850, past every text
+ * block (titles 22ch, bodies 48ch, the safeguards panel 46ch, points 760px).
+ */
+.tour-planet {
+  --planet-d: 440px;
+  --planet-spin: 100s;
+  position: absolute;
+  top: 50%;
+  right: -60px;
+  z-index: 0;
+  width: var(--planet-d);
+  height: var(--planet-d);
+  margin-top: calc(var(--planet-d) / -2);
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--surface-2);
+  pointer-events: none;
+}
+
+.tour-planet::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* Opaque at the limb, then fading: a gradient made only of translucent stops does not paint over the composited strip in Chrome. */
+  background: linear-gradient(100deg, var(--bg) 0%, var(--bg) 16%, rgb(22 22 22 / 0%) 60%);
+  box-shadow: inset -10px 6px 34px rgb(255 255 255 / 8%);
+}
+
+.tour-planet-strip {
+  display: flex;
+  width: 400%; /* two 2:1 textures, each twice the diameter wide */
+  height: 100%;
+  transform: translate3d(0, 0, 0);
+}
+
+.tour-planet-strip img {
+  display: block;
+  width: 50%;
+  height: 100%;
+}
+
+.tour-planet-moon {
+  --planet-d: 400px;
+  --planet-spin: 120s;
+  right: -20px;
+}
+
+.tour-planet-mars {
+  --planet-d: 460px;
+  --planet-spin: 100s;
+}
+
+.tour-planet-jupiter {
+  --planet-d: 560px;
+  --planet-spin: 70s;
+  top: 64%;
+  right: -260px;
+}
+
+.tour-planet-saturn {
+  --planet-d: 520px;
+  --planet-spin: 80s;
+  right: -140px;
+  top: 42%;
+}
+
+.tour-points {
+  max-width: 760px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* The star field drifts over four minutes; a size above 100 % keeps its edges off screen. */
+  .tour-sky {
+    inset: -3% auto auto -3%;
+    width: 106%;
+    height: 106%;
+    animation: ow-sky-drift 240s ease-in-out infinite alternate;
+  }
+
+  /* One turn per --planet-spin (70 to 120 s): only the transform changes. */
+  .tour-planet-strip {
+    animation: ow-planet-spin var(--planet-spin) linear infinite;
+  }
+
+  /* On a scene change the planet arrives a little behind the text: a parallax between the two layers. */
+  .reveal .slides section.tour-scene .tour-planet {
+    transition: transform 1600ms var(--ease-out), opacity 900ms var(--ease);
+  }
+
+  .reveal .slides section.tour-scene.future .tour-planet {
+    transform: translate3d(90px, 0, 0);
+    opacity: 0;
+  }
+
+  .reveal .slides section.tour-scene.past .tour-planet {
+    transform: translate3d(-90px, 0, 0);
+    opacity: 0;
+  }
+}
+
+@keyframes ow-sky-drift {
+  to {
+    transform: translate3d(-2.5%, -1.5%, 0);
+  }
+}
+
+@keyframes ow-planet-spin {
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
 }
 
 .tour-k-title .tour-body {
@@ -3133,12 +3253,47 @@ body.face-stage {
   font-size: var(--fs-stage-body);
 }
 
+/* The three parties a visitor may be get a second column: is it for you? */
+.roles-detail.has-fit {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-6);
+  max-width: none;
+}
+
 .roles-detail h3 {
   margin: 0 0 var(--space-3);
 }
 
 .roles-detail p {
   margin: var(--space-2) 0;
+}
+
+.roles-fit {
+  padding-left: var(--space-6);
+  border-left: 1px solid var(--border);
+  font-size: var(--fs-md);
+}
+
+.roles-fit h4 {
+  margin: 0 0 var(--space-3);
+  color: var(--accent);
+  font-size: var(--fs-md);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.roles-fit ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-5);
+  line-height: 1.4;
+}
+
+.roles-fit .roles-no {
+  color: var(--muted);
+  line-height: 1.4;
 }
 
 .journey {
@@ -3256,7 +3411,7 @@ body.face-stage {
 }
 
 .tour-panel {
-  max-width: 60ch;
+  max-width: 46ch; /* stays clear of the planet beside it */
   margin-top: var(--space-5);
   font-size: var(--fs-stage-lead);
   line-height: 1.4;
@@ -3369,9 +3524,34 @@ body.tour-presenter {
   .week-hours span {
     transition: none;
   }
+
+  /* The sky stands still, the planets do not turn and do not slide in: nothing on the stage moves. */
+  .tour-sky,
+  .tour-planet,
+  .tour-planet-strip {
+    animation: none;
+    transition: none;
+    transform: none;
+  }
 }
 
 @media (max-width: 760px) {
+  /* The portrait canvas is all text: the planets would sit under it. */
+  .tour-planet {
+    display: none;
+  }
+
+  .roles-detail.has-fit {
+    grid-template-columns: 1fr;
+  }
+
+  .roles-fit {
+    padding-left: 0;
+    border-left: 0;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border);
+  }
+
   .tour-bar {
     flex-wrap: wrap;
     gap: var(--space-2);

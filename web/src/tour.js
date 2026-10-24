@@ -24,6 +24,7 @@ import {
   COMPARE,
   COST_PRESETS,
   EXAMPLE_RATE_BPS,
+  PLANETS,
   ROLES,
   SCENES,
   WEEK_DAYS,
@@ -98,12 +99,22 @@ function rolesHtml() {
   const chips = ROLES.map(
     (r) => `<button type="button" class="chip" data-action="role" data-role="${r.id}" aria-pressed="${r.id === role.id}">${esc(t(r.name))}</button>`,
   ).join("");
+  // The "is it for you?" moment of the three parties: the questions to ask oneself, and the honest answer when it is not a fit.
+  const fit = role.fit
+    ? `<div class="roles-fit">
+        <h4>${esc(t("Is it for you?"))}</h4>
+        <ul>${role.fit.questions.map((q) => `<li>${esc(t(q))}</li>`).join("")}</ul>
+        <p class="roles-no"><span class="pill pill-warn">${esc(t("If not"))}</span> ${esc(t(role.fit.no))}</p>
+      </div>`
+    : "";
   return `
     <div class="roles-chips" role="group" aria-label="${esc(t("Roles"))}">${chips}</div>
-    <div class="roles-detail" aria-live="polite">
-      <h3>${esc(t(role.name))}</h3>
-      <p class="roles-can"><span class="pill pill-ok">${esc(t("Can"))}</span> ${esc(t(role.can))}</p>
-      <p class="roles-never"><span class="pill pill-danger">${esc(t("Never"))}</span> ${esc(t(role.never))}</p>
+    <div class="roles-detail${role.fit ? " has-fit" : ""}" aria-live="polite">
+      <div class="roles-powers">
+        <h3>${esc(t(role.name))}</h3>
+        <p class="roles-can"><span class="pill pill-ok">${esc(t("Can"))}</span> ${esc(t(role.can))}</p>
+        <p class="roles-never"><span class="pill pill-danger">${esc(t("Never"))}</span> ${esc(t(role.never))}</p>
+      </div>${fit}
     </div>`;
 }
 
@@ -222,14 +233,29 @@ function roadmapHtml(scene) {
     .join("")}</ol>`;
 }
 
+const credit = () => `<p class="tour-credit">${esc(t("Images: NASA; planet textures: Solar System Scope, CC BY 4.0"))}</p>`;
+
 function ctaHtml(scene) {
   return `<div class="tour-doors">${scene.doors
     .map(([label, href], i) => `<a class="btn ${i === 0 ? "btn-primary" : "btn-ghost"} btn-lg" href="${href}">${esc(t(label))}</a>`)
-    .join("")}</div><p class="tour-credit">${esc(t("Images: NASA"))}</p>`;
+    .join("")}</div>${credit()}`;
+}
+
+/**
+ * A planet beside a scene's text: a circle that clips a strip of two copies
+ * of an equirectangular texture (one request, cached), which the stylesheet
+ * slides slowly when motion is allowed. Decorative, so hidden from assistive
+ * technology; lazy-loaded, with its size declared, so the first scene paints
+ * without waiting for it.
+ */
+function planetHtml(scene) {
+  if (!PLANETS.includes(scene.planet)) return "";
+  const img = `<img src="./tour/${scene.planet}.webp" alt="" width="2048" height="1024" loading="lazy" decoding="async" />`;
+  return `<div class="tour-planet tour-planet-${scene.planet}" aria-hidden="true"><div class="tour-planet-strip">${img}${img}</div></div>`;
 }
 
 const CONTENT = {
-  title: () => `<img class="tour-earth" src="./tour/earth.webp" alt="" width="1280" height="720" decoding="async" /><div class="tour-actions"><button type="button" class="btn btn-primary btn-lg" data-action="start">${esc(t("Start the tour"))}</button><button type="button" class="btn btn-ghost btn-lg" data-action="autoplay">${esc(t("Let it present itself"))}</button></div><p class="tour-credit">${esc(t("Images: NASA"))}</p>`,
+  title: () => `<img class="tour-earth" src="./tour/earth.webp" alt="" width="1280" height="720" decoding="async" /><div class="tour-actions"><button type="button" class="btn btn-primary btn-lg" data-action="start">${esc(t("Start the tour"))}</button><button type="button" class="btn btn-ghost btn-lg" data-action="autoplay">${esc(t("Let it present itself"))}</button></div>${credit()}`,
   hook: (s) => fragments(s.points),
   context: () => `<div id="tour-week">${weekHtml()}</div>`,
   problem: (s) => fragments(s.points),
@@ -246,7 +272,7 @@ const CONTENT = {
 
 function sceneHtml(scene, i) {
   return `<section class="tour-scene tour-k-${scene.kind}" data-scene="${scene.id}" aria-labelledby="scene-${i}-title">
-    ${head(scene, i)}${body(scene)}${CONTENT[scene.kind](scene)}
+    ${planetHtml(scene)}${head(scene, i)}${body(scene)}${CONTENT[scene.kind](scene)}
   </section>`;
 }
 

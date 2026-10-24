@@ -19,6 +19,10 @@ and the "Hipparcos Star Map". They are used under NASA's media usage
 guidelines (https://www.nasa.gov/nasa-brand-center/images-and-media); their
 use implies no endorsement by NASA.
 
+Planet textures by Solar System Scope (https://www.solarsystemscope.com/textures/),
+licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/); converted
+to WebP (web/public/tour/moon.webp, mars.webp, jupiter.webp, saturn.webp).
+
 The guided tour (web/tour.html) is built on reveal.js 6.0.2, Copyright
 Hakim El Hattab and reveal.js contributors, licensed under the MIT License
 (https://github.com/hakimel/reveal.js).

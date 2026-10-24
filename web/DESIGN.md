@@ -4,7 +4,7 @@ What the interface is made of, visually: the tokens, the components, the rules t
 
 ## Principles
 
-Calm, legible, finance-grade. Clean surfaces and one accent (SDS lilac); a lilac-to-navy gradient used sparingly; Inter for text and Inconsolata for figures and identifiers. Motion is short and eased, and stops when the system asks for reduced motion. Two faces of one state: the **guided view** follows the system theme (light or dark); the **terminal view** is a dark market screen whatever the theme, with amber commands, a green GO key and a red CANCEL key, as on a market terminal. The **guided tour** (`tour.html`) is a dark stage (`body.face-stage`) on the dark steps of the guided view, for meeting-room screens.
+Calm, legible, finance-grade. Clean surfaces and one accent (SDS lilac); a lilac-to-navy gradient used sparingly; Inter for text and Inconsolata for figures and identifiers. Motion is short and eased, and stops when the system asks for reduced motion. Two faces of one state: the **guided view** follows the system theme (light or dark); the **terminal view** is a dark market screen whatever the theme, with amber commands, a green GO key and a red CANCEL key, as on a market terminal. The **guided tour** (`tour.html`) is a dark stage (`body.face-stage`) on the dark steps of the guided view, for meeting-room screens; its planets (`.tour-planet`, sized and timed by the component-scoped `--planet-d` and `--planet-spin`, which are not design tokens) sit beside the text and turn only under `prefers-reduced-motion: no-preference`.
 
 ## Tokens
 
