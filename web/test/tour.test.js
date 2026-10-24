@@ -56,11 +56,11 @@ test("the three parties a visitor may be get an 'is it for you?' moment, with th
   for (const id of ["governor", "guardian", "sentinel", "trustee"]) assert.equal(ROLES.find((x) => x.id === id).fit, undefined);
 });
 
-/** Every text a visitor reads on the scenes (not the speaker notes). */
+/** Every text a visitor reads on the scenes, and the speaker notes, which follow the same rules. */
 function visibleTexts() {
   const out = [];
   for (const s of SCENES) {
-    out.push(s.kicker, s.title, s.body ?? "", ...(s.points ?? []));
+    out.push(s.kicker, s.title, s.body ?? "", ...(s.points ?? []), ...Object.values(s.notes));
     for (const pair of [...(s.steps ?? []), ...(s.tabs ?? []), ...(s.faq ?? []), ...(s.phases ?? [])]) out.push(...pair);
     for (const [label] of s.doors ?? []) out.push(label);
   }
@@ -80,13 +80,13 @@ test("counselling tone: no marketing superlative and no business figure on the s
 
 test("the approach is stated before anything is read live: repo not pool, fixed terms, exits open, what is not claimed", () => {
   const index = (kind) => SCENES.findIndex((s) => s.kind === kind);
-  const textOf = (kind) => visibleTexts().join(" ") && [SCENES[index(kind)]].flatMap((s) => [s.title, s.body ?? "", ...(s.tabs ?? []).flat(), ...(s.faq ?? []).flat()]).join(" ");
+  const textOf = (kind) => [SCENES[index(kind)]].flatMap((s) => [s.title, s.body ?? "", ...(s.tabs ?? []).flat(), ...(s.faq ?? []).flat()]).join(" ");
   assert.ok(index("insight") < index("journey") && index("roles") < index("cost") && index("cost") < index("live"));
   assert.match(textOf("insight"), /repo, not a pool/i);
   assert.match(textOf("insight"), /fixed term, fixed rate/i);
   assert.match(textOf("insight"), /no liquidation, no margin call/i);
-  assert.match(textOf("safety"), /no pause and no upgrade blocks an exit/i);
-  assert.match(textOf("safety"), /guardian or the trustee can veto/i);
+  assert.match(textOf("safety"), /no pause, no proposal and no upgrade blocks an exit/i);
+  assert.match(textOf("safety"), /guardian can veto it; a trustee, when the instance has one/i);
   assert.match(textOf("questions"), /testnet/i);
   assert.match(textOf("questions"), /nothing promises liquidity/i);
   assert.match(textOf("questions"), /third party/i);
@@ -111,7 +111,7 @@ test("the planets name bundled textures, on scenes after the first, and move onl
     assert.ok(uses[0] > allowed && uses[0] < end, `${name} runs only when motion is allowed`);
   }
   const reduce = css.slice(css.lastIndexOf("@media (prefers-reduced-motion: reduce)"));
-  assert.match(reduce, /\.tour-planet-strip\s*\{[^}]*animation: none/);
+  assert.match(reduce, /\.tour-sky,\s*\.tour-planet,\s*\.tour-planet-strip\s*\{[^}]*animation: none;[^}]*transition: none;[^}]*transform: none/);
 });
 
 test("the week view: 40 open hours in business hours, all 168 with Open Window", () => {

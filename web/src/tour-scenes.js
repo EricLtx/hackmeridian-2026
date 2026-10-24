@@ -25,7 +25,7 @@ export const SCENES = [
     body: tk("Stablecoins against fund shares, for a fixed term at a fixed rate. This tour explains the approach before you touch anything."),
     notes: notes(
       tk("What Open Window is, and what this tour is for."),
-      tk("Open Window lends stablecoins against tokenized fund shares, as a repo: a fixed term, a fixed rate, and a contract that holds the shares. The tour explains the approach first, then shows the testnet instance."),
+      tk("Open Window lends stablecoins against tokenized fund shares, as a repo: a fixed term, a fixed rate, and a contract that holds the shares. The tour explains the approach, then shows the testnet instance."),
       tk("Nothing here executes: the tour only reads. Testnet only, no real value."),
       tk("Is this a real product or a mock-up?"),
       tk("A testnet instance with a public history; scene 9 reads it live. Nothing on it has real value."),
@@ -84,13 +84,13 @@ export const SCENES = [
     kind: "insight",
     kicker: tk("The approach"),
     title: tk("A repo, not a pool"),
-    body: tk("You sell the shares to the contract and buy them back later. Fixed term, fixed rate. No liquidation, no margin call. The shares' yield stays yours."),
+    body: tk("You lock the shares in the contract and get them back when you repay. Fixed term, fixed rate. No liquidation, no margin call. The shares' yield stays yours."),
     notes: notes(
       tk("A known transaction, with its terms fixed when you sign."),
-      tk("A repo is a sale with a promise to buy back. Compare the two columns: a lending pool on one side, this repo on the other. The rate and the term do not move while the loan is open."),
+      tk("A repo locks the shares for a fixed term against cash, and returns them on repayment. Compare the two columns: a lending pool on one side, this repo on the other. The rate and the term do not move while the loan is open."),
       tk("Say what happens if you do not buy back: at maturity the lender receives the shares and redeems them at the fund's window. Nothing happens before that, whatever the price does."),
-      tk("Why a repo and not a loan?"),
-      tk("The lender holds the shares, not a claim on them; the shares come back to you with the yield they earned meanwhile."),
+      tk("Why a fixed term?"),
+      tk("The contract holds the shares until you buy back or until maturity; they come back to you with the yield they earned meanwhile."),
       tk("Who takes part, and is it for you?"),
     ),
   },
@@ -140,7 +140,7 @@ export const SCENES = [
       tk("Move the duration from one night to a weekend: the interest follows the hours used, nothing more."),
       tk("The rate comes from the lowest live offer when the chain answers; otherwise the example rate is labelled as such. Quote no other figure."),
       tk("Are there hidden fees?"),
-      tk("The contract takes no fee of its own; the network fee is far below one unit."),
+      tk("The contract takes no fee of its own; the network fee is small and paid in XLM."),
       tk("What runs today?"),
     ),
   },
@@ -155,7 +155,7 @@ export const SCENES = [
       tk("These values are read from the chain as you watch: the admitted funds, the age of their price, the offers, the repos on record."),
       tk("A stale price is shown as stale, and an unreadable chain says so: the page never hides what the chain says. Testnet tokens have no value."),
       tk("Can I see the history?"),
-      tk("Every event since the first deployment is on the History page, under a hash chain anyone can recompute."),
+      tk("Every event since the deployment of the instance is on the History page, under a hash chain anyone can recompute."),
       tk("What happens when something goes wrong?"),
     ),
   },
@@ -166,17 +166,17 @@ export const SCENES = [
     kicker: tk("The safeguards"),
     title: tk("Exits stay open; changes wait"),
     tabs: [
-      [tk("Price"), tk("Every loan checks the fund's price against a corridor and a backup feed. A wrong price stops new loans; buying back stays open.")],
-      [tk("Time delay"), tk("Every upgrade, feed change and loosening waits a public delay. The guardian or the trustee can veto it. Tightening is immediate.")],
-      [tk("Exits"), tk("No pause and no upgrade blocks an exit: buying back, withdrawing an offer and seizing at maturity always work.")],
+      [tk("Price"), tk("Every loan checks the fund's price against a corridor and, when one is set, a backup feed. A wrong price stops new loans; buying back stays open.")],
+      [tk("Time delay"), tk("Every upgrade, feed change and loosening waits a public delay. The guardian can veto it; a trustee, when the instance has one, can veto upgrades, governor handovers and forced guardian changes. Tightening is immediate.")],
+      [tk("Exits"), tk("No pause, no proposal and no upgrade blocks an exit: buying back, withdrawing an offer and seizing at maturity stay open. Only a token's own issuer freezing that token can delay a leg.")],
       [tk("Rehearsed"), tk("Incident drills were replayed on testnet against the running code: a wrong price, an unannounced upgrade, an issuer freeze. The History page keeps the trail.")],
     ],
     notes: notes(
-      tk("Failure is planned for, rehearsed and bounded; exits never depend on anyone's goodwill."),
+      tk("Failure is planned for, rehearsed and bounded; exits do not depend on a pause, a proposal or an upgrade, and only a token issuer's freeze can delay a leg."),
       tk("Open each tab: price checks, the delay and the veto on every change, exits that no pause or upgrade can block, and the drills rehearsed on testnet."),
       tk("Say plainly what has not been done: no outside audit yet."),
-      tk("Has it been audited?"),
-      tk("Not by a third party. Internal reviews only, with every finding fixed and tested; the outside audit comes before any real asset."),
+      tk("Has an outside party reviewed it?"),
+      tk("Not yet. Internal passes only: every finding is fixed or recorded, two stay open and are published in the FAQ; the outside audit comes before any real asset."),
       tk("Here are the questions you should ask."),
     ),
   },
@@ -190,7 +190,7 @@ export const SCENES = [
       [tk("Has the code been reviewed by a third party?"), tk("Not yet. Treat it as unreviewed by anyone outside the project. The audit package is ready; the audit comes before any real asset.")],
       [tk("Will there be cash when I need it?"), tk("Only if a lender has an offer with funds left at that moment. Nothing promises liquidity; the live scene shows the offers of the moment.")],
       [tk("Can the rules change on my open loan?"), tk("No. Its rate, term, amount and shares are stored when it opens. Other changes wait a public delay, can be vetoed, and are visible to all.")],
-      [tk("What if the price feed is wrong?"), tk("A corridor bounds how fast the price may move, and a backup feed must agree. Otherwise new loans stop, and buying back stays open.")],
+      [tk("What if the price feed is wrong?"), tk("A corridor bounds how fast the price may move, and a backup feed, when one is set, must agree. Otherwise new loans stop, and buying back stays open.")],
       [tk("Is it regulated?"), tk("Open Window is software. The lender is meant to be a regulated institution on its own instance; the legal form of the transaction is being qualified.")],
     ],
     notes: notes(
@@ -296,7 +296,7 @@ export const ROLES = [
     id: "steward",
     name: tk("Fund issuer"),
     can: tk("Through its steward key: admits its fund with the governor, keeps the allowlist, the price feed and the freeze, and approves the lenders."),
-    never: tk("Never lends against its own fund, and never pays anyone."),
+    never: tk("Never lends against its own fund, and never carries the credit."),
     fit: {
       questions: [
         tk("Do your shares exist as tokens, with an allowlist you control?"),
@@ -310,7 +310,7 @@ export const ROLES = [
     id: "governor",
     name: tk("Governor"),
     can: tk("Proposes upgrades and changes of settings."),
-    never: tk("Can never apply a change at once: each one waits a public delay."),
+    never: tk("Can never loosen a setting or upgrade at once: each waits a public delay. Tightening and unpausing are immediate."),
   },
   {
     id: "guardian",
@@ -328,14 +328,14 @@ export const ROLES = [
     id: "trustee",
     name: tk("Trustee"),
     can: tk("Optional: its signature is needed for every upgrade and for a forced change of guardian, and it can veto both."),
-    never: tk("Holds no other power over the instance."),
+    never: tk("Holds no other role."),
   },
 ];
 
 /** The two columns of scene 5: a lending pool, and this repo. */
 export const COMPARE = {
   before: { title: tk("A lending pool"), items: [tk("A floating rate that moves with use"), tk("A liquidation when the price falls"), tk("Many lenders, one shared balance")] },
-  after: { title: tk("Open Window, a repo"), items: [tk("A fixed rate and a fixed term"), tk("No liquidation before the term"), tk("One lender, one contract, your own shares back")] },
+  after: { title: tk("Open Window, a repo"), items: [tk("A fixed rate and a fixed term"), tk("No liquidation before the term"), tk("A fixed lender per offer, one contract, your shares back to you")] },
 };
 
 /** The week of scene 3: hours when credit against fund shares is open, in each view. */
