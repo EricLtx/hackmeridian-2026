@@ -10,6 +10,8 @@ The interface reads the deployment from `public/deployment.testnet.json` at runt
 
 `history.html` is the History page: every repo (lender of record, borrower, fund, shares, principal, rate, dates, state) and the latest events with a link to each transaction, read from `public/history.json`. That file is written by the indexer (`cd indexer && npm run export -- --json --web`) and committed, so that the published site serves it; refresh and commit it when the journal moves. Without it the page says so. The market page fetches it at start, on `REF` and when the page becomes visible again, revalidated with the host (`no-cache`), not on every refresh; the History page links only to an https explorer and bounds the decimals it reads (`src/journal.js`).
 
+A panel that has not yet been answered says it is reading, in a muted line distinct from the empty state it shows once the chain has answered with nothing (the terminal's tape, book, positions and funds); the registry of the History page shows its dates short (`21 Oct, 23:01 UTC`, the full time as the title and the ISO value in the `<time>` element), and an offer's available amount reads in whole units once it reaches 1,000, the exact amount staying in the title and on the ticket.
+
 The interface is published on GitHub Pages at https://ericltx.github.io/hackmeridian-2026/ by `.github/workflows/pages.yml`, on every push that touches `web/`: the workflow runs the tests, builds, and deploys `dist/`. The relative base of the build lets the same files work at that path, on any static host, or from `npm run preview` locally.
 
 ## Terminal view

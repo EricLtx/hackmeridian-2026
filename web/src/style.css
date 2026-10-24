@@ -1088,6 +1088,10 @@ input[aria-invalid="true"] {
   text-align: right;
 }
 
+.table .date {
+  white-space: nowrap;
+}
+
 .table tr:last-child td {
   border-bottom: 0;
 }
@@ -2612,6 +2616,14 @@ body.face-terminal .top.is-scrolled {
   margin: 0;
   padding: 12px;
   color: var(--muted);
+}
+
+/* A panel not yet answered: the same quiet line, so that a reader never takes an unread panel for an empty one. */
+.t-loading {
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  font-style: italic;
 }
 
 /* Ticket */

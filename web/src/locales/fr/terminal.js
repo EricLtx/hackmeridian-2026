@@ -83,6 +83,7 @@ export default {
   "USED": "UTILISÉ",
   "Live events unavailable: {error}": "Événements en direct indisponibles : {error}",
   "No event yet in the window the RPC keeps.": "Aucun événement pour l'instant dans la fenêtre que conserve le RPC.",
+  "Reading the latest events…": "Lecture des derniers événements…",
   "Contract events, newest first": "Événements du contrat, les plus récents d'abord",
   "WALLET": "PORTEF.",
   "wallet\u0004none": "aucun",

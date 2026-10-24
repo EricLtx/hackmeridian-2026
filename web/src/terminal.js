@@ -27,7 +27,7 @@ import {
   withdrawTicket,
 } from "./blotter.js";
 import { describeError } from "./errors.js";
-import { UNSHOWABLE, formatAmount, formatRate, formatUnits, shortAddress } from "./format.js";
+import { UNSHOWABLE, formatAmount, formatRate, formatUnits, offerAmount, shortAddress } from "./format.js";
 import { LANG_NAMES, lang, numberStyle, setLang, t, tc, tk, tn } from "./i18n.js";
 import { HOUR, nextInterestStep } from "./terms.js";
 import { closingLine } from "./timeline.js";
@@ -57,7 +57,7 @@ export function createTerminal(ctx) {
     pending: null,
     schema: null,
     market: { repos: new Map(), next: 1, unreadable: new Set(), dues: new Map(), releases: new Map(), toCheck: new Set(), loaded: false },
-    tape: { events: [], nextLedger: null, error: null },
+    tape: { events: [], nextLedger: null, error: null, loaded: false },
     scope: "auto",
     ticket: null,
     quote: null,
@@ -227,6 +227,8 @@ export function createTerminal(ctx) {
       T.tape.events = mergeEvents([S.history?.events ?? [], T.tape.events], 300);
       T.tape.error = describeError(error).text;
     }
+    // Answered, well or not: an empty tape is now an empty one, not an unread one.
+    T.tape.loaded = true;
   }
 
   async function refreshPending() {
@@ -387,7 +389,7 @@ export function createTerminal(ctx) {
     const known = bookKnown();
     $("t-book-meta").textContent = known ? tn("{n} offer with funds · best rate first", "{n} offers with funds · best rate first", rows.length) : t("reading the chain");
     if (!rows.length) {
-      setHTML($("t-book"), `<p class="t-empty">${esc(known ? t("No offer has money available.") : t("Reading the offer book…"))}</p>`);
+      setHTML($("t-book"), known ? `<p class="t-empty">${esc(t("No offer has money available."))}</p>` : `<p class="t-loading">${esc(t("Reading the offer book…"))}</p>`);
       return;
     }
     const body = rows
@@ -402,7 +404,7 @@ export function createTerminal(ctx) {
         return `<tr>
           <td>${fill ? `<button type="button" class="t-pick" data-fill="${esc(fill)}" title="${esc(fill.trim())}">#${r.id}</button>` : `#${r.id}`}</td>
           <td class="n${r.id === best ? " t-ok" : ""}">${esc(formatRate(r.rateBps))}</td>
-          <td class="n" data-k="offer:${r.id}">${esc(formatAmount(r.available, sd(), "floor"))}${coin === code() ? "" : ` <span class="t-dim">${esc(coin)}</span>`}</td>
+          <td class="n" data-k="offer:${r.id}" title="${esc(`${offerAmount(r.available, sd()).full} ${coin}`)}">${esc(offerAmount(r.available, sd()).text)}${coin === code() ? "" : ` <span class="t-dim">${esc(coin)}</span>`}</td>
           <td class="n">${Math.floor(r.termSecs / HOUR)}h</td>
           <td>${esc(r.funds.join(" "))}</td>
           <td>${flags}</td>
@@ -476,7 +478,7 @@ export function createTerminal(ctx) {
       unreadable ? ` · ${tn("{n} repo could not be read", "{n} repos could not be read", unreadable)}` : ""
     }`;
     if (!T.market.loaded) {
-      setHTML($("t-pos"), `<p class="t-empty">${esc(t("Reading the repos…"))}</p>`);
+      setHTML($("t-pos"), `<p class="t-loading">${esc(t("Reading the repos…"))}</p>`);
       return;
     }
     if (!rows.length) {
@@ -522,7 +524,7 @@ export function createTerminal(ctx) {
     const rows = fundRows(S.board?.funds ?? [], { feeds: feedsWithBoard(), now: now(), iface: iface() });
     $("t-funds-meta").textContent = t("{n} admitted · ◆ this screen's fund", { n: rows.length });
     if (!rows.length) {
-      setHTML($("t-funds"), `<p class="t-empty">${esc(t("Reading the funds…"))}</p>`);
+      setHTML($("t-funds"), `<p class="t-loading">${esc(t("Reading the funds…"))}</p>`);
       return;
     }
     const stateTone = { OPEN: "ok", FROZEN: "warn", STALE: "bad", "FX STALE": "bad" };
@@ -588,7 +590,9 @@ export function createTerminal(ctx) {
     $("t-tape-meta").textContent = tn("{n} event · newest first", "{n} events · newest first", T.tape.events.length);
     const warn = T.tape.error ? `<p class="t-empty t-warn">${esc(t("Live events unavailable: {error}", { error: T.tape.error }))}</p>` : "";
     if (!events.length) {
-      setHTML($("t-tape"), `${warn}<p class="t-empty">${esc(t("No event yet in the window the RPC keeps."))}</p>`);
+      // Before the first answer the tape is unread, not empty: the panel is aria-live, so the two read differently.
+      const line = T.tape.loaded ? `<p class="t-empty">${esc(t("No event yet in the window the RPC keeps."))}</p>` : `<p class="t-loading">${esc(t("Reading the latest events…"))}</p>`;
+      setHTML($("t-tape"), `${warn}${line}`);
       return;
     }
     const fresh = T.tapeSeen ? events.filter((e) => !T.tapeSeen.has(eventKey(e))).map(eventKey) : [];

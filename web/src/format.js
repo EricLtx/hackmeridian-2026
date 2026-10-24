@@ -91,6 +91,22 @@ export function formatUnits(units, decimals, { digits = decimals, rounding = "ro
 export const formatAmount = (units, decimals = 7, rounding = "round") => formatUnits(units, decimals, { digits: 2, rounding });
 
 /**
+ * An offer's available amount for a list: `text` drops the fraction once
+ * the offer holds 1,000 whole units or more (a book reads "300,000", not
+ * "300,000.04"), floored, else the usual two decimals; `full` is the exact
+ * amount, trailing zeros dropped past two decimals, for a title or a
+ * ticket. Display only: arithmetic keeps the units.
+ */
+export function offerAmount(units, decimals) {
+  const d = places(decimals, "decimals");
+  const value = BigInt(units);
+  const large = value / 10n ** BigInt(d) >= 1000n;
+  const text = large ? formatUnits(value, d, { digits: 0, rounding: "floor" }) : formatAmount(value, d, "floor");
+  const exact = formatUnits(value, d);
+  return { text, full: d > 2 ? exact.replace(/(\d\d\d*?)0+$/, "$1") : exact };
+}
+
+/**
  * An integer from untrusted data (an exported journal, a decoded event)
  * formatted by `format`, or a dash when it is empty, not an integer, or
  * cannot be formatted: one bad cell never stops a page.

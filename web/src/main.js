@@ -19,6 +19,7 @@ import {
   formatRate,
   formatTerm,
   formatUnits,
+  offerAmount,
   shortAddress,
   toUnits,
   unitsToInput,
@@ -481,7 +482,7 @@ function drawOffers() {
       (o) => `<tr>
         <td data-label="${label.offer}"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge" title="${esc(t("An independent lender the fund issuer designates"))}">${esc(t("Designated"))}</span>` : ""}
           <span class="muted small mono">${esc(shortAddress(o.lender))}</span>${S.wallet && o.lender === S.wallet.address ? ` <span class="badge badge-muted">${esc(t("You"))}</span>` : ""}</td>
-        <td data-label="${label.available}" class="num">${esc(money(o.available, "floor"))}</td>
+        <td data-label="${label.available}" class="num" title="${esc(`${offerAmount(o.available, SD()).full} ${code()}`)}">${esc(`${offerAmount(o.available, SD()).text} ${code()}`)}</td>
         <td data-label="${label.rate}" class="num">${esc(formatRate(o.rate_bps))} <span class="muted small">${esc(t("a year"))}</span></td>
         <td data-label="${label.term}" class="num">${esc(formatTerm(maxTermFor(o, S.maxTerm || o.max_term)))}</td>
       </tr>`,
@@ -723,7 +724,7 @@ function renderBorrowOffers() {
       const parts = [
         `#${o.id}${o.sponsor ? ` · ${t("Designated")}` : ""}`,
         formatRate(o.rate_bps),
-        t("{amount} available", { amount: money(o.available, "floor") }),
+        t("{amount} available", { amount: `${offerAmount(o.available, SD()).text} ${code()}` }),
         t("up to {hours} h", { hours: Math.floor(maxTermFor(o, S.maxTerm) / HOUR) }),
       ];
       return `<option value="${o.id}">${esc(parts.join(" · "))}</option>`;
