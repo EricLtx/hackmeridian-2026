@@ -69,6 +69,17 @@ test("the best rate is the lowest among offers with funds left", () => {
   assert.equal(bestRate([{ available: "0", rate_bps: 100 }, { available: 5n, rate_bps: 275 }, { available: "9", rate_bps: 250 }]), 250);
   assert.equal(bestRate([{ available: 0n, rate_bps: 100 }]), null);
   assert.equal(bestRate(null), null);
+  // Asked for a term and a stablecoin, only the offers that could serve the loan count.
+  const offers = [
+    { available: "9", rate_bps: 200, max_term: String(48 * HOUR), stablecoin: "CA" },
+    { available: "9", rate_bps: 250, max_term: String(168 * HOUR), stablecoin: "CB" },
+    { available: "9", rate_bps: 300, max_term: String(168 * HOUR), stablecoin: "CA" },
+  ];
+  assert.equal(bestRate(offers, { hours: 24, stablecoin: "CA" }), 200);
+  assert.equal(bestRate(offers, { hours: 64, stablecoin: "CA" }), 300, "the 48-hour offer cannot serve 64 hours");
+  assert.equal(bestRate(offers, { hours: 64 }), 250);
+  assert.equal(bestRate(offers, { hours: 200, stablecoin: "CA" }), null);
+  assert.equal(bestRate([{ available: "9", rate_bps: 100 }], { hours: 1 }), null, "an offer without a longest term is not trusted");
 });
 
 const repo = (over = {}) => ({
@@ -98,6 +109,7 @@ test("a malformed export entry is skipped, never shown", () => {
     repo({ currency: '<img src=x onerror="alert(1)">' }),
     repo({ opened_at: "yesterday" }),
     repo({ repo_id: "1; DROP" }),
+    repo({ opened_at: "2026-10-17T15:11:02Z", closed_at: "2026-10-17T13:10:02Z" }),
     null,
   ];
   assert.equal(replayRepo(bad), null);
@@ -120,6 +132,7 @@ test("the tour's images are bundled WebP files, credited in NOTICE", () => {
   }
   const notice = readFileSync(new URL("../../NOTICE", import.meta.url), "utf8");
   assert.match(notice, /NASA 3D/);
+  assert.match(notice, /reveal\.js 6\.0\.2/);
 });
 
 test("the tour page keeps the interface's content security policy, without friendbot", () => {

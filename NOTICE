@@ -19,5 +19,9 @@ and the "Hipparcos Star Map". They are used under NASA's media usage
 guidelines (https://www.nasa.gov/nasa-brand-center/images-and-media); their
 use implies no endorsement by NASA.
 
+The guided tour (web/tour.html) is built on reveal.js 6.0.2, Copyright
+Hakim El Hattab and reveal.js contributors, licensed under the MIT License
+(https://github.com/hakimel/reveal.js).
+
 "Open Window" is the name of this project. The Apache License does not grant
 permission to use it as a trademark (Section 6 of the License).

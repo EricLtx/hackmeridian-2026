@@ -325,8 +325,18 @@ export const EXAMPLE_RATE_BPS = 300;
 // ---------------------------------------------------------------------------
 
 /** The best rate a borrower can take now: the lowest rate among offers with funds left, in basis points; null when none has. */
-export function bestRate(offers) {
-  const rates = (offers ?? []).filter((o) => BigInt(o.available ?? 0) > 0n).map((o) => Number(o.rate_bps));
+/**
+ * The lowest rate among the offers with funds left and, when `hours` or
+ * `stablecoin` (a contract id) is given, those that could serve such a loan:
+ * a term within the offer's longest, in that stablecoin.
+ */
+export function bestRate(offers, { hours, stablecoin } = {}) {
+  const term = hours === undefined ? null : Math.max(1, Math.round(Number(hours))) * HOUR;
+  const rates = (offers ?? [])
+    .filter((o) => BigInt(o.available ?? 0) > 0n)
+    .filter((o) => term === null || Number(o.max_term) >= term)
+    .filter((o) => !stablecoin || String(o.stablecoin) === stablecoin)
+    .map((o) => Number(o.rate_bps));
   return rates.length ? Math.min(...rates) : null;
 }
 
@@ -362,7 +372,8 @@ export function replayRepo(registry) {
         currency: String(r.currency),
         openedAt: r.opened_at,
         closedAt: r.closed_at,
-        hours: chargedHours(Math.max(closed - opened, 0)),
+        // A buy-back recorded before the opening is not a repo to show: zero hours drops it below.
+        hours: closed > opened ? chargedHours(closed - opened) : 0,
       };
     })
     .filter((r) => r.hours > 0);

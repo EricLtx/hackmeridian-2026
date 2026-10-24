@@ -121,7 +121,7 @@ function replayHtml() {
   const r = S.replay;
   if (!r) return `<p class="muted">${esc(t("The public record of this instance is loading."))}</p>`;
   const d = S.decimals.stablecoin;
-  const code = S.decimals.code;
+  const code = r.currency; // the repo's own currency, checked by replayRepo
   return `
     <p class="tour-kicker">${esc(t("A real repo, from the public record"))}</p>
     <h3>${esc(t("Repo #{id}", { id: r.id }))}</h3>
@@ -153,7 +153,7 @@ function costHtml() {
 }
 
 function costOutHtml() {
-  const live = S.offers ? bestRate(S.offers) : null;
+  const live = S.offers ? bestRate(S.offers, { hours: S.hours, stablecoin: S.dep?.contracts?.stablecoin }) : null;
   const rate = live ?? EXAMPLE_RATE_BPS;
   const d = S.decimals.stablecoin;
   const code = S.decimals.code;
@@ -483,8 +483,12 @@ async function start() {
     help: true,
     pdfSeparateFragments: false,
     keyboard: { 78: toggleNotes },
+    // Space on a chip, a tab, a preset or a disclosure activates it; Reveal would turn the page instead.
+    keyboardCondition: (event) => !(event.key === " " && event.target?.closest?.("button, summary, a, [role=tab]")),
   });
   await deck.initialize();
+  // A presenter window opened before this deck, or kept across a reload, learns where the deck stands.
+  channel?.postMessage({ index: deck.getIndices().h });
   const slides = $("tour-slides");
   slides.addEventListener("click", onClick);
   slides.addEventListener("input", onInput);
