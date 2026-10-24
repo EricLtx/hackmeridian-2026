@@ -806,13 +806,17 @@ async function act(alerts, s, monitor = {}) {
 // Rehearsal: a real trigger per detector, the action, then a clean pass
 // ---------------------------------------------------------------------------
 
-/** The contract id the web interface serves, or undefined when the deployment file cannot be read. */
+/** The contract id the web interface serves, or undefined, said on stderr, when the deployment file cannot be read (the rehearsal then needs --live). */
 function publishedContractId() {
+  const file = path.join(ROOT, "web", "public", "deployment.testnet.json");
   try {
-    return JSON.parse(fs.readFileSync(path.join(ROOT, "web", "public", "deployment.testnet.json"), "utf8")).contracts?.openWindow;
-  } catch {
-    return undefined;
+    const id = JSON.parse(fs.readFileSync(file, "utf8")).contracts?.openWindow;
+    if (typeof id === "string" && id !== "") return id;
+    console.error(`${file}: no contracts.openWindow`);
+  } catch (error) {
+    console.error(`${file}: ${error.message}`);
   }
+  return undefined;
 }
 
 async function rehearse() {
@@ -1102,7 +1106,7 @@ async function rehearse() {
     console.log("\n13. Forced guardian change (Elev.2): proposed with the governor and trustee keys, vetoed by the trustee");
     const trustee = state.keys.trustee ? await read(state, C.openWindow, "trustee").catch(() => null) : null;
     if (!trustee) {
-      console.log("  no trustee on this deployment (needs a `setup -- --fresh` on a contract with the trustee role); skipped");
+      console.log("  no trustee on this deployment (needs a fresh instance with the trustee role: OPEN_WINDOW_STATE=<name> npm run setup -- --fresh); skipped");
     } else {
       const guardian0 = await read(state, C.openWindow, "guardian");
       const proposed = await invoke(state, "governor", C.openWindow, "force_guardian_change", [sv.address(pub("operator"))], { cosigners: ["trustee"] });

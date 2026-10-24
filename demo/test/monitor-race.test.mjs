@@ -67,7 +67,7 @@ test("an acknowledged code baseline survives a watch saving at the same time", a
 
 test("three paced writers (a watch, an announcer, an acknowledger, 20 ms apart) are never refused the lock, and nothing is lost", async () => {
   // The lock is held for about a millisecond; waiters back off 5 to 50 ms at random, so none ever waits out LOCK_WAIT_MS (15 s).
-  // The watch makes 40 passes more than the announcer makes announcements: its last refresh comes after the last
+  // The watch makes twice the announcer's passes: its last refresh comes a good two seconds after the last
   // announcement, so its memory can be held to all 120 (with equal counts, jitter let the announcer finish last).
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ow-paced-"));
   const file = path.join(dir, "monitor.json");
@@ -75,7 +75,7 @@ test("three paced writers (a watch, an announcer, an acknowledger, 20 ms apart) 
   saveMonitor(file, { contract: OW, announced: [], wasmHash: RC4 });
   const begun = Date.now();
   const [watch, announcer, acknowledger] = await Promise.all([
-    runWriter(["watch", file, OW, "160", result, "20"]),
+    runWriter(["watch", file, OW, "240", result, "20"]),
     runWriter(["announce", file, "p", "120", "-", "20"]),
     runWriter(["acknowledge", file, RC5, "60", "-", "20"]),
   ]);

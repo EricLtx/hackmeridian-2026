@@ -573,7 +573,7 @@ async function secondFund(state, ow, shares, teur) {
   console.log(`  NAV feed (EUR)   ${state.contracts.navOracle2}`);
   const shares2 = state.contracts.shares2;
 
-  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4, applied by the governor from rc5)", async () => {
+  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (behind the delay since rc4, applied by the governor from rc5)", async () => {
     const token = sv.address(state.contracts.euro2);
     // Registered, or proposed (from rc4 a registration after the first
     // admission is a proposal, S29). Read until the chain shows one of them:

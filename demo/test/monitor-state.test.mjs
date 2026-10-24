@@ -108,10 +108,11 @@ test("a rehearsal never runs on the demo instance unless --live asks for it", ()
   assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW }), false);
   assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: other, publishedId: OW }), false);
   // A disposable name whose state file points at the published contract: refused too.
-  assert.equal(rehearsalAllowed({ stateName: "pentest", contractId: OW, publishedId: OW }), false);
+  assert.equal(rehearsalAllowed({ stateName: "scratch", contractId: OW, publishedId: OW }), false);
   // A disposable instance: allowed, with or without a readable deployment file.
-  assert.equal(rehearsalAllowed({ stateName: "pentest", contractId: other, publishedId: OW }), true);
-  assert.equal(rehearsalAllowed({ stateName: "pentest", contractId: other, publishedId: undefined }), true);
+  assert.equal(rehearsalAllowed({ stateName: "scratch", contractId: other, publishedId: OW }), true);
+  assert.equal(rehearsalAllowed({ stateName: "scratch", contractId: other, publishedId: undefined }), false, "unreadable deployment file: refused");
+  assert.equal(rehearsalAllowed({ stateName: "scratch", contractId: other, publishedId: undefined, live: true }), true);
   // --live is the explicit override, and only `true` counts.
   assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW, live: true }), true);
   assert.equal(rehearsalAllowed({ stateName: "testnet", contractId: OW, publishedId: OW, live: "yes" }), false);
@@ -123,6 +124,6 @@ test("new contracts for the demo instance need --new-demo-instance; a disposable
   assert.equal(newContractsAllowed({ stateName: "testnet" }), false);
   assert.equal(newContractsAllowed({ stateName: "testnet", confirmed: "yes" }), false);
   assert.equal(newContractsAllowed({ stateName: "testnet", confirmed: true }), true);
-  assert.equal(newContractsAllowed({ stateName: "pentest" }), true);
+  assert.equal(newContractsAllowed({ stateName: "scratch" }), true);
   assert.throws(() => newContractsAllowed({ stateName: "a/b" }), /OPEN_WINDOW_STATE/);
 });

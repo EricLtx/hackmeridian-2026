@@ -55,10 +55,12 @@ export function monitorFileName(stateName) {
  * (`OPEN_WINDOW_STATE=<name>`), and on the demo instance only when `--live`
  * asks for it. The demo instance is known by its name (`testnet`) or by its
  * contract id, the one `web/public/deployment.testnet.json` publishes: a
- * disposable state file that points at the demo contract is refused too.
+ * disposable state file that points at the demo contract is refused too,
+ * and so is any instance while the deployment file cannot be read, since
+ * nothing then tells a disposable contract from the demo one.
  */
 export function rehearsalAllowed({ stateName, contractId, publishedId, live }) {
-  const demo = checkStateName(stateName) === "testnet" || (Boolean(publishedId) && contractId === publishedId);
+  const demo = checkStateName(stateName) === "testnet" || !publishedId || contractId === publishedId;
   return !demo || live === true;
 }
 
