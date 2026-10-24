@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://soroban-testnet.stellar.org https://soroban-rpc.testnet.stellar.gateway.fm; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta name="description" content="A guided tour of Open Window: stablecoin liquidity against tokenized fund shares, at any hour, on Stellar testnet." data-i18n-attr="content" />
+    <title data-i18n>Open Window, guided tour</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body class="face-stage">
+    <a class="skip" href="#tour-deck" data-i18n>Skip to the tour</a>
+    <header class="tour-bar">
+      <a class="brand" href="./index.html" aria-label="Open Window, home" data-i18n-attr="aria-label">
+        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2" />
+          <path d="M12 3v18M3 12h9" stroke="currentColor" stroke-width="2" />
+          <path d="M14.5 9.5 18 6m0 0h-3m3 0v3" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" />
+        </svg>
+        <span>Open Window</span>
+      </a>
+      <div class="face-switch lang-switch" role="group" aria-label="Language" data-i18n-attr="aria-label">
+        <button type="button" class="face-btn lang-btn" data-lang="en" lang="en" title="English" aria-pressed="true"><svg class="flag" viewBox="0 0 60 30" preserveAspectRatio="xMidYMid slice" aria-hidden="true" focusable="false"><clipPath id="flag-gb-a"><path d="M0 0v30h60V0z"/></clipPath><clipPath id="flag-gb-b"><path d="M30 15h30v15zv15H0zH0V0zV0h30z"/></clipPath><g clip-path="url(#flag-gb-a)"><path d="M0 0v30h60V0z" fill="#012169"/><path d="M0 0l60 30m0-30L0 30" stroke="#fff" stroke-width="6"/><path d="M0 0l60 30m0-30L0 30" clip-path="url(#flag-gb-b)" stroke="#C8102E" stroke-width="4"/><path d="M30 0v30M0 15h60" stroke="#fff" stroke-width="10"/><path d="M30 0v30M0 15h60" stroke="#C8102E" stroke-width="6"/></g></svg><span class="lang-code">EN</span></button>
+        <button type="button" class="face-btn lang-btn" data-lang="fr" lang="fr" title="Français" aria-pressed="false"><svg class="flag" viewBox="0 0 3 2" aria-hidden="true" focusable="false"><path fill="#ED2939" d="M0 0h3v2H0z"/><path fill="#fff" d="M0 0h2v2H0z"/><path fill="#002395" d="M0 0h1v2H0z"/></svg><span class="lang-code">FR</span></button>
+        <button type="button" class="face-btn lang-btn" data-lang="es" lang="es" title="Español" aria-pressed="false"><svg class="flag" viewBox="0 0 750 500" aria-hidden="true" focusable="false"><path fill="#c60b1e" d="M0 0h750v500H0z"/><path fill="#ffc400" d="M0 125h750v250H0z"/></svg><span class="lang-code">ES</span></button>
+      </div>
+      <div class="tour-bar-actions">
+        <button type="button" class="btn btn-ghost btn-small" id="notes-btn" aria-pressed="false" title="Speaker notes (N)" data-i18n-attr="title"><span data-i18n>Notes</span></button>
+        <a class="btn btn-ghost btn-small" href="./tour.html?presenter=1" target="_blank" rel="noopener" data-i18n>Presenter window</a>
+        <a class="btn btn-primary btn-small" href="./index.html" data-i18n>Open the app</a>
+      </div>
+    </header>
+    <noscript><p class="notice" data-i18n>The tour needs JavaScript. The app and the History page show the same facts.</p></noscript>
+    <img class="tour-sky" src="./tour/stars.webp" alt="" aria-hidden="true" />
+    <div class="reveal" id="tour-deck" aria-label="Guided tour" data-i18n-attr="aria-label">
+      <div class="slides" id="tour-slides"></div>
+    </div>
+    <aside class="tour-notes" id="tour-notes" aria-label="Speaker notes" data-i18n-attr="aria-label" hidden></aside>
+    <main class="presenter wrap" id="presenter" hidden>
+      <div class="presenter-bar">
+        <h1 data-i18n>Presenter</h1>
+        <span class="presenter-clock num" id="presenter-clock" aria-label="Elapsed time" data-i18n-attr="aria-label">00:00</span>
+        <button type="button" class="btn btn-ghost" id="presenter-prev" data-i18n>Previous</button>
+        <button type="button" class="btn btn-primary" id="presenter-next" data-i18n>Next</button>
+        <label class="sr-only" for="presenter-jump" data-i18n>Go to scene</label>
+        <select id="presenter-jump"></select>
+      </div>
+      <div class="presenter-notes" id="presenter-notes" aria-live="polite"></div>
+    </main>
+    <script type="module" src="./src/tour.js"></script>
+  </body>
+</html>

@@ -54,6 +54,11 @@
   --fs-2xl: 1.875rem;
   --fs-lead: clamp(1.02rem, 1.6vw, 1.18rem);
   --fs-hero: clamp(2.1rem, 4.8vw, 3.5rem);
+  /* The tour stage: Reveal.js scales a fixed 1280 px canvas, so sizes there are fixed. */
+  --fs-stage-figure: 4.5rem;
+  --fs-stage-title: 3.25rem;
+  --fs-stage-lead: 1.75rem;
+  --fs-stage-body: 1.375rem;
   /* Spacing scale on the 4 px grid (SDS layout rule); rules move onto it
      progressively (web/DESIGN.md). */
   --space-1: 4px;
@@ -2803,5 +2808,580 @@ body.face-terminal .top.is-scrolled {
   .face-btn[aria-pressed="true"],
   .tab[aria-selected="true"] {
     outline: 1px solid CanvasText;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Guided tour (tour.html): a dark stage for meeting-room screens, whatever
+   the system theme, on the SDS dark steps of the guided view. Reveal.js
+   (reveal.css) lays out and scales the scenes; this section draws them.
+   --------------------------------------------------------------------------- */
+
+body.face-stage {
+  --bg: #161616; /* sds gray-01 */
+  --surface: #1c1c1c; /* sds gray-02 */
+  --surface-2: #232323; /* sds gray-03 */
+  --surface-3: #2e2e2e; /* sds gray-05 */
+  --text: #ededed; /* sds gray-12 */
+  --muted: #a0a0a0; /* sds gray-11 */
+  --subtle: #707070; /* sds gray-09 */
+  --border: #343434; /* sds gray-06 */
+  --field: #3e3e3e; /* sds gray-07 */
+  --input-border: #707070; /* sds gray-09 */
+  --accent: #9e8cfc; /* sds lilac-11 */
+  --accent-strong: #6e56cf; /* sds lilac-09 */
+  --accent-hover: #644fc1; /* sds lilac-10 */
+  --accent-text: #ffffff; /* sds base white */
+  --accent-soft: #251e40; /* sds lilac-03 */
+  --grad-text: linear-gradient(100deg, #9e8cfc 0%, #849dff 100%);
+  --ok: #4cc38a; /* sds green-11 */
+  --ok-soft: #0f291e; /* sds green-03 */
+  --warn: #f1a10d; /* sds amber-11 */
+  --warn-soft: #341c00; /* sds amber-03 */
+  --danger: #ff6369; /* sds red-11 */
+  --danger-soft: #3c181a; /* sds red-03 */
+  --focus: #9e8cfc; /* sds lilac-11 */
+  --ring: 0 0 0 4px rgb(158 140 252 / 30%);
+  --shadow: none;
+  --shadow-sm: none;
+  color-scheme: dark;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.tour-bar {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  background: rgb(22 22 22 / 82%);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+
+.tour-bar-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.face-stage .reveal {
+  height: 100vh;
+  font-family: var(--font);
+  color: var(--text);
+}
+
+.face-stage .reveal .controls,
+.face-stage .reveal .progress {
+  color: var(--accent);
+}
+
+.face-stage .reveal .slide-number {
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+
+.reveal .slides > section.tour-scene {
+  text-align: left;
+  padding: var(--space-8) var(--space-6) var(--space-5);
+}
+
+.tour-kicker {
+  margin: 0 0 var(--space-3);
+  color: var(--accent);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tour-title {
+  margin: 0 0 var(--space-5);
+  max-width: 22ch;
+  font-size: var(--fs-stage-title);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.tour-body {
+  margin: 0 0 var(--space-6);
+  max-width: 48ch;
+  color: var(--muted);
+  font-size: var(--fs-stage-lead);
+  line-height: 1.4;
+}
+
+.tour-k-title .tour-title {
+  max-width: 16ch;
+  font-size: var(--fs-stage-figure);
+  background: var(--grad-text);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+.tour-sky {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  object-fit: cover;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.tour-k-title .tour-earth {
+  position: absolute;
+  top: 50%;
+  right: -120px;
+  width: 760px;
+  height: auto;
+  transform: translateY(-50%);
+  /* The photograph's black frame melts into the stage. */
+  mask-image: radial-gradient(closest-side, #000 78%, transparent 100%);
+  pointer-events: none;
+}
+
+.tour-k-title .tour-earth {
+  z-index: 0;
+}
+
+.tour-k-title > :not(.tour-earth) {
+  position: relative;
+  z-index: 1;
+}
+
+.tour-k-title .tour-body {
+  max-width: 34ch;
+}
+
+.tour-credit {
+  margin: var(--space-6) 0 0;
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+}
+
+.tour-actions,
+.tour-doors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.tour-points {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-stage-lead);
+}
+
+.tour-points li {
+  position: relative;
+  padding-left: var(--space-6);
+}
+
+.tour-points li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: var(--space-4);
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.tour-switch {
+  display: inline-flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+  padding: var(--space-1);
+  border-radius: 980px;
+  background: var(--surface-2);
+}
+
+.week {
+  display: grid;
+  gap: var(--space-1);
+  max-width: 900px;
+}
+
+.week-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.week-day {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+
+.week-hours {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 2px;
+}
+
+.week-hours span {
+  height: 20px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  transition: background-color 200ms var(--ease);
+}
+
+.week-hours span.is-open {
+  background: var(--accent-strong);
+}
+
+.tour-figure {
+  margin: var(--space-4) 0 0;
+  color: var(--muted);
+  font-size: var(--fs-stage-body);
+}
+
+.tour-figure strong {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-5);
+}
+
+.compare-col {
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.compare-col.is-after {
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.compare-col h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--fs-stage-body);
+}
+
+.compare-col ul {
+  margin: 0;
+  padding-left: var(--space-5);
+  font-size: var(--fs-stage-body);
+  line-height: 1.6;
+}
+
+.roles-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+
+.roles-chips .chip {
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--fs-md);
+}
+
+.roles-chips .chip[aria-pressed="true"],
+.cost-presets .chip[aria-pressed="true"] {
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.roles-detail {
+  max-width: 60ch;
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-size: var(--fs-stage-body);
+}
+
+.roles-detail h3 {
+  margin: 0 0 var(--space-3);
+}
+
+.roles-detail p {
+  margin: var(--space-2) 0;
+}
+
+.journey {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.journey-steps {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.journey-steps li {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  column-gap: var(--space-3);
+  font-size: var(--fs-stage-body);
+}
+
+.journey-steps .step-mark {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--input-border);
+  border-radius: 50%;
+  font-family: var(--mono);
+}
+
+.journey-steps span:last-child {
+  color: var(--muted);
+}
+
+.journey-replay,
+.cost-out {
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.journey-replay h3 {
+  margin: 0 0 var(--space-3);
+}
+
+.cost {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.cost-inputs {
+  display: grid;
+  gap: var(--space-3);
+  font-size: var(--fs-md);
+}
+
+.cost-inputs .input-unit input {
+  flex: 1;
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--fs-lg);
+}
+
+.cost-inputs input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent-strong);
+}
+
+.cost-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.cost-figure {
+  margin: var(--space-2) 0;
+  font-size: var(--fs-stage-figure);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.cost-figure span {
+  color: var(--muted);
+  font-size: var(--fs-stage-body);
+}
+
+.cost-source {
+  margin: var(--space-4) 0 0;
+  color: var(--muted);
+}
+
+.tour-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.tour-funds {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-stage-body);
+}
+
+.tour-panel {
+  max-width: 60ch;
+  margin-top: var(--space-5);
+  font-size: var(--fs-stage-lead);
+  line-height: 1.4;
+}
+
+.tour-faq {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 900px;
+  font-size: var(--fs-stage-body);
+}
+
+.tour-faq summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.tour-faq p {
+  margin: var(--space-2) 0 0;
+  color: var(--muted);
+}
+
+.roadmap {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.roadmap li {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-4);
+  border-top: 3px solid var(--surface-3);
+  color: var(--muted);
+  font-size: var(--fs-md);
+}
+
+.roadmap li strong {
+  color: var(--text);
+  font-size: var(--fs-stage-body);
+}
+
+.roadmap li.is-done {
+  border-top-color: var(--ok);
+}
+
+.tour-notes {
+  position: fixed;
+  inset: auto var(--space-4) var(--space-4);
+  z-index: 50;
+  max-height: 42vh;
+  overflow: auto;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgb(28 28 28 / 96%);
+  font-size: var(--fs-sm);
+}
+
+.notes-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+}
+
+.notes-list dt {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.notes-list dd {
+  margin: 0;
+}
+
+body.tour-presenter {
+  overflow: auto;
+}
+
+.presenter {
+  padding-top: var(--space-8);
+}
+
+.presenter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+.presenter-bar h1 {
+  margin: 0 auto 0 0;
+  font-size: var(--fs-xl);
+}
+
+.presenter-clock {
+  font-family: var(--mono);
+  font-size: var(--fs-xl);
+}
+
+.presenter-notes {
+  font-size: var(--fs-lg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .week-hours span {
+    transition: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .tour-bar {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .tour-bar .brand span {
+    display: none;
+  }
+
+  .tour-bar-actions .btn-ghost {
+    display: none;
+  }
+
+  .tour-k-title .tour-earth {
+    top: 6%;
+    right: -160px;
+    width: 460px;
+    transform: none;
+    opacity: 0.45;
+  }
+
+  .compare,
+  .journey,
+  .cost,
+  .tour-tiles,
+  .roadmap {
+    grid-template-columns: 1fr;
   }
 }
