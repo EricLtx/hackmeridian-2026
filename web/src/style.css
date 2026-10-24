@@ -729,6 +729,11 @@ body:not(.is-loading) .progress::before {
   background: var(--warn-soft);
 }
 
+/* The positions summary, above the cards it adds up; the grid wraps on its own at phone width. */
+.tiles.summary {
+  margin: 0 0 16px;
+}
+
 .tile-label {
   color: var(--muted);
   font-size: var(--fs-xs);

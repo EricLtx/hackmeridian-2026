@@ -17,5 +17,6 @@ import frame from "./frame.js";
 import roles from "./roles.js";
 import operate from "./operate.js";
 import tour from "./tour.js";
+import summary from "./summary.js";
 
-export default { ...common, ...page, ...main, ...terminal, ...command, ...blotter, ...guide, ...timeline, ...errors, ...wallet, ...chain, ...history, ...terms, ...deployment, ...frame, ...roles, ...operate, ...tour };
+export default { ...common, ...page, ...main, ...terminal, ...command, ...blotter, ...guide, ...timeline, ...errors, ...wallet, ...chain, ...history, ...terms, ...deployment, ...frame, ...roles, ...operate, ...tour, ...summary };

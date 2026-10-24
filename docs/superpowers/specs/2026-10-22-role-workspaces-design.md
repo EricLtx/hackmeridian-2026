@@ -1,6 +1,6 @@
 # Role workspaces on the web platform — design
 
-Date: 22 October 2026. Status: design approved for phase 0 by the maintainer's request to proceed without a question round; later phases are described so that phase 0 does not close them off. Phase 0 delivered on 22 October 2026 (plan `docs/superpowers/plans/2026-10-22-role-workspaces-phase0.md`), except repos past maturity in the Health panel, moved to phase 1.
+Date: 22 October 2026. Status: design approved for phase 0 by the maintainer's request to proceed without a question round; later phases are described so that phase 0 does not close them off. Phase 0 delivered on 22 October 2026 (plan `docs/superpowers/plans/2026-10-22-role-workspaces-phase0.md`), except repos past maturity in the Health panel, moved to phase 1; phase 0b delivered on 24 October 2026.
 
 ## Intent
 
@@ -94,7 +94,8 @@ An action that needs two parties is built by the first party on the page: the pa
 | Phase | Scope | When |
 |---|---|---|
 | 0 | The five interface defects of 22 October (terminal status band, total haircut, untranslated tape events, control outlines, touch targets); role recognition and role chips; the Operate space read-only (health, roles, proposals with countdowns); the total protection of a loan shown in one place | before the web freeze of 24 October, 18:00 |
-| 1 | Single-signer actions of the Operate and Fund spaces; positions summary at the top of the Positions space | after the freeze |
+| 0b | Positions summary at the top of the Positions space and of the lender's repos, read-only, from the rows the page already holds | before the web freeze of 24 October, 18:00 |
+| 1 | Single-signer actions of the Operate and Fund spaces | after the freeze |
 | 2 | Co-signature requests: admission (governor and steward), lender attestation (lender and steward), upgrade (governor and trustee), re-anchor (governor and steward) | after phase 1 |
 | 3 | Instance selector once a second instance exists; a risk and jurisdiction acknowledgement before any mainnet use | before mainnet |
 
