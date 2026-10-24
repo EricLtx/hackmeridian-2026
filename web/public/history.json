@@ -1,15 +1,15 @@
 {
-  "generatedAt": "2026-10-21T23:01:43.685Z",
+  "generatedAt": "2026-10-24T07:51:36.429Z",
   "network": "testnet",
   "explorer": "https://stellar.expert/explorer/testnet",
   "contract": "CBDS6BZ2JOU6AGIR6FSFK6MNIS25DVYYD2ZHHHEWIPXH4ZDCVWWX7XGL",
   "journal": {
-    "lines": 199,
-    "lastHash": "6aad73fb380cfc85db93ccef1ec919cccaf31ee5818f0b72fc15026dd8ac6975",
+    "lines": 200,
+    "lastHash": "a79e78a145d202babd3797a24d3ad76e4dd4d846c1ffa99f7ed17fcb82b877a2",
     "firstLedger": 5215393,
-    "lastLedger": 5319854,
+    "lastLedger": 5359603,
     "firstClosedAt": "2026-10-15T21:42:32Z",
-    "lastClosedAt": "2026-10-21T22:47:37Z",
+    "lastClosedAt": "2026-10-24T06:00:02Z",
     "gaps": []
   },
   "registry": [
@@ -246,6 +246,21 @@
     }
   ],
   "events": [
+    {
+      "seq": 200,
+      "ledger": 5359603,
+      "closedAt": "2026-10-24T06:00:02Z",
+      "txHash": "551547087408df7ffb446d0198ce9fb55cf495e044230ada72d748e7ca955d75",
+      "event": "reference_updated",
+      "topics": [
+        "CAEXP2UGZVWDXIVOMSZSE5MDSTD5LRBU55FPTERGFSPHTMKONBNJ5XHB"
+      ],
+      "data": {
+        "nav": "108587792559738",
+        "timestamp": "1792821591"
+      },
+      "hash": "a79e78a145d202babd3797a24d3ad76e4dd4d846c1ffa99f7ed17fcb82b877a2"
+    },
     {
       "seq": 199,
       "ledger": 5319854,
