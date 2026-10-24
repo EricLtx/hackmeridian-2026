@@ -40,7 +40,7 @@ Each value is a step of an SDS scale (Radix convention: steps 1–2 page backgro
 | Spacing scale | `--space-1` … `--space-8` | 4, 8, 12, 16, 24, 32, 48 and 64 px, the 4 px grid |
 | Radius | `--radius`, `--radius-md`, `--radius-sm` | 20, 14 and 10 px; pills use 980 px |
 | Shadow | `--shadow-sm`, `--shadow`, `--shadow-lg` | layered and faint in light; none or a hairline in dark |
-| Focus | `--focus`, `--ring` | the accent, and a 4 px ring at 18 % (light) or 28 % (dark) |
+| Focus | `--focus`, `--ring` | the accent, and a 4 px ring at 22 % (light) or 30 % (dark and terminal) |
 | Easing | `--ease`, `--ease-out` | standard, and a long ease-out for entrances |
 | Breakpoints | media queries | 1280, 760 and 420 px, all `max-width` |
 
@@ -75,6 +75,6 @@ Font sizes are tokens. The spacing scale is defined; the rules still write their
 2. **Touch targets under 44 px.** Fixed on 22 October 2026: one `@media (pointer: coarse)` block raises `.face-btn`, `.lang-btn`, `.tab`, `.chip`, `.btn-small`, `.input-small input` and `.t-key` to 44 px; the same test checks it.
 3. **Type scale.** Fixed on 24 October 2026: the 26 distinct sizes map onto ten tokens (the SDS 14 and 16 px among them), checked by the design test.
 4. **Spacing scale.** The tokens `--space-1` to `--space-8` exist (24 October 2026); the rules still carry 29 distinct values, 13 of them off the 4 px grid. Fix: map each rule onto the nearest step; values of 2 and 6 px stay allowed inside dense terminal rows.
-5. **Colours outside the tokens.** The remaining literals in rules are SDS values (the terminal keys, scrollbars, glows); moving them onto tokens is maintenance.
+5. **Colours outside the tokens.** The literals left in rules (the gradient stops, the terminal keys, scrollbars, glows) were taken from the SDS scales by hand; the tests check the tokens only. Moving them onto tokens is maintenance.
 
 None of these changes the behaviour of the page; gaps 1 and 2 were accessibility and are closed, 3 to 5 are maintenance. A change to the stylesheet runs `npm test` and `npm run build` in `web/` like any other.

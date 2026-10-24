@@ -1153,7 +1153,7 @@ input[aria-invalid="true"] {
 .steps li.done .step-mark {
   background: var(--ok);
   border-color: var(--ok);
-  color: #fff;
+  color: var(--ok-soft);
   animation: ow-pop 0.45s var(--ease-out);
 }
 
@@ -1391,17 +1391,19 @@ input[aria-invalid="true"] {
   border-radius: 50%;
   font-size: var(--fs-2xs);
   font-weight: 800;
-  color: #fff;
+  color: var(--accent-text);
   background: var(--accent-strong);
 }
 
 .tx-ok .icon {
   background: var(--ok);
+  color: var(--ok-soft);
   animation: ow-pop 0.45s var(--ease-out);
 }
 
 .tx-error .icon {
   background: var(--danger);
+  color: var(--danger-soft);
 }
 
 .tx-unverified .icon {
@@ -1478,20 +1480,23 @@ code.err {
   border-radius: 50%;
   font-size: var(--fs-2xs);
   font-weight: 800;
-  color: #fff;
+  color: var(--accent-text);
   background: var(--accent-strong);
 }
 
 .toast-ok .toast-icon {
   background: var(--ok);
+  color: var(--ok-soft);
 }
 
 .toast-warn .toast-icon {
   background: var(--warn);
+  color: var(--warn-soft);
 }
 
 .toast-error .toast-icon {
   background: var(--danger);
+  color: var(--danger-soft);
 }
 
 @keyframes ow-toast-in {

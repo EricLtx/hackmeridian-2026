@@ -64,6 +64,20 @@ test("interactive outlines reach 3:1 against their surface in every palette", ()
   }
 });
 
+test("glyphs drawn on a strong fill reach 3:1 in every palette", () => {
+  // The icons of the toasts, the transaction states and the done steps: the
+  // accent's text colour on the accent, the soft tone of a state on its fill.
+  const cases = [["accent-text", "accent-strong"], ["ok-soft", "ok"], ["warn-soft", "warn"], ["danger-soft", "danger"]];
+  for (const [glyph, fill] of cases) {
+    for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal]]) {
+      const ratio = contrast(palette[glyph], palette[fill]);
+      assert.ok(ratio >= 3, `${name}: --${glyph} on --${fill} at ${ratio.toFixed(2)}:1`);
+    }
+  }
+  for (const selector of [".toast-icon", ".tx .icon"]) assert.match(block(`\n${selector} {`), /color: var\(--accent-text\);/, `${selector} glyph`);
+  assert.doesNotMatch(block("\n.steps li.done .step-mark {"), /#fff/);
+});
+
 test("touch screens get 44 px targets on the small controls", () => {
   const coarse = block("@media (pointer: coarse)");
   for (const selector of [".face-btn", ".btn-small", ".input-small input", ".chip", ".t-key", ".tab", ".lang-btn"]) {
