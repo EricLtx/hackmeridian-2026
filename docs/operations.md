@@ -63,7 +63,7 @@ Admission checklist, to tick before step 3 for every fund:
 | Reporting | the indexer's register and SFTR views ([indexer/README.md](../indexer/README.md)) | one row per repo with the fields the chain carries, the SFTR haircut being the one the opening applied (`repo_valued`, rc5); the lender's reporting team adds the LEI, the agreement and the ISIN |
 | Journal | the indexer, and the monitor's `journal` detector | `npm run verify -- --against <url>` compares the journal both ways and by content with an endpoint other than the one the indexer read; the monitor runs the same comparison on every pass |
 | Incidents | [incident-procedure.md](incident-procedure.md) | who acts on each alert and within what time |
-| Web interface | `.github/workflows/pages.yml` publishes `web/` on every push that touches it | the published deployment file lists keyless public RPCs only (`WEB_RPC_URL`, `WEB_RPC_FALLBACKS` at `setup`); an endpoint added there is added to the content security policy of both pages; `web/public/history.json` is refreshed from the indexer and committed when the journal moves |
+| Web interface | `.github/workflows/pages.yml` publishes `web/` on every push that touches it | the published deployment file lists keyless public RPCs only (`WEB_RPC_URL`, `WEB_RPC_FALLBACKS` at `setup`); an endpoint added there is added to the content security policy of the three pages (`index.html`, `history.html`, `tour.html`); `web/public/history.json` is refreshed from the indexer and committed when the journal moves |
 
 ## 5. Upgrading the code
 
