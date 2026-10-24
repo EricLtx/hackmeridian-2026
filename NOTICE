@@ -5,5 +5,13 @@ This product includes software developed by the Open Window contributors
 (https://github.com/EricLtx/hackmeridian-2026), licensed under the Apache
 License, Version 2.0. See the LICENSE file.
 
+The web interface's colour palettes (web/src/style.css) use colour values of
+the Stellar Design System, @stellar/design-system 4.0.2, Copyright Stellar
+Development Foundation, licensed under the Apache License, Version 2.0
+(https://github.com/stellar/stellar-design-system). Its fonts, Inter and
+Inconsolata, are bundled from @fontsource-variable under the SIL Open Font
+License 1.1 (the licence text is in each package's LICENSE file and at
+https://openfontlicense.org).
+
 "Open Window" is the name of this project. The Apache License does not grant
 permission to use it as a trademark (Section 6 of the License).

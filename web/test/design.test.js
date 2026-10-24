@@ -64,6 +64,20 @@ test("interactive outlines reach 3:1 against their surface in every palette", ()
   }
 });
 
+test("glyphs drawn on a strong fill reach 3:1 in every palette", () => {
+  // The icons of the toasts, the transaction states and the done steps: the
+  // accent's text colour on the accent, the soft tone of a state on its fill.
+  const cases = [["accent-text", "accent-strong"], ["ok-soft", "ok"], ["warn-soft", "warn"], ["danger-soft", "danger"]];
+  for (const [glyph, fill] of cases) {
+    for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal]]) {
+      const ratio = contrast(palette[glyph], palette[fill]);
+      assert.ok(ratio >= 3, `${name}: --${glyph} on --${fill} at ${ratio.toFixed(2)}:1`);
+    }
+  }
+  for (const selector of [".toast-icon", ".tx .icon"]) assert.match(block(`\n${selector} {`), /color: var\(--accent-text\);/, `${selector} glyph`);
+  assert.doesNotMatch(block("\n.steps li.done .step-mark {"), /#fff/);
+});
+
 test("touch screens get 44 px targets on the small controls", () => {
   const coarse = block("@media (pointer: coarse)");
   for (const selector of [".face-btn", ".btn-small", ".input-small input", ".chip", ".t-key", ".tab", ".lang-btn"]) {
@@ -76,4 +90,49 @@ test("touch screens get 44 px targets on the small controls", () => {
 test("the Operate grid never asks for more width than a 320 px phone has", () => {
   const grid = block("\n.operate-grid {");
   assert.match(grid, /minmax\(min\(\d+px, 100%\), 1fr\)/, "the column minimum yields to the available width");
+});
+
+test("every text token reaches 4.5:1 on every surface, in the three palettes", () => {
+  const texts = ["text", "muted", "accent", "ok", "warn", "danger"];
+  const surfaces = ["bg", "surface", "surface-2", "surface-3"];
+  for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal]]) {
+    for (const fg of [...texts, ...(name === "terminal" ? ["t-id"] : [])]) {
+      for (const bg of surfaces) {
+        const ratio = contrast(palette[fg], palette[bg]);
+        assert.ok(ratio >= 4.5, `${name}: --${fg} on --${bg} at ${ratio.toFixed(2)}:1`);
+      }
+    }
+    for (const state of ["accent", "ok", "warn", "danger"]) {
+      const ratio = contrast(palette[state], palette[`${state}-soft`]);
+      assert.ok(ratio >= 4.5, `${name}: --${state} on --${state}-soft at ${ratio.toFixed(2)}:1`);
+    }
+    const label = contrast(palette["accent-text"], palette["accent-strong"]);
+    assert.ok(label >= 4.5, `${name}: primary button label at ${label.toFixed(2)}:1`);
+  }
+});
+
+test("font sizes come from the type scale, or are relative to their parent", () => {
+  const sizes = [...css.matchAll(/font-size:\s*([^;]+);/g)].map((m) => m[1].trim());
+  const off = sizes.filter((v) => !/^var\(--fs-[a-z0-9]+\)$/.test(v) && !/^[0-9.]+em$/.test(v));
+  assert.deepEqual(off, [], "every font-size reads a --fs- token");
+});
+
+test("the palette colours are Stellar Design System values", () => {
+  // The steps of @stellar/design-system 4.0.2 the palettes use (NOTICE).
+  const sds = new Set([
+    "#ffffff", "#000000",
+    "#f8f8f8", "#f3f3f3", "#e2e2e2", "#dbdbdb", "#8f8f8f", "#858585", "#6f6f6f", "#171717",
+    "#161616", "#1c1c1c", "#232323", "#282828", "#2e2e2e", "#343434", "#3e3e3e", "#505050", "#707070", "#a0a0a0", "#ededed",
+    "#f5f2ff", "#6e56cf", "#644fc1", "#5746af", "#251e40", "#9e8cfc",
+    "#e9f9ee", "#18794e", "#0f291e", "#4cc38a",
+    "#fff4d5", "#ad5700", "#341c00", "#f1a10d", "#ffb224", "#ffcb47",
+    "#2c2100", "#fdda24",
+    "#ffefef", "#cd2b31", "#3c181a", "#ff6369",
+    "#849dff",
+  ]);
+  for (const [name, palette] of [["light", light], ["dark", dark], ["terminal", terminal]]) {
+    for (const [token, value] of Object.entries(palette)) {
+      assert.ok(sds.has(value.toLowerCase()), `${name}: --${token} ${value} is not an SDS step`);
+    }
+  }
 });

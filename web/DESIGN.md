@@ -1,10 +1,10 @@
 # Open Window web: design system
 
-What the interface is made of, visually: the tokens, the components, the rules they follow, and where they fall short. Everything lives in one stylesheet, `src/style.css`; this page describes it as of 22 October 2026 and is the reference for any change to it. Measured with a script over the stylesheet (contrast ratios computed from the token values, WCAG 2.2 formula), not by eye.
+What the interface is made of, visually: the tokens, the components, the rules they follow, and where they fall short. Everything lives in one stylesheet, `src/style.css`; this page describes it as of 24 October 2026 and is the reference for any change to it. Since 24 October 2026 the foundations are those of the [Stellar Design System](https://github.com/stellar/stellar-design-system) (SDS, `@stellar/design-system` 4.0.2): its colour scales, its fonts and its 14 and 16 px base sizes. The SDS ships React components; this interface is plain JavaScript, so it adopts the SDS tokens and state patterns in CSS, not the components. Measured with a script over the stylesheet (contrast ratios computed from the token values, WCAG 2.2 formula), not by eye.
 
 ## Principles
 
-Calm, legible, finance-grade. Clean surfaces and one accent; an energy gradient used sparingly; Inter for text and the system monospace for figures in the terminal. Motion is short and eased, and stops when the system asks for reduced motion. Two faces of one state: the **guided view** follows the system theme (light or dark); the **terminal view** is a dark market screen whatever the theme.
+Calm, legible, finance-grade. Clean surfaces and one accent (SDS lilac); a lilac-to-navy gradient used sparingly; Inter for text and Inconsolata for figures and identifiers. Motion is short and eased, and stops when the system asks for reduced motion. Two faces of one state: the **guided view** follows the system theme (light or dark); the **terminal view** is a dark market screen whatever the theme, with amber commands, a green GO key and a red CANCEL key, as on a market terminal.
 
 ## Tokens
 
@@ -12,35 +12,39 @@ All colours, radii, shadows and easings are custom properties on `:root`, redefi
 
 ### Colour
 
+Each value is a step of an SDS scale (Radix convention: steps 1–2 page backgrounds, 3–5 component backgrounds, 6–8 borders, 9–10 solid fills, 11 low-contrast text, 12 high-contrast text). The stylesheet names the step next to each value, and `test/design.test.js` checks that every palette value is one of them.
+
 | Token | Light | Dark | Terminal | Use |
 |---|---|---|---|---|
-| `--bg` | `#f5f5f7` | `#000000` | `#000000` | page |
-| `--surface` | `#ffffff` | `#161617` | `#0f0f10` | cards, panels |
-| `--surface-2` / `--surface-3` | `#f5f5f7` / `#e8e8ed` | `#1d1d1f` / `#2c2c2e` | `#18181a` / `#232326` | nested surfaces, segmented controls |
-| `--text` | `#1d1d1f` | `#f5f5f7` | `#f5f5f7` | body text |
-| `--muted` | `#636366` | `#a1a1a6` | `#8e8e93` | secondary text, terminal `.t-dim` |
-| `--subtle` | `#86868b` | `#86868b` | `#636366` | borders only, never text |
-| `--border` | `#e3e3e8` | `#2c2c2e` | `#232326` | decorative separators |
-| `--field` | `#d2d2d7` | `#424245` | `#3a3a3c` | chip, ghost button and key outlines |
-| `--input-border` | `#8e8e93` | `#6e6e73` | — | text field outlines |
-| `--accent` | `#0066cc` | `#2997ff` | `#409cff` | links, accent text |
-| `--accent-strong` | `#0071e3` | `#0071e3` | `#0a84ff` | primary button background, focus border |
-| `--accent-soft` | `#e8f1fd` | `#0b2440` | `#0a2440` | selected and secondary backgrounds |
-| `--ok`, `--warn`, `--danger` | `#1b7a38`, `#a35200`, `#c4161c` | `#30d158`, `#ffb340`, `#ff6961` | `#30d158`, `#ffd60a`, `#ff453a` | states, each with a `-soft` background |
-| `--t-id` | — | — | `#64d2ff` | addresses and identifiers in the terminal |
+| `--bg` | gray-02 `#f8f8f8` | gray-01 `#161616` | black | page |
+| `--surface` | white | gray-02 `#1c1c1c` | gray-01 `#161616` | cards, panels |
+| `--surface-2` / `--surface-3` | gray-02 / gray-03 | gray-03 / gray-05 | gray-02 / gray-04 | nested surfaces, segmented controls |
+| `--text` | gray-12 `#171717` | gray-12 `#ededed` | gray-12 `#ededed` | body text |
+| `--muted` | gray-11 `#6f6f6f` | gray-11 `#a0a0a0` | gray-11 `#a0a0a0` | secondary text, terminal `.t-dim` |
+| `--subtle` | gray-09 | gray-09 | gray-08 | borders only, never text |
+| `--border` | gray-06 | gray-06 | gray-04 | decorative separators |
+| `--field` | gray-07 | gray-07 | gray-07 | chip, ghost button and key fills |
+| `--input-border` | gray-10 `#858585` | gray-09 `#707070` | gray-09 `#707070` | control outlines |
+| `--accent` | lilac-11 `#5746af` | lilac-11 `#9e8cfc` | amber-09 `#ffb224` | links, accent text; terminal commands |
+| `--accent-strong` | lilac-09 `#6e56cf` | lilac-09 `#6e56cf` | amber-09 | primary button background, focus |
+| `--accent-soft` | lilac-03 | lilac-03 | amber-03 | selected and secondary backgrounds |
+| `--ok`, `--warn`, `--danger` | green-11, amber-11, red-11 | green-11, amber-11, red-11 | green-11, gold-09, red-11 | states, each with a `-soft` step-3 background |
+| `--t-id` | — | — | navy-11 `#849dff` | addresses and identifiers in the terminal |
 
 ### Type, shape, motion
 
 | Group | Tokens | Values |
 |---|---|---|
-| Families | `--font`, `--mono` | Inter (variable), then the platform UI fonts; the platform monospace stack |
+| Families | `--font`, `--mono` | Inter (variable, the SDS font), then the platform UI fonts; Inconsolata (variable, the SDS monospace), then the platform monospace stack |
+| Type scale | `--fs-3xs` … `--fs-2xl`, `--fs-lead`, `--fs-hero` | 11, 12, 13, 14 (SDS secondary), 16 (SDS primary), 18, 24 and 30 px; two `clamp()` sizes for the intro. Every `font-size` reads one (test) |
+| Spacing scale | `--space-1` … `--space-8` | 4, 8, 12, 16, 24, 32, 48 and 64 px, the 4 px grid |
 | Radius | `--radius`, `--radius-md`, `--radius-sm` | 20, 14 and 10 px; pills use 980 px |
 | Shadow | `--shadow-sm`, `--shadow`, `--shadow-lg` | layered and faint in light; none or a hairline in dark |
-| Focus | `--focus`, `--ring` | the accent, and a 4 px ring at 18 % (light) or 28 % (dark) |
+| Focus | `--focus`, `--ring` | the accent, and a 4 px ring at 22 % (light) or 30 % (dark and terminal) |
 | Easing | `--ease`, `--ease-out` | standard, and a long ease-out for entrances |
 | Breakpoints | media queries | 1280, 760 and 420 px, all `max-width` |
 
-Font sizes and spacing are not tokens yet: they are written in each rule (see the gaps below).
+Font sizes are tokens. The spacing scale is defined; the rules still write their own values and move onto it progressively (gap 4).
 
 ## Components
 
@@ -59,9 +63,9 @@ Font sizes and spacing are not tokens yet: they are written in each rule (see th
 
 | Check | Result |
 |---|---|
-| Text contrast, every text token on its surfaces, three palettes | all at or above 4.5:1 (lowest: `--accent` on `--accent-soft`, 4.89:1 light; terminal `.t-dim`, 5.44:1 on its lightest surface) |
-| Primary button label | 4.70:1 white on `--accent-strong` (both themes); terminal 5.76:1 black on `#0a84ff` |
-| Text field outline (`--input-border`) | 3.26:1 light, 3.57:1 dark: meets the 3:1 for component boundaries |
+| Text contrast, every text token on its surfaces and on its `-soft` background, three palettes | all at or above 4.5:1, checked by `test/design.test.js` (lowest: `--muted` on `--surface-3` in light, 4.53:1) |
+| Primary button label | 5.39:1 white on lilac-09 (both themes); terminal 11.65:1 black on amber-09 |
+| Text field outline (`--input-border`) | 3.69:1 light, 3.44:1 dark, 3.65:1 terminal: meets the 3:1 for component boundaries |
 | Focus | 11 `:focus-visible` rules; where an outline is removed, an accent border and the ring replace it; the terminal command line shows focus on its container |
 | Reduced motion, forced colours | both handled: motion stops, and Windows contrast themes keep an outline on focused fields |
 
@@ -69,8 +73,8 @@ Font sizes and spacing are not tokens yet: they are written in each rule (see th
 
 1. **Outline contrast of chips, ghost buttons, step marks and terminal keys.** Fixed on 22 October 2026: they are drawn with `--input-border` (3:1 or more in every palette, the terminal face defining its own), and `test/design.test.js` checks it from the stylesheet.
 2. **Touch targets under 44 px.** Fixed on 22 October 2026: one `@media (pointer: coarse)` block raises `.face-btn`, `.lang-btn`, `.tab`, `.chip`, `.btn-small`, `.input-small input` and `.t-key` to 44 px; the same test checks it.
-3. **Type scale.** 26 distinct font sizes, mostly `rem` values two decimals apart (`0.84`, `0.88`, `0.9`, `0.92`, `0.95`) plus a few `px`. Fix: eight tokens on a 1.125 ratio (`--fs-xs` to `--fs-3xl`) and a `clamp()` for the hero, then map each rule onto the nearest step.
-4. **Spacing scale.** 29 distinct values, 13 of them off a 4 px grid (5, 6, 7, 9, 10, 11, 13, 14, 18, 22, 26, 30 px). Fix: `--space-1` to `--space-8` on the 4 px grid; values of 2 and 6 px stay allowed inside dense terminal rows.
-5. **Colours outside the tokens.** 40 hex values in rules, 23 distinct, mostly `#fff` and terminal greys. Fix: move them onto existing tokens or new terminal ones.
+3. **Type scale.** Fixed on 24 October 2026: the 26 distinct sizes map onto ten tokens (the SDS 14 and 16 px among them), checked by the design test.
+4. **Spacing scale.** The tokens `--space-1` to `--space-8` exist (24 October 2026); the rules still carry 29 distinct values, 13 of them off the 4 px grid. Fix: map each rule onto the nearest step; values of 2 and 6 px stay allowed inside dense terminal rows.
+5. **Colours outside the tokens.** The literals left in rules (the gradient stops, the terminal keys, scrollbars, glows) were taken from the SDS scales by hand; the tests check the tokens only. Moving them onto tokens is maintenance.
 
 None of these changes the behaviour of the page; gaps 1 and 2 were accessibility and are closed, 3 to 5 are maintenance. A change to the stylesheet runs `npm test` and `npm run build` in `web/` like any other.
