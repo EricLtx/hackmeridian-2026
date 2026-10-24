@@ -2,7 +2,10 @@
 //
 //   npm run setup              resumes where the last run stopped
 //   npm run setup -- --fresh   new contracts (keeps the funded accounts; the
-//                              previous state is copied to testnet-<id>.json)
+//                              previous state is copied to testnet-<id>.json);
+//                              on the demo instance, only with
+//                              --new-demo-instance, since the web interface
+//                              then serves the new contracts
 //   npm run setup -- --restage new short repo for the seizure scene
 //   npm run setup -- --fx=local     re-admit the fund on the local FX feed
 //   npm run setup -- --fx=reflector back to the Reflector FX feed
@@ -48,6 +51,7 @@ import {
   saveState,
   WASM_DIR,
   codeKey,
+  ledgerEntries,
   CODE_SLICE_MAX_FEE,
   extendTtl,
   sleep,
@@ -61,6 +65,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { AuthClawbackEnabledFlag, AuthRequiredFlag, AuthRevocableFlag } from "@stellar/stellar-sdk";
+import { newContractsAllowed } from "./monitor-state.mjs";
 import { DEMO_TIMELOCK_SECS, FALLBACK_EUR_USD, FUND_SETTINGS, NAV_EUR_AT_SETUP, NAV_USD_AT_SETUP, OFFERS, SECOND_FUND_SETTINGS, THIRD_FUND_SETTINGS, navAt } from "./config.mjs";
 
 // The provider is an independent lender the issuer designates: the issuer
@@ -122,7 +127,7 @@ async function refreshNav(state) {
       console.log("  NAV reference stepped along the model");
     } catch (error) {
       // The NAV left the corridor: only a two-key re-anchor restores the fund.
-      console.log(`  NAV reference not stepped: ${error.message}; re-anchor with two keys (npm run monitor -- --rehearse --steps=12)`);
+      console.log(`  NAV reference not stepped: ${error.message}; re-anchor with two keys (npm run monitor -- --rehearse --live --steps=12)`);
     }
   }
 }
@@ -130,6 +135,14 @@ async function refreshNav(state) {
 async function main() {
   const state = loadState();
   if (process.argv.includes("--fresh") || !state.done) {
+    if (!newContractsAllowed({ stateName: STATE_NAME, confirmed: process.argv.includes("--new-demo-instance") })) {
+      console.error(
+        `${state.done ? "--fresh" : `No demo state in ${path.basename(STATE_FILE)}: this run`} would deploy new contracts for the demo instance and replace web/public/deployment.testnet.json.\n` +
+          "For a disposable instance, set its name: OPEN_WINDOW_STATE=<name> npm run setup -- --fresh.\n" +
+          "To replace the demo instance itself, add --new-demo-instance.",
+      );
+      process.exit(1);
+    }
     // Keeps the previous deployment reachable: copy its state aside, named
     // after its contract, so a rehearsed demo can be restored by renaming the file.
     if (state.contracts?.openWindow && fs.existsSync(STATE_FILE)) {
@@ -217,6 +230,16 @@ async function main() {
     const wasm = fs.readFileSync(path.join(WASM_DIR, "night_window.wasm"));
     const hash = crypto.createHash("sha256").update(wasm).digest();
     if (!state.keys.keeper) throw new Error("no keeper key: rerun setup from the Accounts step");
+    // The code entry is shared by every instance of this code: a disposable
+    // instance of code already in use finds it living longer than asked, and
+    // an extension to a shorter life extends nothing (its simulation names no
+    // entry, which extendTtl refuses to sign).
+    const { latest, entries } = await ledgerEntries([codeKey(hash)]);
+    const left = entries[0] ? entries[0].liveUntil - latest : 0;
+    if (left >= 30 * 17_280) {
+      console.log(`  code ${hash.toString("hex").slice(0, 12)}… already lives ${Math.floor(left / 17_280)} days, shared with every instance of this code: nothing to extend`);
+      return;
+    }
     const r = await extendTtl(state, "keeper", [codeKey(hash)], 30 * 17_280, { maxResourceFee: CODE_SLICE_MAX_FEE });
     console.log(`  code ${hash.toString("hex").slice(0, 12)}… extended, fee ${(Number(r.fee ?? 0n) / 1e7).toFixed(2)} XLM`);
   });
@@ -550,11 +573,26 @@ async function secondFund(state, ow, shares, teur) {
   console.log(`  NAV feed (EUR)   ${state.contracts.navOracle2}`);
   const shares2 = state.contracts.shares2;
 
-  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (at once on rc2; behind the delay from rc4, applied by the governor from rc5)", async () => {
+  await once(state, "secondStablecoin", "Governor registers tEURB as a EUR stablecoin (behind the delay since rc4, applied by the governor from rc5)", async () => {
     const token = sv.address(state.contracts.euro2);
-    await invoke(state, "governor", ow, "set_stablecoin", [token, sv.symbol("EUR")]);
-    // From rc4 a registration after the first admission is a proposal (S29).
-    const pending = await read(state, ow, "pending_stablecoin_change", [token]).catch(() => null);
+    // Registered, or proposed (from rc4 a registration after the first
+    // admission is a proposal, S29). Read until the chain shows one of them:
+    // an endpoint that has not reached the write's ledger answers neither,
+    // which is no proof of a registration at once.
+    const registry = async () => ({
+      registered: (await read(state, ow, "get_stablecoin", [token])) != null,
+      pending: await read(state, ow, "pending_stablecoin_change", [token]),
+    });
+    let seen = await registry();
+    if (!seen.registered && !seen.pending) {
+      await invoke(state, "governor", ow, "set_stablecoin", [token, sv.symbol("EUR")]);
+      for (let tries = 0; !seen.registered && !seen.pending; tries += 1) {
+        if (tries === 12) throw new Error("tEURB is neither registered nor proposed one minute after set_stablecoin: check the transaction, then rerun");
+        await sleep(5_000);
+        seen = await registry();
+      }
+    }
+    const pending = seen.registered ? null : seen.pending;
     if (pending) {
       const wait = Math.max(0, Number(pending.eta) - (await ledgerTime()));
       console.log(`  proposed; applying it after the time delay (${Math.ceil(wait / 60)} min)`);

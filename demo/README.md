@@ -15,11 +15,11 @@ Keys and contract addresses are written to `demo/.state/testnet.json`. The folde
 ## Commands
 
 ```sh
-npm run setup                    # deploy and configure; resumes after a failure
+npm run setup                    # deploy and configure; resumes after a failure (the first deployment of the demo instance needs --new-demo-instance)
 npm run setup -- --restage       # new short repo for the seizure scene
 npm run setup -- --fx=local      # re-admit the fund on the local FX feed
 npm run setup -- --fx=reflector  # back to the Reflector FX feed
-npm run setup -- --fresh         # new contracts, same funded accounts
+npm run setup -- --fresh --new-demo-instance   # new demo contracts, same funded accounts; the web interface follows them
 npm run setup -- --multisig      # governor becomes a 2-of-2 account with an outside co-signer
 npm run setup -- --second-fund   # admit a second fund (euro MMF share, own issuer and feed, no FX leg) and a second euro stablecoin
 npm run setup -- --third-fund    # admit a third fund whose share is a classic Stellar asset held through the Stellar Asset Contract (token code not ours), issuer flags: auth required, revocable, clawback
@@ -35,7 +35,7 @@ npm run onboard -- G...ADDRESS   # let an outside wallet use the web interface (
 npm run monitor -- --watch --act # monitoring: alerts every 30 s; pause, cancellation, veto, extension, reference step and release, each once a second endpoint confirms it
 npm run monitor -- --announce-admin=G...     # a planned governor handover: reported, never vetoed (also --announce=<wasm hash>, --announce-stablecoin=C..., --announce-guardian=G...)
 npm run monitor -- --watch --fx-fallback=C...  # compare the fund's FX leg with this feed instead of the demo's other one
-npm run monitor -- --rehearse    # fire every detector with a real trigger, act, restore
+npm run monitor -- --rehearse    # fire every detector with a real trigger, act, restore (disposable instance; --live for the demo one)
 npm run monitor -- --witness     # second instance elsewhere: alerts, never acts (refuses --act)
 npm run keys -- --rehearse       # key ceremony: --plan builds the unsigned multisig setOptions transaction, --readback checks an account, --rehearse replays it on testnet
 npm run upgrade -- --expect=<sha256>   # governed upgrade: check the built WASM against the expected hash, upload, extend, announce, propose (governor + trustee), wait, upgrade, migrate, keep the code alive; --propose / --apply split it; --restore-code restores an archived code entry
@@ -68,7 +68,7 @@ The two cleanup steps of `guardrails`, the NAV correction and the unpause, are r
 
 ## Day of a live demo
 
-The evening before: fund every demo account (≥ 50 XLM), run one monitor pass (no TTL alert), play the full rehearsal, `setup -- --restage`, then `demo -- --auto` and `demo -- --only=second --auto` end to end; refresh the indexer (`index`, `verify --anchors`, `anchor`) and rebuild the web interface; save the text output of every scene and a screen recording as fallbacks. One hour before: `setup -- --restage` again (the seizure repo must mature during the talk), `npm run status`, the monitor in `--watch` mode without `--act`. On stage, one scene per command, `board` → `open` → `guardrails` → `repurchase` → `seize` → `second` → `value`. Fallbacks: a second endpoint in `STELLAR_RPC_URLS` (automatic failover); `setup -- --fx=local` if the exchange-rate feed is down (before the talk: it re-admits the fund through the time delay); `demo -- --only=repair` for a dirty state; the recording and the saved outputs if the network is gone.
+The evening before: fund every demo account (≥ 50 XLM), run one monitor pass (no TTL alert), play the full rehearsal on a disposable instance (`OPEN_WINDOW_STATE=<name>`), `setup -- --restage`, then `demo -- --auto` and `demo -- --only=second --auto` end to end; refresh the indexer (`index`, `verify --anchors`, `anchor`) and rebuild the web interface; save the text output of every scene and a screen recording as fallbacks. One hour before: `setup -- --restage` again (the seizure repo must mature during the talk), `npm run status`, the monitor in `--watch` mode without `--act`. On stage, one scene per command, `board` → `open` → `guardrails` → `repurchase` → `seize` → `second` → `value`. Fallbacks: a second endpoint in `STELLAR_RPC_URLS` (automatic failover); `setup -- --fx=local` if the exchange-rate feed is down (before the talk: it re-admits the fund through the time delay); `demo -- --only=repair` for a dirty state; the recording and the saved outputs if the network is gone.
 
 ## How a transaction is confirmed
 
@@ -104,9 +104,9 @@ The fund is admitted with the settings in `config.mjs`; the board reads them bac
 | `The wrong NAV may still be live` | The NAV correction did not take | `npm run demo -- --only=repair` |
 | `StalePrice` | NAV older than its bound (26 h for the first fund, 64 h for the second and third), or FX older than 3 days | `npm run status` republishes every fund's NAV; for FX, `setup -- --fx=local` |
 | `PriceOutOfBand` outside the guardrails scene | EUR/USD moved more than 2 % since admission | `setup -- --fx=local`, or back with `--fx=reflector`: re-admission anchors today's rate |
-| `PriceOutOfBand` after a quiet spell (rc5) | Nobody stepped the price reference for about ten days, and the NAV left its corridor | `npm run status` steps it while the NAV is still inside; otherwise re-anchor with two keys: `npm run monitor -- --rehearse --steps=12` |
+| `PriceOutOfBand` after a quiet spell (rc5) | Nobody stepped the price reference for about ten days, and the NAV left its corridor | `npm run status` steps it while the NAV is still inside; otherwise re-anchor with two keys: `npm run monitor -- --rehearse --live --steps=12` |
 | `Repo #n from an earlier run is still open` | A rehearsal opened a repo and did not repurchase it | `npm run demo -- --only=repurchase` |
-| `No offer has enough funds left` | Offers drained by repeated runs | `setup -- --fresh` |
+| `No offer has enough funds left` | Offers drained by repeated runs | `setup -- --fresh --new-demo-instance` (new demo contracts: the web interface follows them) |
 | `Repo #n is Defaulted` | The staged repo was already seized | `setup -- --restage`, then wait one hour |
 | `Setup failed: … account` | Testnet reset; accounts and contracts are gone | Delete `demo/.state/testnet.json`, run `setup` again |
 
@@ -116,7 +116,7 @@ Re-admission anchors the NAV reference on the live NAV, so run `repair` before `
 
 `setup` sets the contract's time delay to 5 minutes before the first fund is admitted (`config.mjs`), so changes can be shown live; a real deployment keeps 48 hours or more. With `--multisig`, the governor needs two keys for every action. After admission, replacing the fund, raising a cap, registering a stablecoin or appointing a guardian is a proposal: `setup -- --fx=…` proposes the replacement, waits for the delay, then applies it; `setup -- --second-fund` applies the second stablecoin's registration with the governor's key, which rc5 requires and rc4 accepts. The operator extends the contract code itself, by 30 days at a time, because the contract never extends its own code.
 
-Since rc5 a fund's price corridor grows over at most one NAV age bound after its reference. The first fund's NAV grows 4 % a year: on a reference left alone for about ten days it leaves the corridor, and only a two-key re-anchor restores the fund. The run's heartbeat (every scene, and `npm run status`) and `setup` therefore step the reference with `refresh_reference`, which anyone may call, when it is older than the fund's NAV age bound, as the monitor's keeper does; when the step is refused, they say so and point to the re-anchor drill (`npm run monitor -- --rehearse --steps=12`).
+Since rc5 a fund's price corridor grows over at most one NAV age bound after its reference. The first fund's NAV grows 4 % a year: on a reference left alone for about ten days it leaves the corridor, and only a two-key re-anchor restores the fund. The run's heartbeat (every scene, and `npm run status`) and `setup` therefore step the reference with `refresh_reference`, which anyone may call, when it is older than the fund's NAV age bound, as the monitor's keeper does; when the step is refused, they say so and point to the re-anchor drill (`npm run monitor -- --rehearse --live --steps=12`).
 
 ## Monitoring
 
@@ -143,7 +143,7 @@ The rehearsal (`npm run monitor -- --rehearse`) plays nineteen drills, each with
 
 With `--act`, the actions are, in this order: the cancellation of an unannounced upgrade or stablecoin proposal and the pause on a price refusal or a deficit, signed by the sentinel; the veto of an unannounced governor handover or forced guardian change, sent only when the guardian's or the trustee's key is on the host, else a critical alert asks for it by hand; the keeper's extensions of entries near archival (the contract code in 30-day slices), steps of an old price reference and releases of deliverable shares. With two endpoints in `STELLAR_RPC_URLS`, the default, each action waits for the second endpoint to reach the pass's ledger and is taken only when its own reading agrees; otherwise a critical "not taken" alert asks a human. The rehearsal therefore needs both endpoints reachable, or a single endpoint in `STELLAR_RPC_URLS`. A planned change is announced first so that it is reported, not answered: `--announce=<wasm hash>`, `--announce-stablecoin=<C...>`, `--announce-admin=<G...>` and `--announce-guardian=<G...>`. Nothing else is automatic: unpausing stays a decision for the governor. What to do for each alert is in [docs/incident-procedure.md](../docs/incident-procedure.md).
 
-Modes: `npm run monitor` is one pass; `--watch` is a pass every 30 s; `--act` adds the automatic actions; `--rehearse` plays the drills. `--witness` is a watch for a second instance on another machine: it alerts and never acts (it refuses `--act` and `--rehearse` with an error), writes to its own files (`demo/.state/monitor-witness.json`, `demo/.state/alerts-witness.jsonl`), sends its heartbeat to `HEARTBEAT_WITNESS_URL` and tags every line with `[witness]`. Two witnesses, one actor: when only one of them alerts on a ledger, investigate.
+Modes: `npm run monitor` is one pass; `--watch` is a pass every 30 s; `--act` adds the automatic actions; `--rehearse` plays the drills, on a disposable instance only (`OPEN_WINDOW_STATE=<name>`): it refuses the demo instance, known by its name or by the contract id `web/public/deployment.testnet.json` publishes, unless `--live` asks for it, after any `--watch --act` on it has been stopped. `--witness` is a watch for a second instance on another machine: it alerts and never acts (it refuses `--act` and `--rehearse` with an error), writes to its own files (`demo/.state/monitor-witness.json`, `demo/.state/alerts-witness.jsonl`), sends its heartbeat to `HEARTBEAT_WITNESS_URL` and tags every line with `[witness]`. Two witnesses, one actor: when only one of them alerts on a ledger, investigate.
 
 ## Outside wallets
 

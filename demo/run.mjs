@@ -231,7 +231,7 @@ async function stepReference(now) {
   } catch (error) {
     alarm(
       `The NAV left the corridor of a reference ${age(referenceAge)} old (${error.message}).`,
-      "re-anchor with two keys: `npm run monitor -- --rehearse --steps=12` proposes the current NAV and rate, then applies them after the delay",
+      "re-anchor with two keys: `npm run monitor -- --rehearse --live --steps=12` proposes the current NAV and rate, then applies them after the delay",
     );
   }
 }
@@ -556,12 +556,12 @@ async function open() {
   const principal = ((BigInt(q.max_principal) * LIVE_BORROW_BPS) / 10_000n / ONE) * ONE;
   const [offer] = (await offers()).filter((o) => BigInt(o.available) >= principal);
   if (!offer) {
-    alarm("No offer has enough funds left.", "npm run setup -- --fresh");
+    alarm("No offer has enough funds left.", "npm run setup -- --fresh --new-demo-instance");
     return;
   }
   const shares = BigInt(await balance(C.shares, pub("borrower")));
   if (shares < LIVE_SHARES) {
-    alarm(`The borrower holds ${fmt(shares, 7, 0)} shares, fewer than ${fmt(LIVE_SHARES, 7, 0)}.`, "npm run setup -- --fresh");
+    alarm(`The borrower holds ${fmt(shares, 7, 0)} shares, fewer than ${fmt(LIVE_SHARES, 7, 0)}.`, "npm run setup -- --fresh --new-demo-instance");
     return;
   }
   const term = 3 * 24 * 3600;

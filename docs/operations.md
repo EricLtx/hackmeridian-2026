@@ -36,7 +36,7 @@ Order of operations, as `demo/setup.mjs` performs it (each step is idempotent an
 4. The steward **registers its backup** (`set_steward_backup`): mandatory by policy (decision D4), the monitor alerts while it is missing.
 5. **Approve the lender** on each fund: the lender signs an attestation with the steward (`attest_lender`, S25), the steward approves (`approve_lender`, S8). The issuer must also allowlist the lender and the contract on its share token.
 6. The lender **creates offers** (`create_offer`): stablecoin, amount, rate, term ceiling, funds listed (at most 8). The steward may mark one as the designated offer (S19).
-7. **Name the guardian's backup and the sentinel**, start the monitor (`--watch --act`) with the sentinel's and the keeper's keys, run the rehearsal once (`npm run monitor -- --rehearse`) against the instance, with both RPC endpoints reachable.
+7. **Name the guardian's backup and the sentinel**, run the rehearsal once on a disposable instance deployed from the same build (`OPEN_WINDOW_STATE=<name> npm run monitor -- --rehearse`), with both RPC endpoints reachable, then start the monitor (`--watch --act`) with the sentinel's and the keeper's keys. On the instance itself the rehearsal needs `--live`, and never runs while its watch acts.
 
 Admission checklist, to tick before step 3 for every fund:
 
