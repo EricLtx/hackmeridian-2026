@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { HOUR, interest } from "../src/terms.js";
-import { COST_PRESETS, ROLES, SCENES, bestRate, costOf, freshness, isOpen, openHours, replayRepo, visibleWords } from "../src/tour-scenes.js";
+import { COMPARE, COST_PRESETS, PLANETS, ROLES, SCENES, bestRate, costOf, freshness, isOpen, openHours, replayRepo, visibleWords } from "../src/tour-scenes.js";
 
 const KINDS = ["title", "hook", "context", "problem", "insight", "roles", "journey", "cost", "live", "safety", "questions", "roadmap", "cta"];
 
@@ -43,6 +43,75 @@ test("the doors of the last scene stay on this site", () => {
 test("each role states what it can do and what it can never do", () => {
   assert.equal(ROLES.length, 7);
   for (const r of ROLES) assert.ok(r.name && r.can && r.never, r.id);
+});
+
+test("the three parties a visitor may be get an 'is it for you?' moment, with the answer when it is not a fit", () => {
+  for (const id of ["holder", "lender", "steward"]) {
+    const r = ROLES.find((x) => x.id === id);
+    assert.ok(r.fit, `${id} has a fit block`);
+    assert.ok(r.fit.questions.length >= 2 && r.fit.questions.length <= 3, `${id}: two or three questions`);
+    for (const q of r.fit.questions) assert.match(q, /\?$/, `${id}: a question`);
+    assert.match(r.fit.no, /not for you|not the tool|do not lend/, `${id}: says when it is not a fit`);
+  }
+  for (const id of ["governor", "guardian", "sentinel", "trustee"]) assert.equal(ROLES.find((x) => x.id === id).fit, undefined);
+});
+
+/** Every text a visitor reads on the scenes (not the speaker notes). */
+function visibleTexts() {
+  const out = [];
+  for (const s of SCENES) {
+    out.push(s.kicker, s.title, s.body ?? "", ...(s.points ?? []));
+    for (const pair of [...(s.steps ?? []), ...(s.tabs ?? []), ...(s.faq ?? []), ...(s.phases ?? [])]) out.push(...pair);
+    for (const [label] of s.doors ?? []) out.push(label);
+  }
+  for (const r of ROLES) out.push(r.name, r.can, r.never, ...(r.fit?.questions ?? []), r.fit?.no ?? "");
+  out.push(COMPARE.before.title, ...COMPARE.before.items, COMPARE.after.title, ...COMPARE.after.items);
+  return out.filter(Boolean);
+}
+
+test("counselling tone: no marketing superlative and no business figure on the scenes", () => {
+  const forbidden = /\b(first|guaranteed|guarantee[sd]?|instant(?:ly)?|audited|safest|oldest|fastest|cheapest|unique|revolutionary|seamless)\b/i;
+  for (const text of visibleTexts()) {
+    assert.doesNotMatch(text, forbidden, text);
+    // No yield, rate, amount or count typed into the scenes: figures come from the chain, or from the cost scene's formula.
+    assert.doesNotMatch(text, /\d+(?:[.,]\d+)?\s*(?:%|€|\$|EUR|USD|bps|tests?|drills?)\b/i, text);
+  }
+});
+
+test("the approach is stated before anything is read live: repo not pool, fixed terms, exits open, what is not claimed", () => {
+  const index = (kind) => SCENES.findIndex((s) => s.kind === kind);
+  const textOf = (kind) => visibleTexts().join(" ") && [SCENES[index(kind)]].flatMap((s) => [s.title, s.body ?? "", ...(s.tabs ?? []).flat(), ...(s.faq ?? []).flat()]).join(" ");
+  assert.ok(index("insight") < index("journey") && index("roles") < index("cost") && index("cost") < index("live"));
+  assert.match(textOf("insight"), /repo, not a pool/i);
+  assert.match(textOf("insight"), /fixed term, fixed rate/i);
+  assert.match(textOf("insight"), /no liquidation, no margin call/i);
+  assert.match(textOf("safety"), /no pause and no upgrade blocks an exit/i);
+  assert.match(textOf("safety"), /guardian or the trustee can veto/i);
+  assert.match(textOf("questions"), /testnet/i);
+  assert.match(textOf("questions"), /nothing promises liquidity/i);
+  assert.match(textOf("questions"), /third party/i);
+  assert.match(ROLES.find((r) => r.id === "steward").never, /never lends/i);
+});
+
+test("the planets name bundled textures, on scenes after the first, and move only when motion is allowed", () => {
+  const withPlanet = SCENES.filter((s) => s.planet);
+  assert.ok(withPlanet.length >= 1 && withPlanet.length <= PLANETS.length);
+  assert.equal(SCENES[0].planet, undefined, "the first scene carries no lazy planet");
+  for (const s of withPlanet) assert.ok(PLANETS.includes(s.planet), `${s.id}: ${s.planet}`);
+  const tour = readFileSync(new URL("../src/tour.js", import.meta.url), "utf8");
+  assert.match(tour, /tour-planet-strip"><img [^>]*loading="lazy"[^>]*decoding="async"|tour-planet-strip">\$\{img\}/);
+  assert.match(tour, /width="2048" height="1024" loading="lazy" decoding="async"/);
+  const css = readFileSync(new URL("../src/style.css", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const allowed = css.indexOf("@media (prefers-reduced-motion: no-preference)");
+  assert.ok(allowed > 0);
+  const end = css.indexOf("\n}\n", allowed);
+  for (const name of ["ow-planet-spin", "ow-sky-drift"]) {
+    const uses = [...css.matchAll(new RegExp(`animation:[^;]*\\b${name}\\b`, "g"))].map((m) => m.index);
+    assert.equal(uses.length, 1, `${name} is used once`);
+    assert.ok(uses[0] > allowed && uses[0] < end, `${name} runs only when motion is allowed`);
+  }
+  const reduce = css.slice(css.lastIndexOf("@media (prefers-reduced-motion: reduce)"));
+  assert.match(reduce, /\.tour-planet-strip\s*\{[^}]*animation: none/);
 });
 
 test("the week view: 40 open hours in business hours, all 168 with Open Window", () => {
@@ -124,14 +193,22 @@ test("a price's freshness follows the age the contract accepts", () => {
   assert.equal(freshness(0, 3600, 5000), null);
 });
 
-test("the tour's images are bundled WebP files, credited in NOTICE", () => {
-  for (const name of ["earth", "stars"]) {
-    const head = readFileSync(new URL(`../public/tour/${name}.webp`, import.meta.url)).subarray(0, 12);
-    assert.equal(head.subarray(0, 4).toString("latin1"), "RIFF");
-    assert.equal(head.subarray(8, 12).toString("latin1"), "WEBP");
+test("the tour's images are bundled WebP files within their budget, credited in NOTICE", () => {
+  let planets = 0;
+  for (const name of ["earth", "stars", ...PLANETS]) {
+    const file = readFileSync(new URL(`../public/tour/${name}.webp`, import.meta.url));
+    assert.equal(file.subarray(0, 4).toString("latin1"), "RIFF");
+    assert.equal(file.subarray(8, 12).toString("latin1"), "WEBP");
+    if (PLANETS.includes(name)) {
+      assert.ok(file.length <= 450 * 1024, `${name}: ${file.length} bytes`);
+      planets += file.length;
+    }
   }
+  assert.ok(planets <= 1600 * 1024, `planet textures: ${planets} bytes`);
   const notice = readFileSync(new URL("../../NOTICE", import.meta.url), "utf8");
   assert.match(notice, /NASA 3D/);
+  assert.match(notice, /Solar System Scope \(https:\/\/www\.solarsystemscope\.com\/textures\/\)/);
+  assert.match(notice, /CC BY 4\.0 \(https:\/\/creativecommons\.org\/licenses\/by\/4\.0\/\)/);
   assert.match(notice, /reveal\.js 6\.0\.2/);
 });
 
