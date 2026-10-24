@@ -16,6 +16,7 @@ export default {
   "Positions": "Posiciones",
   "Lend": "Prestar",
   "History": "Historial",
+  "Guided tour": "Visita guiada",
   "Borrow against fund shares, at any hour.": "Pida prestado contra participaciones de fondos, a cualquier hora.",
   "Lock tokenized money market fund shares, receive stablecoins in one transaction, and buy the shares back when you are done. Interest runs per started hour. Testnet only: nothing here has real value.":
     "Bloquee participaciones tokenizadas de fondos del mercado monetario, reciba stablecoins en una sola transacción y recompre las participaciones cuando termine. Los intereses corren por hora iniciada. Solo testnet: nada aquí tiene valor real.",
