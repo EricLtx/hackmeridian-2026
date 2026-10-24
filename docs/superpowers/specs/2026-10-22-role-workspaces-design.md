@@ -94,7 +94,7 @@ An action that needs two parties is built by the first party on the page: the pa
 | Phase | Scope | When |
 |---|---|---|
 | 0 | The five interface defects of 22 October (terminal status band, total haircut, untranslated tape events, control outlines, touch targets); role recognition and role chips; the Operate space read-only (health, roles, proposals with countdowns); the total protection of a loan shown in one place | before the web freeze of 24 October, 18:00 |
-| 0b | Positions summary at the top of the Positions space and of the lender's repos, read-only, from the rows the page already holds | before the web freeze of 24 October, 18:00 |
+| 0b | Positions summary at the top of the Positions space and of the lender's repos, read-only, from the rows the page already holds | 24 October 2026 |
 | 1 | Single-signer actions of the Operate and Fund spaces | after the freeze |
 | 2 | Co-signature requests: admission (governor and steward), lender attestation (lender and steward), upgrade (governor and trustee), re-anchor (governor and steward) | after phase 1 |
 | 3 | Instance selector once a second instance exists; a risk and jurisdiction acknowledgement before any mainnet use | before mainnet |

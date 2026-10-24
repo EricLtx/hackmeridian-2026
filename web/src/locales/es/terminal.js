@@ -62,6 +62,7 @@ export default {
   "BORROWER": "PRESTAT.",
   "{n} admitted · ◆ this screen's fund": "admitidos: {n} · ◆ fondo de esta pantalla",
   "Reading the funds…": "Leyendo los fondos…",
+  "No fund admitted yet.": "Ningún fondo admitido todavía.",
   "The fund this screen borrows against": "El fondo que esta pantalla usa como garantía",
   "Classic Stellar asset held through the Stellar Asset Contract": "Activo clásico de Stellar mantenido a través del Stellar Asset Contract",
   "SEP-41 share token": "Token de participaciones SEP-41",

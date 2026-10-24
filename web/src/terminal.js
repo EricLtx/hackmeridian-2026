@@ -524,7 +524,9 @@ export function createTerminal(ctx) {
     const rows = fundRows(S.board?.funds ?? [], { feeds: feedsWithBoard(), now: now(), iface: iface() });
     $("t-funds-meta").textContent = t("{n} admitted · ◆ this screen's fund", { n: rows.length });
     if (!rows.length) {
-      setHTML($("t-funds"), `<p class="t-loading">${esc(t("Reading the funds…"))}</p>`);
+      // Before the board answers the list is being read; after it, an empty list is an empty registry.
+      const line = S.board ? `<p class="t-empty">${esc(t("No fund admitted yet."))}</p>` : `<p class="t-loading">${esc(t("Reading the funds…"))}</p>`;
+      setHTML($("t-funds"), line);
       return;
     }
     const stateTone = { OPEN: "ok", FROZEN: "warn", STALE: "bad", "FX STALE": "bad" };
