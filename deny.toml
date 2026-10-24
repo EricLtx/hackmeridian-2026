@@ -11,6 +11,12 @@ ignore = [
   # `paste` is unmaintained; it is pulled in only by host-side test code of the
   # Soroban SDK and is not part of the contract WASM (technical watch, 15 October 2026).
   { id = "RUSTSEC-2024-0436", reason = "test-only dependency, not in the deployed WASM" },
+  # `crypto-bigint` 0.5 (timing variability): reached only through `k256` and
+  # `p256` of `soroban-env-host`, the host the tests run on; the contract WASM
+  # has no dependency on it (`cargo tree --target wasm32v1-none -i crypto-bigint`
+  # prints nothing). The fix is on the 0.7 line, which the host has not moved
+  # to; lifted when `soroban-env-host` does (technical watch, 24 October 2026).
+  { id = "RUSTSEC-2026-0387", reason = "host-side test dependency, not in the deployed WASM" },
 ]
 
 [licenses]

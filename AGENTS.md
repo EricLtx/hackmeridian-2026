@@ -32,7 +32,8 @@ Read `docs/security.md` before changing the contract. The enforced rules:
 - Every privileged function loads the admin from storage and calls `require_auth` on it. Every `Address` argument whose authority a function consumes gets its own `require_auth` in that function.
 - Deadlines live in stored values and are compared to the ledger timestamp, never inferred from a TTL.
 - Error codes and exported types are append-only.
-- Before finishing a change, run `cargo fmt --all --check`, `stellar contract build`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, in that order. CI runs the same, plus the WASM stack canary (see Test), the web's and the tooling's tests, `cargo deny` and a RustSec advisory check.
+- Before finishing a change, run `cargo fmt --all --check`, `stellar contract build`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, in that order. CI runs the same, plus the WASM stack canary (see Test), the web's and the tooling's tests, `cargo deny` and a RustSec advisory check. On a pull request it runs only the jobs the changed files need (`.github/scripts/changes.mjs`: a Rust change runs everything that uses the WASM, a change under `.github/` or a path it does not know runs everything); a push to main runs everything. `ci-ok` sums it up, and `public-guard` fails on any tracked path under `private/` or `references/`.
+- A change to a path that holds funds, signatures or the review rules (`.github/CODEOWNERS`) gets a review checklist from CI (`.github/scripts/critical.mjs`, job `critical-review`, label `critical-path`), drawn from this file, `docs/security.md` §7 and `SECURITY.md`. It is routed and flagged by CI; enforcement comes with a second maintainer and a ruleset.
 
 ## Test
 
