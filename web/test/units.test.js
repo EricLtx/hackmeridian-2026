@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { Asset, Networks } from "@stellar/stellar-sdk";
 import { Chain } from "../src/chain.js";
 import { ContractError, TransactionError, WalletError, contractKinds, decodeSimulationError, describeError } from "../src/errors.js";
-import { formatAge, formatAmount, formatCountdown, formatDuration, formatOrDash, formatRate, formatTerm, formatUnits, toUnits, unitsToInput } from "../src/format.js";
+import { formatAge, formatAmount, formatCountdown, formatDuration, formatOrDash, formatRate, formatTerm, formatUnits, offerAmount, toUnits, unitsToInput } from "../src/format.js";
 import {
   chargedHours,
   defaultPrincipal,
@@ -274,4 +274,18 @@ test("seize refusals read in plain words", () => {
   assert.equal(notApproved.name, "LenderNotApproved");
   assert.match(describeError(new ContractError(21, "open-window"), { action: "create_offer" }).text, /not an approved lender/);
   assert.match(describeError(new ContractError(18, "open-window"), { when: "Sat 17 Oct, 15:28" }).text, /from Sat 17 Oct, 15:28\.$/);
+});
+
+test("an offer's available amount drops its fraction once large, and keeps the exact amount for the title", () => {
+  assert.deepEqual(offerAmount(3_000_000_400_000n, 7), { text: "300,000", full: "300,000.04" });
+  assert.deepEqual(offerAmount(1_000n * ONE, 7), { text: "1,000", full: "1,000.00" });
+  // Floored, never rounded up: the book never promises more than the offer holds.
+  assert.equal(offerAmount(1_000n * ONE + 9_999_999n, 7).text, "1,000");
+  assert.equal(offerAmount(1_000n * ONE + 9_999_999n, 7).full, "1,000.9999999");
+  // Below 1,000 whole units the usual two decimals stay.
+  assert.deepEqual(offerAmount(999n * ONE + 9_999_999n, 7), { text: "999.99", full: "999.9999999" });
+  assert.deepEqual(offerAmount(5_000_000_000n, 7), { text: "500.00", full: "500.00" });
+  assert.deepEqual(offerAmount(0n, 7), { text: "0.00", full: "0.00" });
+  assert.deepEqual(offerAmount(123_456n, 2), { text: "1,234", full: "1,234.56" });
+  assert.deepEqual(offerAmount(1_234n, 0), { text: "1,234", full: "1,234" });
 });

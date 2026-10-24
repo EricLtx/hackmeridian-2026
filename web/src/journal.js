@@ -57,6 +57,25 @@ export const explorerOf = (history, dep) => httpsUrl(history?.explorer) ?? https
 /** A close time of the export, "2026-10-15T21:44:57Z", as "2026-10-15 21:44:57 UTC", escaped; a dash when there is none. */
 export const when = (iso) => (iso ? esc(String(iso).replace("T", " ").replace(/(:\d\d)Z$/, "$1 UTC")) : "—");
 
+/**
+ * The same time short enough for a table cell, "21 Oct, 23:01 UTC" in the
+ * language `loc` (a BCP 47 locale, on a 24-hour clock), as a `<time>` that
+ * carries the ISO value and the full time as its title, everything escaped;
+ * a dash when there is none or it is not a time.
+ */
+export function whenShort(iso, loc) {
+  if (!iso || typeof iso !== "string") return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  let short;
+  try {
+    short = new Intl.DateTimeFormat(loc, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23", timeZone: "UTC" }).format(date);
+  } catch {
+    return "—"; // a locale Intl refuses
+  }
+  return `<time datetime="${esc(iso)}" title="${when(iso)}">${esc(short)} UTC</time>`;
+}
+
 /** A transaction's short hash, linked to the explorer when there is a usable one. */
 export function txLink(explorer, hash) {
   if (!hash) return "—";

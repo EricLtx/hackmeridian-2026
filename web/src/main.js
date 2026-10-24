@@ -19,6 +19,7 @@ import {
   formatRate,
   formatTerm,
   formatUnits,
+  offerAmount,
   shortAddress,
   toUnits,
   unitsToInput,
@@ -39,6 +40,7 @@ import { ROLES, ROLE_TITLES, effectiveHaircutBps, guideTerms, roleGuide } from "
 import { roleLabel, rolesNone, rolesOf } from "./roles.js";
 import { operateModel, whoCanApply } from "./operate.js";
 import { closingLine, eventsOfRepo, heldNote, stillHeldLine, timelineOf } from "./timeline.js";
+import { borrowerSummary, lenderSummary, summaryMarkup } from "./summary.js";
 import { createTerminal } from "./terminal.js";
 import { connectFreighter, watchFreighter } from "./wallet.js";
 import { applyStatic, bootLang, lang, markLangButtons, numberStyle, persistLang, setLang, t, tn } from "./i18n.js";
@@ -71,6 +73,7 @@ const S = {
   unreadable: new Set(), // repo ids the scan could not read (a field missing from the chain's answer)
   positionsError: null, // what stopped the last read of the positions, shown in the panel
   dues: new Map(),
+  duesRead: false, // the interest due has been read once for this wallet: a repo missing from `dues` could not be read
   openings: new Map(), // repo id -> opening tx, from events
   releases: new Map(), // closed repo id -> shares held back (the token refused them, or the lender awaits approval)
   history: null, // the indexer's export (history.json) when the page can read it: events by repo, for the timelines
@@ -102,6 +105,12 @@ const code = () => S.dep.stablecoin.code;
 const sym = () => S.dep.fund.symbol;
 const money = (units, rounding) => `${formatAmount(units, SD(), rounding)} ${code()}`;
 const exact = (units) => `${formatUnits(units, SD())} ${code()}`;
+/** The positions summary of `rows` (borrower or lender): each card's total is rounded up to the cent, so the tile is the sum the cards show. */
+const summaryOf = (kind, rows, ts) => {
+  const unit = 10n ** BigInt(Math.max(SD() - 2, 0));
+  const model = (kind === "lender" ? lenderSummary : borrowerSummary)(rows, S.dues, ts, { unit });
+  return summaryMarkup(model, kind, { decimals: SD(), code: code(), reading: !S.duesRead });
+};
 const shareAmount = (units) => `${formatAmount(units, FD())} ${sym()}`;
 const onboardCommand = (address, lender = false) => `cd demo && npm run onboard -- ${address}${lender ? " --role=lender" : ""}`;
 /** A number written with a dot ("1.5"), with the decimal separator of the interface language. */
@@ -481,7 +490,7 @@ function drawOffers() {
       (o) => `<tr>
         <td data-label="${label.offer}"><span class="strong">#${o.id}</span>${o.sponsor ? ` <span class="badge" title="${esc(t("An independent lender the fund issuer designates"))}">${esc(t("Designated"))}</span>` : ""}
           <span class="muted small mono">${esc(shortAddress(o.lender))}</span>${S.wallet && o.lender === S.wallet.address ? ` <span class="badge badge-muted">${esc(t("You"))}</span>` : ""}</td>
-        <td data-label="${label.available}" class="num">${esc(money(o.available, "floor"))}</td>
+        <td data-label="${label.available}" class="num" title="${esc(`${offerAmount(o.available, SD()).full} ${code()}`)}">${esc(`${offerAmount(o.available, SD()).text} ${code()}`)}</td>
         <td data-label="${label.rate}" class="num">${esc(formatRate(o.rate_bps))} <span class="muted small">${esc(t("a year"))}</span></td>
         <td data-label="${label.term}" class="num">${esc(formatTerm(maxTermFor(o, S.maxTerm || o.max_term)))}</td>
       </tr>`,
@@ -640,6 +649,7 @@ function adoptWallet(wallet) {
   S.unreadable = new Set();
   S.positionsError = null;
   S.dues = new Map();
+  S.duesRead = false;
   S.openings = new Map();
   S.releases = new Map();
   S.eventsFrom = null;
@@ -723,7 +733,7 @@ function renderBorrowOffers() {
       const parts = [
         `#${o.id}${o.sponsor ? ` · ${t("Designated")}` : ""}`,
         formatRate(o.rate_bps),
-        t("{amount} available", { amount: money(o.available, "floor") }),
+        t("{amount} available", { amount: `${offerAmount(o.available, SD()).text} ${code()}` }),
         t("up to {hours} h", { hours: Math.floor(maxTermFor(o, S.maxTerm) / HOUR) }),
       ];
       return `<option value="${o.id}">${esc(parts.join(" · "))}</option>`;
@@ -943,6 +953,7 @@ async function refreshPositions() {
       }
     }),
   );
+  S.duesRead = true;
   // A closed repo may still owe shares: the token refused to move them, or (a seizure) the lender awaits approval.
   const closedIds = [...new Map([...S.mine, ...S.lent]).values()].filter((r) => r.status !== "Open").map((r) => r.id);
   await Promise.all(
@@ -1030,9 +1041,10 @@ function renderPositions() {
           r.status === "Repurchased" ? t("Repurchased") : t("Shares kept by lender"),
         )}</span> <span class="num">${esc(money(r.principal))}</span>${releaseNote(r.id)}</summary>${timelineMarkup(r)}</details></li>`,
     );
+  // The summary adds up the open cards below it; nothing when none is open.
   setHTML(
     body,
-    `${cards.join("") || `<p class="muted">${esc(t("No open position."))}</p>`}
+    `${summaryOf("borrower", open, ts)}${cards.join("") || `<p class="muted">${esc(t("No open position."))}</p>`}
      ${history.length ? `<h3 class="sub">${esc(t("Closed positions"))}</h3><ul class="history">${history.join("")}</ul>` : ""}`,
   );
   syncWriteButtons();
@@ -1231,7 +1243,7 @@ function renderLent() {
   );
   setHTML(
     box,
-    `<h3 class="sub">${esc(t("Repos on your offers"))}</h3>${cards.join("") || `<p class="muted">${esc(t("No open repo on your offers."))}</p>`}
+    `<h3 class="sub">${esc(t("Repos on your offers"))}</h3>${summaryOf("lender", open, ts)}${cards.join("") || `<p class="muted">${esc(t("No open repo on your offers."))}</p>`}
      ${history.length ? `<ul class="history">${history.join("")}</ul>` : ""}`,
   );
   syncWriteButtons();

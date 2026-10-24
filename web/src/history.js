@@ -11,8 +11,8 @@ import { tapeLine } from "./blotter.js";
 import { formatAmount, formatOrDash, formatRate, shortAddress } from "./format.js";
 import { privacyLine } from "./deployment.js";
 import { refuseFrame, refusesFrame } from "./frame.js";
-import { applyStatic, bootLang, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
-import { addr, contractLink, esc, explorerOf, exportDecimals, txLink, when } from "./journal.js";
+import { applyStatic, bootLang, locale, markLangButtons, persistLang, setLang, t, tk, tn } from "./i18n.js";
+import { addr, contractLink, esc, explorerOf, exportDecimals, txLink, when, whenShort } from "./journal.js";
 import { initMotion, setLoading, transition } from "./motion.js";
 
 const $ = (id) => document.getElementById(id);
@@ -111,9 +111,9 @@ function renderRegistry(h) {
         <td data-label="${col.shares}" class="num">${units(r.shares, decimals.shares)}</td>
         <td data-label="${col.principal}" class="num">${units(r.principal, decimals.stablecoin)} ${esc(cur)}</td>
         <td data-label="${col.rate}" class="num">${esc(rate(r.rate_bps))}</td>
-        <td data-label="${col.opened}">${when(r.opened_at)}</td>
-        <td data-label="${col.maturity}">${when(r.maturity)}</td>
-        <td data-label="${col.closed}">${when(r.closed_at)}${r.interest ? `<div class="small muted">${esc(t("interest {amount} {currency}", { amount: units(r.interest, decimals.stablecoin), currency: cur }))}</div>` : ""}</td>
+        <td data-label="${col.opened}" class="date">${whenShort(r.opened_at, locale())}</td>
+        <td data-label="${col.maturity}" class="date">${whenShort(r.maturity, locale())}</td>
+        <td data-label="${col.closed}" class="date">${whenShort(r.closed_at, locale())}${r.interest ? `<div class="small muted">${esc(t("interest {amount} {currency}", { amount: units(r.interest, decimals.stablecoin), currency: cur }))}</div>` : ""}</td>
         <td data-label="${col.lastTx}">${txLink(explorer, r.last_tx)}</td>
       </tr>`;
     })

@@ -61,9 +61,9 @@ const offer = { id: 1, lender: G, stablecoin: dep.contracts.stablecoin, availabl
 /**
  * Mounts a terminal on a stand-in chain whose repo scan answers `readRepos`
  * and a stand-in DOM; `run` gets `$` and runs the assertions once the
- * positions panel has drawn its table.
+ * positions panel has drawn its table (or `ready` says the screen is ready).
  */
-async function withTerminal(readRepos, run, overrides = {}) {
+async function withTerminal(readRepos, run, overrides = {}, ready = ($) => $("t-pos").innerHTML.includes("<table")) {
   const elements = new Map();
   const $ = (id) => {
     if (!elements.has(id)) elements.set(id, element(id));
@@ -115,7 +115,7 @@ async function withTerminal(readRepos, run, overrides = {}) {
   });
   try {
     terminal.mount();
-    for (let wait = 0; wait < 40 && !$("t-pos").innerHTML.includes("<table"); wait += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    for (let wait = 0; wait < 40 && !ready($); wait += 1) await new Promise((resolve) => setTimeout(resolve, 5));
     await run($, terminal);
   } finally {
     terminal.unmount();
@@ -196,5 +196,45 @@ test("the status band shows an RPC time with decimals: the clock that measures i
       assert.doesNotMatch(band, /cannot show/, "no unshowable note in place of the status");
     },
     { rpcInfo: () => ({ host: "first.example", url: "https://first.example", ms: 147.7, index: 0, count: 2 }) },
+  );
+});
+
+test("the tape says it is reading until the first answer, and that there is no event only once it has one", async () => {
+  let answer;
+  const first = new Promise((resolve) => {
+    answer = resolve;
+  });
+  await withTerminal(
+    async () => ({ repos: [], unreadable: [] }),
+    async ($) => {
+      const before = $("t-tape").innerHTML;
+      assert.match(before, /class="t-loading"/, "a loading line, not an empty state");
+      assert.match(before, /Reading the latest events…/);
+      assert.doesNotMatch(before, /No event yet/, "an unread tape is not an empty one");
+      answer({ events: [], nextLedger: 10 });
+      for (let wait = 0; wait < 40 && !$("t-tape").innerHTML.includes("No event yet"); wait += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+      const after = $("t-tape").innerHTML;
+      assert.match(after, /No event yet in the window the RPC keeps\./);
+      assert.doesNotMatch(after, /t-loading|Reading the latest events/);
+    },
+    { contractEvents: () => first },
+    // The first render happens on mount, before any read answers.
+    () => true,
+  );
+});
+
+test("the tape says it is reading until an answer, a failed one included", async () => {
+  await withTerminal(
+    async () => ({ repos: [], unreadable: [] }),
+    ($) => {
+      assert.match($("t-tape").innerHTML, /Live events unavailable/);
+      assert.match($("t-tape").innerHTML, /No event yet/, "a failed read ends the loading state");
+      assert.doesNotMatch($("t-tape").innerHTML, /t-loading/);
+    },
+    {
+      contractEvents: async () => {
+        throw new Error("events down");
+      },
+    },
   );
 });

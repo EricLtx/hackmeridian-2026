@@ -729,6 +729,11 @@ body:not(.is-loading) .progress::before {
   background: var(--warn-soft);
 }
 
+/* The positions summary, above the cards it adds up; the grid wraps on its own at phone width. */
+.tiles.summary {
+  margin: 0 0 16px;
+}
+
 .tile-label {
   color: var(--muted);
   font-size: var(--fs-xs);
@@ -1086,6 +1091,10 @@ input[aria-invalid="true"] {
 
 .table .num {
   text-align: right;
+}
+
+.table .date {
+  white-space: nowrap;
 }
 
 .table tr:last-child td {
@@ -2612,6 +2621,14 @@ body.face-terminal .top.is-scrolled {
   margin: 0;
   padding: 12px;
   color: var(--muted);
+}
+
+/* A panel not yet answered: the same quiet line, so that a reader never takes an unread panel for an empty one. */
+.t-loading {
+  margin: 0;
+  padding: 12px;
+  color: var(--muted);
+  font-style: italic;
 }
 
 /* Ticket */
