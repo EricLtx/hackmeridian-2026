@@ -4,17 +4,62 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Least privilege by default; jobs widen only what they need.
 permissions:
   contents: read
 
+# One run at a time per pull request: a new push cancels the run of the
+# previous one. A run on main is never cancelled.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Third-party actions are pinned to a full commit SHA (the tag is a comment).
 # Dependabot (.github/dependabot.yml) proposes the bumps as reviewable PRs.
 # No job pushes: every checkout leaves the token out of the git config
 # (persist-credentials: false), so no later step or dependency can reuse it.
+#
+# A pull request runs only the jobs its files need (job `changes`, from
+# .github/scripts/changes.mjs); a push to main, a manual run and any change
+# under .github/ run everything. `ci-ok` is the one check to require: it
+# passes when every job it needs passed or was skipped as not needed.
 jobs:
+  changes:
+    # The areas the change touches, and the critical paths among them.
+    # Anything the script does not understand turns every area on.
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    outputs:
+      rust: ${{ steps.areas.outputs.rust }}
+      web: ${{ steps.areas.outputs.web }}
+      tooling: ${{ steps.areas.outputs.tooling }}
+      docs: ${{ steps.areas.outputs.docs }}
+      ci: ${{ steps.areas.outputs.ci }}
+      critical: ${{ steps.areas.outputs.critical }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the diff needs both ends of the change
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Test the scripts
+        run: node --test ".github/scripts/*.test.mjs"
+      # The commit ids reach the script through the environment, never
+      # through an expression inside the command.
+      - name: Areas touched
+        id: areas
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/scripts/changes.mjs
+
   contracts:
+    needs: changes
+    if: needs.changes.outputs.rust != 'false'
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -53,6 +98,8 @@ jobs:
     # fails with 1 KiB, so a change that deepens the stack fails here long
     # before it nears the shipped margin. A target directory of its own keeps
     # this WASM apart from the release one.
+    needs: changes
+    if: needs.changes.outputs.rust != 'false'
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/target-canary
@@ -81,6 +128,8 @@ jobs:
           NIGHT_WINDOW_TEST_WASM: "1"
 
   web:
+    needs: changes
+    if: needs.changes.outputs.web != 'false'
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     defaults:
       run:
@@ -112,6 +161,8 @@ jobs:
     # The monitor's detectors and actions, the demo library's checks before
     # signing, and the indexer: offline tests on stubbed chain reads, no key.
     # The testnet scripts themselves (setup, run, the rehearsal) run locally.
+    needs: changes
+    if: needs.changes.outputs.tooling != 'false'
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -142,6 +193,8 @@ jobs:
         run: npm test
 
   deny:
+    needs: changes
+    if: needs.changes.outputs.rust != 'false'
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -153,6 +206,8 @@ jobs:
           command: check
 
   audit:
+    needs: changes
+    if: needs.changes.outputs.rust != 'false'
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     permissions:
       contents: read
@@ -167,10 +222,76 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  public-guard:
+    # The working documents under private/ and references/ are git-ignored
+    # (AGENTS.md, "What stays out"): a path tracked there fails the run.
+    # Paths only; the content of tracked files is reviewed by people.
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Nothing tracked under private/ or references/
+        run: |
+          files=$(git ls-files -- private references)
+          if [ -n "$files" ]; then
+            echo "::error::tracked files under private/ or references/"
+            echo "$files"
+            exit 1
+          fi
+          echo "none"
+
+  critical-review:
+    # A change to a path that holds funds, signatures or the review rules
+    # (.github/scripts/critical.mjs, .github/CODEOWNERS) gets its review
+    # checklist: in the job summary and as a warning on every run, and on a
+    # pull request from this repository as one comment, kept current, with
+    # the label `critical-path`. It blocks nobody and is not part of ci-ok;
+    # a fork's pull request cannot be commented on with a read-only token.
+    needs: changes
+    if: needs.changes.outputs.critical != '[]'
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: The checklist for the areas touched
+        env:
+          AREAS: ${{ needs.changes.outputs.critical }}
+        run: |
+          node .github/scripts/critical.mjs render "$AREAS" > "$RUNNER_TEMP/checklist.md"
+          cat "$RUNNER_TEMP/checklist.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::critical paths touched: $AREAS"
+      # Pull-request data reaches the shell through the environment only.
+      - name: Post it once on the pull request, and keep it current
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          id=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- critical-path-review -->"))) | .id' | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@"$RUNNER_TEMP/checklist.md" > /dev/null
+          else
+            gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/checklist.md"
+          fi
+          gh api -X POST "repos/$REPO/issues/$PR/labels" -f 'labels[]=critical-path' > /dev/null
+
   links:
     # Internal links of the documentation (README, docs/, demo/, web/). External
     # URLs are not fetched: the check is deterministic and never fails on a
-    # third-party outage. Advisory until the end of the October 2026 freeze.
+    # third-party outage. Advisory until the end of the October 2026 freeze,
+    # so not part of ci-ok.
     runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
     continue-on-error: true
     steps:
@@ -182,3 +303,25 @@ jobs:
         with:
           args: --offline --no-progress --include-fragments './README.md' './SECURITY.md' './AGENTS.md' './docs/**/*.md' './demo/README.md' './web/README.md'
           fail: true
+
+  ci-ok:
+    # The one check to require: green when every job above that the change
+    # needed passed, and the others were skipped. A failed or cancelled job
+    # anywhere in the list fails it.
+    needs: [changes, contracts, wasm-canary, web, tooling, deny, audit, public-guard]
+    if: always()
+    runs-on: ubuntu-24.04 # pinned: ubuntu-latest moves to Ubuntu 26 from 19 October 2026
+    steps:
+      - name: Every needed job passed or was skipped
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.RESULTS);
+            const bad = [];
+            for (const [job, { result }] of Object.entries(needs)) {
+              console.log(`${job}: ${result}`);
+              if (result === "failure" || result === "cancelled") bad.push(job);
+            }
+            if (bad.length) { console.log(`::error::${bad.join(", ")}`); process.exit(1); }
+          '

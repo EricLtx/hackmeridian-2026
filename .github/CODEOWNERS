@@ -1,0 +1,34 @@
+# The paths that hold funds, signatures or the review rules, and who reviews
+# a change to them. Review on these paths becomes enforceable once a second
+# maintainer has write access and a ruleset requires code-owner review. The
+# same paths drive the critical-path checklist (.github/scripts/critical.mjs).
+
+# The contract and the Cargo workspace
+/contracts/ @EricLtx
+/Cargo.toml @EricLtx
+/Cargo.lock @EricLtx
+/rust-toolchain.toml @EricLtx
+/deny.toml @EricLtx
+
+# The interface's signing path and its dependencies
+/web/src/chain.js @EricLtx
+/web/src/wallet.js @EricLtx
+/web/src/deployment.js @EricLtx
+/web/public/deployment.testnet.json @EricLtx
+/web/package.json @EricLtx
+/web/package-lock.json @EricLtx
+/web/vite.config.js @EricLtx
+
+# The pages' content security policy
+/web/*.html @EricLtx
+
+# The operator's scripts, which sign with the demo keys
+/demo/*.mjs @EricLtx
+
+# The workflows, the review rules and what the repository tracks
+/.github/ @EricLtx
+/.gitignore @EricLtx
+/.claude/ @EricLtx
+/AGENTS.md @EricLtx
+/SECURITY.md @EricLtx
+/docs/security.md @EricLtx
